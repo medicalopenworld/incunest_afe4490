@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.18
+# incunest_afe4490 — Specification v0.19
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -124,6 +124,37 @@ void setTIAGain(AFE4490TIAGain gain);
 void setTIACF(AFE4490TIACF cf);
 void setStage2Gain(AFE4490Stage2Gain gain);
 ```
+
+### 2.3b Configuration readback
+
+`AFE4490Config getConfig()` returns a snapshot of all current configuration parameters.
+
+```cpp
+struct AFE4490Config {
+    uint16_t          sample_rate_hz;    // ADC sample rate [Hz]
+    uint8_t           num_averages;      // ADC hardware averages (1 = no averaging)
+    float             led1_current_mA;   // IR LED drive current [mA]
+    float             led2_current_mA;   // RED LED drive current [mA]
+    uint8_t           led_range_mA;      // LED full-scale range: 75 or 150 mA
+    AFE4490TIAGain    tia_gain;          // TIA transimpedance gain (RF)
+    AFE4490TIACF      tia_cf;            // TIA feedback capacitance
+    AFE4490Stage2Gain stage2_gain;       // Stage 2 amplifier gain
+    AFE4490Channel    ppg_channel;       // PPG display channel selection
+    AFE4490Filter     filter_type;       // PPG display filter type
+    float             filter_f_low_hz;   // PPG display bandpass lower cutoff [Hz]
+    float             filter_f_high_hz;  // PPG display bandpass upper cutoff [Hz]
+    float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
+    float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
+    float             hr3_f_high_hz;     // HR3 anti-aliasing LP cutoff [Hz]
+    float             spo2_a;            // SpO2 = a - b*R (calibration coefficient)
+    float             spo2_b;
+};
+AFE4490Config getConfig();
+```
+
+**Thread safety:** takes `_spi_mutex` (for hardware fields) and `_state_mutex` (for signal/filter fields) if `_initialized == true`. Safe before and after `begin()`.
+
+**Use case:** allows the host application (e.g. `pulsenest_lab.py`) to read back the active chip configuration for display, logging, or verification.
 
 ### 2.4 Signal and filter configuration
 ```cpp
@@ -640,6 +671,11 @@ Requires C++17 and a standard compiler (g++ ≥ 10, MSVC ≥ 2019, clang ≥ 11)
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.19   | Configuration readback: `AFE4490Config` struct + `getConfig()` method.      |
+|         | Returns a thread-safe snapshot of all runtime-configurable parameters       |
+|         | (sample rate, averages, LED currents, LED range, TIA gain/CF, stage 2 gain,|
+|         | PPG channel, filter type/cutoffs, HR2/HR3 filter cutoffs, SpO2 a/b).       |
+|         | Takes `_spi_mutex` + `_state_mutex` when initialized; safe before `begin()`.|
 | v0.18   | HR2_SQI: unbiased normalised autocorrelation. Previous biased estimator     |
 |         | systematically capped SQI at (N−τ)/N ≈ 0.875 at 60 BPM (τ=50, N=400)     |
 |         | even for a perfectly clean signal. Fix: divide by `acorr0·(N−τ)/N`         |

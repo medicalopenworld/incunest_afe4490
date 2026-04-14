@@ -1,7 +1,7 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.18 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.19 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
@@ -116,6 +116,28 @@ enum class AFE4490Stage2Gain {
     GAIN_12DB
 };
 
+// ── Chip configuration snapshot ───────────────────────────────────────────────
+// Returned by getConfig(). Groups all runtime-configurable parameters.
+struct AFE4490Config {
+    uint16_t          sample_rate_hz;    // ADC sample rate [Hz]
+    uint8_t           num_averages;      // ADC hardware averages (1 = no averaging)
+    float             led1_current_mA;   // IR LED drive current [mA]
+    float             led2_current_mA;   // RED LED drive current [mA]
+    uint8_t           led_range_mA;      // LED full-scale range: 75 or 150 mA
+    AFE4490TIAGain    tia_gain;          // TIA transimpedance gain (RF)
+    AFE4490TIACF      tia_cf;            // TIA feedback capacitance
+    AFE4490Stage2Gain stage2_gain;       // Stage 2 amplifier gain
+    AFE4490Channel    ppg_channel;       // PPG display channel selection
+    AFE4490Filter     filter_type;       // PPG display filter type
+    float             filter_f_low_hz;   // PPG display bandpass lower cutoff [Hz]
+    float             filter_f_high_hz;  // PPG display bandpass upper cutoff [Hz]
+    float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
+    float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
+    float             hr3_f_high_hz;     // HR3 anti-aliasing LP cutoff [Hz]
+    float             spo2_a;            // SpO2 calibration: SpO2 = a - b*R
+    float             spo2_b;
+};
+
 // ── INCUNEST_AFE4490 class ─────────────────────────────────────────────────────────
 class INCUNEST_AFE4490 {
 public:
@@ -164,6 +186,11 @@ public:
     // SpO2 calibration coefficients (SpO2 = a - b*R).
     // Defaults are experimentally calibrated for UpnMed U401-D(01AS-F), Nellcor Non-Oximax type.
     void setSpO2Coefficients(float a, float b);
+
+    // Returns a snapshot of all current chip and algorithm configuration parameters.
+    // Thread-safe: takes the relevant mutexes if the library is initialized.
+    // Callable before or after begin().
+    AFE4490Config getConfig();
 
     // ISR entry point (must be public for static trampoline)
 #ifndef INCUNEST_OFFLINE

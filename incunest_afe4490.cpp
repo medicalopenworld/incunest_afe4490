@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.18 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.19 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
@@ -505,6 +505,46 @@ void INCUNEST_AFE4490::setSpO2Coefficients(float a, float b) {
     _spo2_a = a;
     _spo2_b = b;
     if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+// ── getConfig() ───────────────────────────────────────────────────────────────
+AFE4490Config INCUNEST_AFE4490::getConfig() {
+    AFE4490Config cfg;
+
+    // SPI-mutex fields: sample rate, averages, LED currents, analog front-end settings
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+#endif
+    cfg.sample_rate_hz  = _sample_rate_hz;
+    cfg.num_averages    = _num_averages;
+    cfg.led1_current_mA = _led1_current_mA;
+    cfg.led2_current_mA = _led2_current_mA;
+    cfg.led_range_mA    = _led_range_mA;
+    cfg.tia_gain        = _tia_gain;
+    cfg.tia_cf          = _tia_cf;
+    cfg.stage2_gain     = _stage2_gain;
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreGive(_spi_mutex);
+#endif
+
+    // state-mutex fields: PPG channel, filters, SpO2 calibration
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+#endif
+    cfg.ppg_channel      = _ppg_channel;
+    cfg.filter_type      = _filter_type;
+    cfg.filter_f_low_hz  = _ppg_bpf.f_low;
+    cfg.filter_f_high_hz = _ppg_bpf.f_high;
+    cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
+    cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
+    cfg.hr3_f_high_hz    = _hr3_lpf.f_high;
+    cfg.spo2_a           = _spo2_a;
+    cfg.spo2_b           = _spo2_b;
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreGive(_state_mutex);
+#endif
+
+    return cfg;
 }
 
 // ── getData() ─────────────────────────────────────────────────────────────────
