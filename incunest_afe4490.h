@@ -5,6 +5,8 @@
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
+#define INCUNEST_AFE4490_VERSION "0.19"
+
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
     #define UNIT_TEST
