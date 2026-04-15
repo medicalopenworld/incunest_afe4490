@@ -174,7 +174,29 @@ public:
     // HR3 low-pass filter cutoff (default 10 Hz, anti-aliasing before decimation)
     void setHR3Filter(float f_high_hz = 10.0f);
 
-    // Data retrieval — non-blocking; returns true if data was available
+    /**
+     * @brief Retrieves the next available sample from the internal queue (non-blocking).
+     *
+     * The library samples internally at the configured rate (default 500 Hz) regardless
+     * of how often this function is called.
+     *
+     * The internal queue holds up to INCUNEST_AFE4490_QUEUE_SIZE (10) samples. When full,
+     * the oldest sample is automatically discarded to make room for the newest.
+     *
+     * Behaviour by consumption rate:
+     *  - **> 500 Hz**: most calls return false — no data available yet.
+     *  - **≈ 500 Hz**: ideal — queue stays near-empty, samples consumed in order, no discards.
+     *  - **Occasional jitter**: queue buffers up to 10 samples without discards.
+     *  - **Consistently < 500 Hz**: queue stays full in steady state; samples are returned in
+     *    FIFO order with a fixed latency of 10 × T_sample (20 ms at 500 Hz). Intermediate
+     *    samples are discarded (e.g. at 100 Hz, 1 in every 5 samples is received).
+     *
+     * The internal algorithms (HR1, HR2, HR3, SpO2) process every sample at the configured
+     * rate regardless of consumption rate — call frequency does not affect calculation quality.
+     *
+     * @param data  Output: filled with the oldest queued sample if available.
+     * @return true if data was available, false if the queue was empty.
+     */
 #ifndef INCUNEST_OFFLINE
     bool getData(AFE4490Data& data);
 #endif
@@ -230,6 +252,11 @@ private:
     void _recalc_biquad(BiquadFilter& filt);
     // Recomputes Butterworth low-pass biquad coefficients into filt (uses filt.f_high as cutoff)
     void _recalc_biquad_lp(BiquadFilter& filt);
+    // Returns TIA settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window)
+    uint32_t _compute_settle_margin() const;
+    // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for _tia_gain.
+    // Called automatically by _recalc_rate_params() and setTIAGain(); setTIACF() overrides this.
+    void _recalc_tia_cf();
 
     // Chip init
 #ifndef INCUNEST_OFFLINE

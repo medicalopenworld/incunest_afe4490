@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.19
+# incunest_afe4490 — Specification v0.20
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -103,7 +103,7 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 | LED2 current   | 11.7 mA                       |
 | LED range      | 150 mA (TX_REF = 0.75V)       |
 | TIA gain (RF)  | 500 kΩ                        |
-| TIA CF         | 5 pF                          |
+| TIA CF         | auto (see §7.2): 20 pF @ 500 Hz / RF_500K |
 | Stage 2 gain   | disabled                      |
 | ENSEPGAIN      | 0 (single gain)               |
 | NUMAV          | 7 (8 averages, max 9 at 500Hz)|
@@ -120,8 +120,8 @@ void setNumAverages(uint8_t num);       // num = number of samples to average: 1
 void setLED1Current(float mA);          // depends on setLEDRange()
 void setLED2Current(float mA);          // depends on setLEDRange()
 void setLEDRange(uint8_t mA);           // 75 or 150 mA (with TX_REF=0.75V default)
-void setTIAGain(AFE4490TIAGain gain);
-void setTIACF(AFE4490TIACF cf);
+void setTIAGain(AFE4490TIAGain gain);   // auto-recalculates CF (see §7.2); setTIACF() can override
+void setTIACF(AFE4490TIACF cf);         // manual override; overridden again if setTIAGain()/setSampleRate() is called
 void setStage2Gain(AFE4490Stage2Gain gain);
 ```
 
@@ -172,6 +172,19 @@ bool getData(AFE4490Data& data);
 // Returns true and fills data if an item is available in the queue.
 // Returns false immediately if the queue is empty (non-blocking).
 ```
+
+The library samples internally at the configured rate (default 500 Hz) regardless of how often `getData()` is called.
+
+The internal queue holds up to 10 samples (`INCUNEST_AFE4490_QUEUE_SIZE`). When full, the oldest sample is automatically discarded to make room for the newest.
+
+| Consumption rate | Behaviour |
+|---|---|
+| > 500 Hz | Most calls return `false`. No data available yet. |
+| ≈ 500 Hz | Ideal. Queue stays empty or holds 1 item. Samples consumed in order, no discards, negligible latency. |
+| Occasional jitter | Queue buffers up to 10 samples without discards. Consumer drains them in subsequent calls. |
+| Consistently < 500 Hz | Queue stays full in steady state. Samples returned in FIFO order with a **fixed latency of 10 × T_sample = 20 ms**. Intermediate samples are discarded: e.g. at 100 Hz, 1 in every 5 samples is received. |
+
+> The internal algorithms (HR1, HR2, HR3, SpO2) process every sample at 500 Hz regardless of the consumption rate. The call frequency of `getData()` does not affect calculation quality — only how many result samples the user receives and with what latency.
 
 ### 2.6 Shutdown
 ```cpp
@@ -463,6 +476,46 @@ SNR_improvement = sqrt(num)    →  num=8: ×2.83,  num=10: ×3.16
 
 **Default:** `num = 8` (NUMAV=7). Balance between SNR and latency at 500Hz.
 
+### 7.2 Auto-CF — TIA feedback capacitance selection
+
+The TIA RC time constant `τ = RF × CF` determines how long the output takes to settle after the LED turns on. The ADC sampling window opens `tia_margin` counts after LED turn-on. For reliable readings the TIA must be settled to < 0.7% error, which requires ≥ 5τ:
+
+```
+5 × RF × CF ≤ settle_time_s
+CF ≤ settle_time_s / (5 × RF)
+```
+
+The settle margin is computed as:
+```
+q            = afeclk / (4 × Fs)          [LED-on window in counts]
+tia_margin   = max(50, floor(q × 0.10))   [10% of LED window, floor 12.5 µs]
+settle_time_s = tia_margin / afeclk
+```
+
+This margin is used both by `_apply_timing_regs()` (to set LED2STC/LED1STC) and by `_recalc_tia_cf()` (to select CF). Both functions always use the same value — they are in sync.
+
+**`_recalc_tia_cf()`** selects the **largest** `AFE4490TIACF` value whose physical capacitance satisfies the constraint. It is called automatically from `_recalc_rate_params()` (triggered by `setSampleRate()` and constructor) and from `setTIAGain()`. `setTIACF()` can override afterwards.
+
+**CF selection table at 500 Hz** (settle = 200 counts = 50 µs):
+
+| RF (AFE4490TIAGain) | RF (Ω) | CF_max (pF) | Auto CF |
+|---|---|---|---|
+| RF_10K  | 10 kΩ  | 1000 | CF_155P |
+| RF_25K  | 25 kΩ  | 400  | CF_155P |
+| RF_50K  | 50 kΩ  | 200  | CF_155P |
+| RF_100K | 100 kΩ | 100  | CF_55P  |
+| RF_250K | 250 kΩ | 40   | CF_30P  |
+| RF_500K | 500 kΩ | 20   | CF_20P  |
+| RF_1M   | 1 MΩ   | 10   | CF_10P  |
+
+At lower Fs the settle window is larger and CF increases further (e.g. at 100 Hz, settle = 250 µs → RF_500K gets CF_55P).
+
+**TIA pole frequency** (for reference, not used in the calculation):
+```
+f_pole = 1 / (2π × RF × CF)
+```
+At 500 Hz / RF_500K / CF_20P: f_pole ≈ 15.9 kHz — well above the PPG signal band (0.5–20 Hz).
+
 ---
 
 ## 8. Validation tooling — pulsenest_lab.py
@@ -671,6 +724,12 @@ Requires C++17 and a standard compiler (g++ ≥ 10, MSVC ≥ 2019, clang ≥ 11)
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.20   | Auto-CF: `_recalc_tia_cf()` selects the largest `AFE4490TIACF` that settles  |
+|         | within the adaptive TIA margin (10% of LED-on window, floor 12.5 µs).       |
+|         | `_compute_settle_margin()` shared by timing regs and auto-CF — always in     |
+|         | sync. Called from `_recalc_rate_params()` and `setTIAGain()`. `setTIACF()`  |
+|         | manual override still available. Default at 500 Hz / RF_500K: CF_20P        |
+|         | (was CF_5P). Spec §7.2 added.                                               |
 | v0.19   | Configuration readback: `AFE4490Config` struct + `getConfig()` method.      |
 |         | Returns a thread-safe snapshot of all runtime-configurable parameters       |
 |         | (sample rate, averages, LED currents, LED range, TIA gain/CF, stage 2 gain,|
@@ -787,7 +846,7 @@ This section documents the exact value of each AFE4490 register written by the l
 | PRPCOUNT | 7999 | 7999 (t29) | 7999 | **7999** | PRF=500Hz: (4,000,000/500)−1=7999 |
 | LED2LEDSTC | 6000 | 6000 (t3) | 6000 | **6000** | LED2 starts exactly at the beginning of its phase (75% of period) |
 | LED2LEDENDC | 7599 | 7999 (t4) | 7999 | **7999** | 25% duty cycle: 2000 counts = 500µs → maximises photons |
-| LED2STC | 6080 | 6050 (t1) | 6000 | **6050** | 50 counts (12.5µs) margin for TIA settling. TI EVM uses 80 (excessive at 500Hz); Protocentral uses 0 (risky) |
+| LED2STC | 6080 | 6050 (t1) | 6000 | **6050** | `3q + tia_margin` — adaptive TIA settle margin (§7.2). At 500 Hz: 200 counts (50 µs). TI EVM uses 80 (fixed, insufficient at high gain); Protocentral uses 0 (risky) |
 | LED2ENDC | 7598 | 7998 (t2) | 7998 | **7998** | Closes 2 counts before end of phase |
 | ALED2STC | 80 | 200 (t5) | 0 | **200** | 200 counts (50 µs) after LED2 OFF — timing margin; ambient ripple confirmed as optical/electrical crosstalk (not timing) |
 | ALED2ENDC | 1598 | 1998 (t6) | 1998 | **1998** | Uses full window except last 2 counts |
@@ -817,7 +876,7 @@ This section documents the exact value of each AFE4490 register written by the l
 **Notes on the Table 2 formula:**
 - `PRPCOUNT = (AFECLK / PRF) − 1`
 - 25% duty cycle: LED window = `(PRPCOUNT+1) / 4` counts
-- TIA margin: 50 fixed counts regardless of PRF
+- TIA margin: `max(50, floor(q × 0.10))` counts — 10% of LED-on window, floor 12.5 µs. Used both by timing registers and auto-CF (§7.2)
 - ADC reset: 3 fixed counts. For 6 counts (zero crosstalk), set CONVST to reset_end+1
 - TI EVM formula uses 20% duty cycle and 80-count margin → **not valid at 500Hz** (ALED1CONVEND overflows)
 
@@ -830,11 +889,11 @@ This section documents the exact value of each AFE4490 register written by the l
 | **TIAGAIN** | 0x00C006 | — | 0x000000 | **0x000000** | Minimal config: RF=500kΩ, CF=5pF, Stage2 off, ENSEPGAIN=0 |
 | → ENSEPGAIN | 1 | — | 0 | **0** | With 0, both channels use TIAGAIN for the TIA. Simplifies configuration. Enable if independent gain per channel is needed |
 | → Stage2 LED1 | EN, 0 dB | — | disabled | **disabled** | RF=500kΩ provides sufficient gain for typical PPG. Stage2 at 0dB adds no useful gain. Configurable via setter |
-| → CF LED1 | 5 pF | — | 5 pF | **5 pF** | Datasheet minimum → maximum TIA bandwidth. Adjust if instability occurs |
+| → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Default at 500 Hz / RF_500K: 20 pF |
 | → RF LED1 | 1 MΩ | — | 500 kΩ | **500 kΩ** | Validated by Protocentral on real hardware. EVM's 1MΩ risks saturation. Configurable via setTIAGain() |
 | **TIA_AMB_GAIN** | 0x004006 | — | 0x000001 | **0x000000** | With ENSEPGAIN=0, the RF of this register does not affect the main TIA. Relevant for FLTRCNRSEL, AMBDAC and Stage2 |
 | → RF LED2/amb | 1 MΩ | — | 250 kΩ | **500 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
-| → CF LED2/amb | 5 pF | — | 5 pF | **5 pF** | Same criterion as CF LED1 |
+| → CF LED2/amb | 5 pF | — | 5 pF | **auto (§7.2)** | Same as CF LED1 (ENSEPGAIN=0 shares config) |
 | → Stage2 LED2 | EN, 0 dB | — | disabled | **disabled** | Same criterion as Stage2 LED1 |
 | → FLTRCNRSEL | 500 Hz | — | 500 Hz | **500 Hz** | Matches PRF. 1000 Hz option only makes sense if PRF is raised |
 | → AMBDAC | 0 µA | — | 0 µA | **0 µA** | Ambient cancellation handled in hardware (LED1−ALED1VAL, LED2−ALED2VAL). AMBDAC only needed if ambient light saturates TIA before subtraction. Exposable via setter |

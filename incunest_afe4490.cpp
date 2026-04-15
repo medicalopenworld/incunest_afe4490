@@ -167,13 +167,25 @@ namespace {
     // CONTROL1 bits
     constexpr uint32_t ctrl1_timeren    = 0x000100UL;
 
+    // AFE clock frequency
+    constexpr uint32_t afeclk = 4000000UL;  // 4 MHz → 1 count = 0.25 µs
+
     // TIAGAIN / TIA_AMB_GAIN: RF bits [2:0]
     // enum order: RF_10K=0..RF_1M=6 → register codes
     constexpr uint32_t rf_code[7] = { 5, 4, 3, 2, 1, 0, 6 };
+    // Physical RF values (Ω) indexed by AFE4490TIAGain
+    constexpr float tia_rf_ohm[7] = { 10e3f, 25e3f, 50e3f, 100e3f, 250e3f, 500e3f, 1e6f };
 
     // TIAGAIN / TIA_AMB_GAIN: CF bits [7:3] (5 pF base + parallel caps)
     // enum order: CF_5P=0..CF_155P=5 → register bits
     constexpr uint32_t cf_code[6] = { 0x000, 0x008, 0x010, 0x020, 0x040, 0x080 };
+    // Physical CF values (pF) indexed by AFE4490TIACF
+    constexpr float tia_cf_pF[6]  = { 5.0f, 10.0f, 20.0f, 30.0f, 55.0f, 155.0f };
+
+    // Auto-CF settling parameters
+    constexpr float    tia_settle_fraction = 0.10f;  // 10% of LED-on window reserved for TIA settling
+    constexpr uint32_t tia_settle_min      = 50;     // floor: 12.5 µs @ 4 MHz (covers RF_500K/CF_5P at high Fs)
+    constexpr float    tia_n_tau           = 5.0f;   // 5τ → <0.7% settling error
 
     // TIAGAIN: STG2GAIN bits [10:8] + STAGE2EN bit[14]
     // enum order: GAIN_0DB=0..GAIN_12DB=4 → register bits (0 = disabled, rest = enabled)
@@ -421,6 +433,7 @@ void INCUNEST_AFE4490::setTIAGain(AFE4490TIAGain gain) {
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
     _tia_gain = gain;
+    _recalc_tia_cf();   // update CF for new RF (setTIACF() can override afterwards)
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -682,9 +695,8 @@ void INCUNEST_AFE4490::_chip_init() {
 
 void INCUNEST_AFE4490::_apply_timing_regs() {
     // Datasheet Table 2 formulas, PRF = _sample_rate_hz
-    // AFECLK = 4 MHz → 1 count = 0.25 µs
-    const uint32_t afeclk          = 4000000UL;
-    const uint32_t tia_margin      = 50;   // counts (12.5 µs) — TIA settling after LED ON
+    // AFECLK = 4 MHz → 1 count = 0.25 µs  (afeclk is in the anonymous namespace)
+    const uint32_t tia_margin = _compute_settle_margin();  // TIA settling after LED ON
     const uint32_t ambient_margin  = 200;  // counts (50 µs) — LED OFF decay before ambient sampling
     const uint32_t adc_reset       = 3;    // counts (0.75 µs → -60 dB crosstalk)
 
@@ -777,6 +789,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _recalc_biquad(_ppg_bpf);
     _recalc_biquad(_hr2_bpf);
     _recalc_biquad_lp(_hr3_lpf);
+    _recalc_tia_cf();
 }
 
 void INCUNEST_AFE4490::_recalc_biquad_lp(BiquadFilter& filt) {
@@ -793,6 +806,30 @@ void INCUNEST_AFE4490::_recalc_biquad_lp(BiquadFilter& filt) {
     filt.b2    =  filt.b0;
     filt.a1    =  2.0f * (Ohm2 - 1.0f) / d;
     filt.a2    = (1.0f - sqrt2 * Ohm + Ohm2) / d;
+}
+
+uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
+    // Settle window = max(tia_settle_min, tia_settle_fraction × LED-on window)
+    // LED-on window = quarter period = afeclk / (4 × _sample_rate_hz) counts
+    uint32_t q      = (afeclk / _sample_rate_hz) / 4u;
+    uint32_t margin = (uint32_t)((float)q * tia_settle_fraction);
+    return (margin < tia_settle_min) ? tia_settle_min : margin;
+}
+
+void INCUNEST_AFE4490::_recalc_tia_cf() {
+    // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF)
+    // Select the largest CF enum whose physical value (pF) satisfies the constraint.
+    float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
+    float tau_max   = settle_s / tia_n_tau;
+    float cf_max_pF = (tau_max / tia_rf_ohm[(int)_tia_gain]) * 1e12f;
+
+    _tia_cf = AFE4490TIACF::CF_5P;   // minimum fallback
+    for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
+        if (tia_cf_pF[i] <= cf_max_pF) {
+            _tia_cf = (AFE4490TIACF)i;
+            break;
+        }
+    }
 }
 
 void INCUNEST_AFE4490::_recalc_biquad(BiquadFilter& filt) {
