@@ -213,6 +213,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _drdy_sem(nullptr), _spi_mutex(nullptr), _state_mutex(nullptr),
       _data_queue(nullptr), _task_handle(nullptr),
       _initialized(false),
+      _diag_active(false),
       _hr2_calc_sem(nullptr), _hr3_calc_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _hr2_computing(false), _hr3_computing(false),
@@ -705,16 +706,19 @@ uint32_t INCUNEST_AFE4490::_read_reg(uint8_t addr) {
 
 uint32_t INCUNEST_AFE4490::runDiagnostics() {
     if (!_initialized || !_spi_mutex) return 0;
-    // Hold _spi_mutex for the full diagnostic window: the data task writes
-    // CONTROL0=0 after every ADC read, which would clear DIAG_EN and abort
-    // the diagnostic. ~10 ms data gap is acceptable for a one-shot command.
-    xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+    // Signal _task_body to skip reads during the diagnostic window.
+    // Mutex is held only for brief SPI transactions, not for the full 10 ms sleep.
+    _diag_active = true;
+    xSemaphoreTake(_spi_mutex, portMAX_DELAY);  // wait for any in-progress ADC read to finish
     _write_reg(REG_CONTROL0, 0x000004UL);       // DIAG_EN=1, SPI_READ=0
+    xSemaphoreGive(_spi_mutex);                 // release — _task_body skips reads while _diag_active
     vTaskDelay(pdMS_TO_TICKS(10));              // t_DIAG = 8 ms (fast) + 2 ms margin
+    xSemaphoreTake(_spi_mutex, portMAX_DELAY);
     _write_reg(REG_CONTROL0, ctrl0_spi_read);   // SPI_READ=1 to read DIAG register
     uint32_t result = _read_spi_raw(REG_DIAG);
     _write_reg(REG_CONTROL0, 0x000000UL);       // restore CONTROL0 to idle
     xSemaphoreGive(_spi_mutex);
+    _diag_active = false;                       // resume normal sampling
     return result;
 }
 #endif
@@ -920,6 +924,18 @@ void INCUNEST_AFE4490::_task_body() {
         // Block until DRDY fires (100 ms watchdog — warns if chip stops outputting)
         if (xSemaphoreTake(_drdy_sem, pdMS_TO_TICKS(100)) != pdTRUE) {
             ESP_LOGW(TAG, "DRDY timeout: no sample in 100 ms");
+            continue;
+        }
+
+        if (_diag_active) {
+            // Repeat last valid sample to preserve temporal continuity for HR and filter algorithms
+            xSemaphoreTake(_state_mutex, portMAX_DELAY);
+            if (xQueueSend(_data_queue, &_current_data, 0) != pdTRUE) {
+                AFE4490Data dummy;
+                xQueueReceive(_data_queue, &dummy, 0);
+                xQueueSend(_data_queue, &_current_data, 0);
+            }
+            xSemaphoreGive(_state_mutex);
             continue;
         }
 

@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.20"
+#define INCUNEST_AFE4490_VERSION "0.22"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -358,6 +358,7 @@ private:
     QueueHandle_t     _data_queue;
     TaskHandle_t      _task_handle;
     bool              _initialized;
+    volatile bool     _diag_active;  // true while runDiagnostics() holds DIAG_EN; _task_body() skips reads
 
     // ── HR2/HR3 async computation tasks ──────────────────────────────────────
     // Task A (_task_body) runs the fast per-sample path and signals Task B/C when

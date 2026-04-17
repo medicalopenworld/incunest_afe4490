@@ -195,15 +195,14 @@ uint32_t runDiagnostics();
 Runs the AFE4490 hardware self-test sequence (datasheet section 8.4.3.3, Table 3).
 
 **Sequence:**
-1. Acquires `_spi_mutex` (held for the full diagnostic window).
-2. Writes `CONTROL0 = 0x000004` (DIAG_EN=1, SPI_READ=0) to start the diagnostic.
-3. Waits 10 ms (chip requires 8 ms in fast mode; +2 ms margin).
-4. Sets `CONTROL0 = ctrl0_spi_read` (SPI_READ=1) to enable register readback.
-5. Reads `REG_DIAG` (0x30) — 24-bit value with 13 diagnostic flags.
-6. Restores `CONTROL0 = 0x000000` and releases `_spi_mutex`.
+1. Sets `_diag_active = true` — signals `_task_body()` to skip ADC reads.
+2. Acquires `_spi_mutex` briefly; writes `CONTROL0 = 0x000004` (DIAG_EN=1, SPI_READ=0); releases `_spi_mutex`.
+3. Waits 10 ms (chip requires 8 ms in fast mode; +2 ms margin). `_task_body()` consumes each DRDY sem, skips the SPI read, and pushes the last valid `_current_data` to the queue to preserve temporal continuity.
+4. Acquires `_spi_mutex`; sets `CONTROL0 = ctrl0_spi_read` (SPI_READ=1); reads `REG_DIAG` (0x30); restores `CONTROL0 = 0x000000`; releases `_spi_mutex`.
+5. Sets `_diag_active = false` — normal sampling resumes on the next DRDY.
 
-**Why the mutex must be held for the full window:**
-The internal data task writes `CONTROL0=0` after every ADC burst read. Without the mutex, it would clear DIAG_EN mid-sequence and abort the diagnostic. The ~10 ms data gap is acceptable for a one-shot command.
+**`_diag_active` flag — design rationale:**
+`_task_body()` writes `CONTROL0=0` after every ADC burst read. Without the flag, it would clear DIAG_EN mid-sequence and abort the diagnostic. The flag avoids holding `_spi_mutex` for the full 10 ms sleep (which is bad FreeRTOS practice and causes priority inversion). Instead, `_task_body()` checks `_diag_active` after `xSemaphoreTake(_drdy_sem)` and, when set, repeats the last valid `_current_data` into the queue (under `_state_mutex`) before looping. Repeating the last sample rather than dropping it preserves temporal equi-spacing, which is required by the autocorrelation (HR2) and FFT (HR3) algorithms and reduces IIR filter discontinuity at resumption. The chip physically cannot produce valid ADC data during diagnostics; the ~10 ms window (≈5 samples at 500 Hz) is unavoidable but transparent to the consumer.
 
 **Return value:** raw 24-bit `DIAG` register. Returns `0` if not initialized.
 
@@ -1086,6 +1085,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.22   | `runDiagnostics()` redesigned: `_diag_active` flag replaces long mutex hold. |
+|         | `_spi_mutex` held only for brief SPI transactions, eliminating priority       |
+|         | inversion. During the ~10 ms diagnostic window, `_task_body()` repeats the   |
+|         | last valid sample into the queue (under `_state_mutex`) on each DRDY instead  |
+|         | of dropping it, preserving temporal equi-spacing for HR2/HR3 and reducing     |
+|         | IIR filter discontinuity at resumption. Spec §2.5b updated.                  |
 | v0.21   | Parameters Reference added (§10): consolidated catalogue of all parameters  |
 |         | that influence library outputs, organised by layer: AFE hardware config     |
 |         | (§10.1), pre-processing (§10.2), SpO2 (§10.3), HR1 (§10.4), HR2 (§10.5),  |
