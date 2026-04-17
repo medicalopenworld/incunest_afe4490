@@ -47,6 +47,10 @@ lib_deps =
 See [`incunest_afe4490_spec.md`](incunest_afe4490_spec.md) for the full design specification.
 The spec and the library are versioned together (same semantic version).
 
+## References
+
+- [AFE4490 Datasheet (Texas Instruments)](https://www.ti.com/lit/ds/symlink/afe4490.pdf) — primary hardware reference for register map, timing formulas, and electrical characteristics.
+
 ## License
 
 Proprietary — Medical Open World. All rights reserved.

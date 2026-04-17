@@ -1,8 +1,10 @@
-# incunest_afe4490 — Specification v0.20
+# incunest_afe4490 — Specification v0.22
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
 Coexists with `protocentral-afe4490-arduino` for behavioral comparison.
+
+**Primary hardware reference:** [AFE4490 Datasheet (Texas Instruments)](https://www.ti.com/lit/ds/symlink/afe4490.pdf)
 
 ---
 
@@ -185,6 +187,45 @@ The internal queue holds up to 10 samples (`INCUNEST_AFE4490_QUEUE_SIZE`). When 
 | Consistently < 500 Hz | Queue stays full in steady state. Samples returned in FIFO order with a **fixed latency of 10 × T_sample = 20 ms**. Intermediate samples are discarded: e.g. at 100 Hz, 1 in every 5 samples is received. |
 
 > The internal algorithms (HR1, HR2, HR3, SpO2) process every sample at 500 Hz regardless of the consumption rate. The call frequency of `getData()` does not affect calculation quality — only how many result samples the user receives and with what latency.
+
+### 2.5b Hardware diagnostics
+```cpp
+uint32_t runDiagnostics();
+```
+Runs the AFE4490 hardware self-test sequence (datasheet section 8.4.3.3, Table 3).
+
+**Sequence:**
+1. Acquires `_spi_mutex` (held for the full diagnostic window).
+2. Writes `CONTROL0 = 0x000004` (DIAG_EN=1, SPI_READ=0) to start the diagnostic.
+3. Waits 10 ms (chip requires 8 ms in fast mode; +2 ms margin).
+4. Sets `CONTROL0 = ctrl0_spi_read` (SPI_READ=1) to enable register readback.
+5. Reads `REG_DIAG` (0x30) — 24-bit value with 13 diagnostic flags.
+6. Restores `CONTROL0 = 0x000000` and releases `_spi_mutex`.
+
+**Why the mutex must be held for the full window:**
+The internal data task writes `CONTROL0=0` after every ADC burst read. Without the mutex, it would clear DIAG_EN mid-sequence and abort the diagnostic. The ~10 ms data gap is acceptable for a one-shot command.
+
+**Return value:** raw 24-bit `DIAG` register. Returns `0` if not initialized.
+
+| Bit | Name            | Meaning when set (1)            |
+|-----|-----------------|----------------------------------|
+| 0   | PD_ALM          | Photodiode out of range          |
+| 1   | LED_ALM         | LED out of range                 |
+| 2   | DIAG_OUT        | General diagnostic fault         |
+| 3   | LED2_ALM        | LED2 driver fault                |
+| 4   | LED3_ALM        | LED3 driver fault (if used)      |
+| 5   | LED1_ALM        | LED1 driver fault                |
+| 6   | PDOC_ALM        | Photodiode open-circuit alarm    |
+| 7   | PDSC_ALM        | Photodiode short-circuit alarm   |
+| 8   | LED2OC_ALM      | LED2 open-circuit alarm          |
+| 9   | LED2SC_ALM      | LED2 short-circuit alarm         |
+| 10  | LED1OC_ALM      | LED1 open-circuit alarm          |
+| 11  | LED1SC_ALM      | LED1 short-circuit alarm         |
+| 12  | COMMON_MODE_ALM | Common-mode voltage out of range |
+
+**Typical use:** called on demand from the host via `$DIAG?` serial command (one-shot, not continuous).
+
+---
 
 ### 2.6 Shutdown
 ```cpp
@@ -441,7 +482,7 @@ HR1–HR4 all operate on `led1_aled1` (IR ambient-corrected) and run in parallel
 
 ### 7.1 ADC Averaging — formula and constraints
 
-Source: AFE4490 datasheet section 8.4.1, Equation 5.
+Source: [AFE4490 datasheet](https://www.ti.com/lit/ds/symlink/afe4490.pdf) section 8.4.1, Equation 5.
 
 Each ADC conversion phase has 25% of the repetition period (PRP). Each individual conversion takes 50µs. The maximum number of averages is limited by how many conversions fit in that window:
 
@@ -720,111 +761,165 @@ Requires C++17 and a standard compiler (g++ ≥ 10, MSVC ≥ 2019, clang ≥ 11)
 
 ---
 
-## 10. Version history
+## 10. Parameters Reference
 
-| Version | Description                                                                 |
-|---------|-----------------------------------------------------------------------------|
-| v0.20   | Auto-CF: `_recalc_tia_cf()` selects the largest `AFE4490TIACF` that settles  |
-|         | within the adaptive TIA margin (10% of LED-on window, floor 12.5 µs).       |
-|         | `_compute_settle_margin()` shared by timing regs and auto-CF — always in     |
-|         | sync. Called from `_recalc_rate_params()` and `setTIAGain()`. `setTIACF()`  |
-|         | manual override still available. Default at 500 Hz / RF_500K: CF_20P        |
-|         | (was CF_5P). Spec §7.2 added.                                               |
-| v0.19   | Configuration readback: `AFE4490Config` struct + `getConfig()` method.      |
-|         | Returns a thread-safe snapshot of all runtime-configurable parameters       |
-|         | (sample rate, averages, LED currents, LED range, TIA gain/CF, stage 2 gain,|
-|         | PPG channel, filter type/cutoffs, HR2/HR3 filter cutoffs, SpO2 a/b).       |
-|         | Takes `_spi_mutex` + `_state_mutex` when initialized; safe before `begin()`.|
-| v0.18   | HR2_SQI: unbiased normalised autocorrelation. Previous biased estimator     |
-|         | systematically capped SQI at (N−τ)/N ≈ 0.875 at 60 BPM (τ=50, N=400)     |
-|         | even for a perfectly clean signal. Fix: divide by `acorr0·(N−τ)/N`         |
-|         | instead of `acorr0`. Clean signal now yields SQI ≈ 1.0 at all HR.          |
-|         | Updated: `_compute_hr2()` in `incunest_afe4490.cpp`, `HR2TestCalc.update()` |
-|         | in `pulsenest_lab.py`, `test_hr2.cpp` (thresholds raised to >0.95 clean,     |
-|         | >0.80 noisy). Spec §5.3. Observed with MS100 simulator: HR2 SQI ~0.9       |
-|         | vs HR1/HR3 ~1.0 — now consistent.                                           |
-| v0.17   | HR3_SQI: parabolic interpolation on HPS values (not P[k]) in numerator.    |
-|         | Fixes SQI collapse at inter-bin frequencies (e.g. 85 BPM = bin 14.5):      |
-|         | cubic product loss in HPS reduced SQI to ~0.5 for clean signals. Now SQI   |
-|         | > 0.80 across all frequencies. New unit test: `test_hr3_85bpm`. (§5.4)     |
-| v0.16   | Offline runner specification added (§9): `incunest_offline_runner` native C++   |
-|         | tool. `INCUNEST_OFFLINE` compile flag stubs Arduino/FreeRTOS and enables        |
-|         | `UNIT_TEST` API for algorithm-only builds. Hann window precomputation       |
-|         | moved to `_reset_algorithms()`. Input CSV: column-name-based parser,        |
-|         | format-agnostic, requires RED/IR/RED_Amb/IR_Amb/RED_Sub/IR_Sub. Output:        |
-|         | per-file `_result.csv` + `batch_summary.csv`. Build: CMake, C++17, no      |
-|         | external deps. Optional firmware delta columns for equivalence checking.    |
-| v0.15   | HR3_SQI redesigned: from linear spectral concentration to HPS peak           |
-|         | prominence (`HPS[peak_bin] / Σ HPS[k]`). Eliminates harmonic inflation of   |
-|         | the denominator. No new buffer — `hps_sum` accumulated in the existing loop. |
-|         | Updated: `incunest_afe4490.cpp` `_compute_hr3()`, `incunest_afe4490.h` comment,       |
-|         | `HR3TestCalc` in `pulsenest_lab.py`, spec §5.4.                               |
-| v0.14   | Timing instrumentation: `INCUNEST_TIMING_STATS` compile-time flag, `TimingStat` |
-|         | struct, `_emit_timing()` private method. Measures HR1/HR2/HR3/SpO2 per-call |
-|         | time and full cycle time (SPI + all algos) with `esp_timer_get_time()`.      |
-|         | `$TIMING` serial frame emitted every ~5 s. `TIMING` window added to         |
-|         | `pulsenest_lab.py` with green/orange/red budget indicator (budget = 2000 µs). |
-|         | Spec §8.4 added. Enabled in `platformio.ini` via `-DINCUNEST_TIMING_STATS=1`.    |
-| v0.13   | SQI continuous [0–1] for all algorithms. HR1_SQI: CV-based. HR2_SQI:       |
-|         | normalised autocorrelation peak. HR3_SQI: spectral concentration.           |
-|         | SpO2_SQI: PI-based (clamp PI from 0.5%–2.0%). All SQI fields added to      |
-|         | `AFE4490Data` and $M1 frame. 4 TEST windows completed (SPO2TEST, HR1TEST,  |
-|         | HR2TEST, HR3TEST). pulsenest_lab.py spec §8 updated.                          |
-| v0.12   | Added HR3 algorithm (FFT + HPS): `hr3`/`hr3_valid` in `AFE4490Data`,     |
-|         | `setHR3Filter()` in API, section 5.4. Self-contained radix-2 DIT FFT     |
-|         | in anonymous namespace. `_recalc_biquad_lp()` for LP anti-aliasing.      |
-|         | `INCUNEST_AFE4490_TASK_STACK` default 4096→8192. Architecture diagrams         |
-|         | (sections 1.1 and 1.3) updated. $M1 serial trama field 17 = HR3.        |
-| v0.11   | HR reported range corrected per ISO 80601-2-61 + neonatal use:           |
-|         | **[30, 250] → [25, 300] BPM**. Guard band updated to [22, 303] BPM.      |
-|         | `hr_refractory_s` 0.200→0.185 s (covers 303 BPM guard: 198 ms period).   |
-|         | `hr2_min_lag_s` 0.22→0.185 s. `hr2_acorr_max_lag` 111→137 samples.      |
-|         | Python `HR_MIN_HZ`/`HR_MAX_HZ`/`HR_SEARCH_*` updated accordingly.        |
-| v0.10   | Guard band: internal HR search range extended to [27, 253] BPM (±3 BPM  |
-|         | beyond reported [30, 250] BPM). HR2: `hr2_acorr_max_lag` 100→111        |
-|         | (27 BPM @ 50 Hz). HR3 Python: `HR_SEARCH_MIN_HZ`/`HR_SEARCH_MAX_HZ`     |
-|         | added. `hr_search_min_bpm`/`hr_search_max_bpm` constants documented.     |
-| v0.9    | HR measurement range extended: 40–240 BPM → **30–250 BPM**.             |
-|         | `hr_min_bpm` 40→30, `hr_max_bpm` 240→250, `hr_refractory_s` 0.3→0.2 s  |
-|         | (allows up to ~300 BPM), `hr2_acorr_max_lag` 75→100 samples (30 BPM    |
-|         | at 50 Hz). Spec header updated to v0.9.                                  |
-| v0.8    | Added HR2 algorithm (autocorrelation): `hr2`/`hr2_valid` in `AFE4490Data`, |
-|         | `setHR2Filter()` in API, section 5.3. Updated architecture diagrams        |
-|         | (sections 1.1 and 1.3). HR1/HR2 run in parallel in `_process_sample()`.   |
-|         | BiquadFilter refactored as struct; `_biquad_process()` extracted.          |
-|         | Section 5.2 (HR1) fully documented: DC removal IIR, moving average LP,    |
-|         | running-max threshold, refractory period, 5-interval averaging, peak       |
-|         | marker diagnostic, and key constants table.                                |
-| v0.7    | Added `stop()` (section 2.6): clean shutdown — detaches ISR, deletes       |
-|         | internal task and FreeRTOS objects, resets algorithm state. Allows          |
-|         | `begin()` to be called again. Added `_reset_algorithms()` (private).       |
-|         | Enables hot-swap between incunest_afe4490 and protocentral at runtime.          |
-| v0.6    | Biquad coefficients computed dynamically (`_recalc_biquad()`). Formula:    |
-|         | bilinear transform on a 2nd-order Butterworth bandpass prototype.          |
-|         | Coefficients moved from namespace constants to members `_bq_b0..a2`.       |
-|         | Called from `_recalc_rate_params()` and `setFilter()`. The "not yet        |
-|         | implemented" warning removed. `setFilter()` is now fully functional for    |
-|         | any fs, f_low, f_high.                                                     |
-| v0.5    | Internal constants reorganised at the top of the anonymous namespace in    |
-|         | `.cpp`, in snake_case. Algorithm time parameters expressed in physical      |
-|         | units (seconds): `spo2_warmup_s`, `dc_iir_tau_s`, `ac_ema_tau_s`,         |
-|         | `hr_refractory_s`. New members `_spo2_warmup_samples`,                     |
-|         | `_hr_refractory_samples`, `_dc_iir_alpha`, `_ac_ema_beta` derived from     |
-|         | `_sample_rate_hz` via `_recalc_rate_params()`, called in constructor and   |
-|         | in `setSampleRate()`. SpO2 and HR algorithms now correct at any PRF.       |
-| v0.4    | `AFE4490Data` extended with the 6 raw AFE4490 signals (led1, led2,         |
-|         | aled1, aled2, led1_aled1, led2_aled2). Struct is now equivalent in         |
-|         | information to the protocentral output.                                    |
-| v0.3    | Configurable NUMAV: added `setNumAverages(uint8_t num)` to the API.        |
-|         | Section 11.1 with NUMAV_max formula, table by PRF, clamping behaviour and  |
-|         | SNR effect. `setSampleRate()` recalculates NUMAV_max.                      |
-|         | **First implementation:** `include/incunest_afe4490.h` and                      |
-|         | `src/incunest_afe4490.cpp` generated. Pending hardware validation.              |
-| v0.2    | Added section 11 with comparative register tables (timing, analog, control,|
-|         | init sequence). Sources: AFE44x0.h EVM TI v1.4, Datasheet AFE4490 Table 2,|
-|         | Protocentral src/. incunest_afe4490 values justified register by register.      |
-|         | Updated defaults: NUMAV=7, ENSEPGAIN=0, Stage2 disabled.                   |
-| v0.1    | Initial complete specification                                              |
+Complete catalogue of all parameters that influence the library outputs, organised by layer. Each parameter belongs to exactly one layer; cross-references point to the section where it is defined in detail.
+
+---
+
+### 10.1 AFE4490 hardware configuration
+
+Parameters written to chip registers during initialisation. Changing them requires an SPI write (via the public API); they are not re-computed per sample. Defaults are applied by `begin()` and listed in §2.2.
+
+#### Transmitter (LED driver)
+
+| Parameter | API | Default | Range | Effect on output |
+|---|---|---|---|---|
+| IR LED current (LED1) | `setLED1Current()` | 11.7 mA | 0 – LED range max | PPG amplitude on IR channel; drives DC level and AC/DC ratio |
+| RED LED current (LED2) | `setLED2Current()` | 11.7 mA | 0 – LED range max | PPG amplitude on RED channel; directly affects SpO2 R-ratio |
+| LED full-scale range | `setLEDRange()` | 150 mA | 75 or 150 mA (TX_REF=0.75 V) | Scales the 8-bit DAC resolution; affects achievable current values |
+
+> LED currents set the signal amplitude at the photodiode. Too low → low PI, SpO2 SQI=0. Too high → TIA saturation (clipping). The optimal point maximises PI while keeping the ADC output below full-scale.
+
+#### Receiver — TIA (I-V amplifier)
+
+| Parameter | API | Default | Options | Effect on output |
+|---|---|---|---|---|
+| Feedback resistance R_F | `setTIAGain()` | RF_500K (500 kΩ) | 10k, 25k, 50k, 100k, 250k, 500k, 1MΩ | Transimpedance gain: larger R_F = higher voltage output, higher noise floor. Full-scale input current = 1 V / R_F |
+| Feedback capacitance C_F | `setTIACF()` (or auto) | auto (see §7.2) | 5, 10, 20, 30, 55, 155 pF | TIA RC pole: must settle before ADC samples. Auto-selected by library from R_F and PRF |
+
+> R_F and C_F together determine the front-end gain and noise. The library enforces `R_F × C_F ≤ Rx_sample_time / 10` via auto-CF (§7.2).
+
+#### Receiver — Stage 2 (ambient cancellation amplifier)
+
+| Parameter | API | Default | Options | Effect on output |
+|---|---|---|---|---|
+| Stage 2 gain | `setStage2Gain()` | GAIN_0DB (disabled) | 0, 3.5, 6, 9.5, 12 dB | Additional gain after ambient subtraction; expands dynamic range for low-perfusion signals |
+| Ambient cancellation DAC (I_CANCEL) | not exposed (set internally) | 0 µA | 0 – 10 µA, 1 µA steps | Subtracts ambient leakage current before Stage 2; allows centring the signal within ADC range |
+
+> Stage 2 gain is useful when LED current is low and the pleth component is small. Enabling it when the signal is already large risks clipping.
+
+#### ADC and averaging
+
+| Parameter | API | Default | Range | Effect on output |
+|---|---|---|---|---|
+| Sample rate (PRF) | `setSampleRate()` | 500 Hz | 63 – 5000 Hz | Output rate; also determines LED-on window and max averages (see §7.1) |
+| Number of averages (NUMAV) | `setNumAverages()` | 8 (NUMAV=7) | 1 – NUMAV_max+1 | Hardware averaging before ADC output: SNR ∝ √N. Larger N = lower noise, higher latency. Automatically clamped to NUMAV_max for current PRF |
+
+> Averaging is the primary noise-reduction knob that does not alter signal bandwidth. At 500 Hz, 8 averages give ×2.83 SNR improvement at no bandwidth cost.
+
+#### Timing registers
+
+All 22 timing-edge registers (LED on/off, sample windows, ADC conversion windows, ADC reset pulses) are **calculated automatically** by the library from `setSampleRate()`. They are not exposed via the public API. See §7 and the AFE4490 datasheet §8.3.3 for the underlying model.
+
+---
+
+### 10.2 Pre-processing parameters (shared across algorithms)
+
+Applied to the raw ADC output before any algorithm. Parameters are compile-time constants.
+
+| Parameter | Constant | Value | Used by | Effect |
+|---|---|---|---|---|
+| DC removal time constant | `dc_iir_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 1.6 s | SpO2, HR1 | IIR low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
+| Input channel selection | `setPPGChannel()` default | LED1_ALED1 | All algorithms | Selects which of the 6 raw signals enters the processing chain |
+| Decimation factor | `hr2_decim_factor`, `hr3_decim_factor` | ×10 | HR2, HR3 | Reduces 500 Hz → 50 Hz before autocorrelation / FFT; sets effective frequency resolution |
+
+---
+
+### 10.3 SpO2 parameters
+
+See §5.1 for algorithm description.
+
+| Parameter | Constant | Value | Effect |
+|---|---|---|---|
+| Calibration coefficient a | `spo2_a` | 114.9208 | SpO2 = a − b·R intercept; calibrated with MS100 simulator / Nellcor R-curve |
+| Calibration coefficient b | `spo2_b` | 30.5547 | SpO2 = a − b·R slope |
+| DC IIR time constant | `dc_iir_tau_s` | 1.6 s | Speed of DC baseline tracking |
+| AC EMA time constant | `ac_ema_tau_s` | 1.0 s | Smoothing of AC amplitude estimate |
+| Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 |
+| Warm-up period | `warmup_s` | 5.0 s | SpO2 suppressed during initial filter transient |
+| SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | PI below this → SQI = 0 |
+| SQI PI upper bound | `spo2_pi_sqi_hi` | 2.0 % | PI above this → SQI = 1 |
+
+---
+
+### 10.4 HR1 parameters
+
+See §5.2 for algorithm description.
+
+| Parameter | Constant | Value | Effect |
+|---|---|---|---|
+| DC removal time constant | `hr1_dc_tau_s` | 1.6 s | Baseline tracking speed |
+| Low-pass MA cutoff | `hr1_ma_cutoff_hz` | 5 Hz | Noise smoothing before peak detection; affects peak sharpness |
+| Max MA length | `hr1_ma_max_len` | 64 samples | Prevents excessively long moving average at low heart rates |
+| Peak threshold fraction | 0.6 | 0.6 × running_max | Trade-off: higher → misses low-amplitude peaks; lower → false detections on noise |
+| Refractory period | `hr_refractory_s` | 0.2 s | Minimum interval between detected peaks; sets practical upper HR limit (~300 BPM) |
+| RR interval buffer length | 5 intervals | 5 | Number of consecutive intervals averaged for HR1 output |
+| SQI CV threshold | `hr1_sqi_cv_max` | 0.15 (15 %) | CV above this → SQI = 0 (arrhythmia / motion artefact) |
+
+---
+
+### 10.5 HR2 parameters
+
+See §5.3 for algorithm description.
+
+| Parameter | Constant | Value | Effect |
+|---|---|---|---|
+| BPF lower cutoff | `hr2_f_low_hz` | 0.5 Hz | Removes DC drift and very low-frequency baseline wander |
+| BPF upper cutoff | `hr2_f_high_hz` | 5.0 Hz | Anti-aliasing before decimation; limits harmonic content |
+| Decimation factor | `hr2_decim_factor` | 10 | 500 Hz → 50 Hz |
+| Buffer length | `hr2_buf_len` | 400 samples (8 s) | Analysis window; longer → more stable at low HR, longer convergence time |
+| Update interval | `hr2_update_interval` | 25 decimated samples (0.5 s) | HR2 output refresh rate |
+| Max autocorrelation lag | `hr2_acorr_max_lag` | 137 samples | Corresponds to 22 BPM guard band at 50 Hz |
+| Minimum lag | `hr2_min_lag_s` | 0.185 s | Corresponds to ~324 BPM; prevents false peaks at very short lags |
+| Minimum correlation threshold | `hr2_min_corr` | 0.5 | Below this normalised correlation, no HR is reported and SQI = 0 |
+
+---
+
+### 10.6 HR3 parameters
+
+See §5.4 for algorithm description.
+
+| Parameter | Constant | Value | Effect |
+|---|---|---|---|
+| LP filter cutoff | `hr3_f_high_hz` | 10 Hz | Anti-aliasing before decimation; passes up to 3rd harmonic of 200 BPM |
+| Decimation factor | `hr3_decim_factor` | 10 | 500 Hz → 50 Hz |
+| FFT / buffer length | `hr3_buf_len` | 512 samples (10.24 s) | Frequency resolution = 50/512 ≈ 0.098 Hz ≈ 0.35 BPM at 1 Hz |
+| Update interval | `hr3_update_interval` | 25 decimated samples (0.5 s) | HR3 output refresh rate |
+| Window function | Hann | — | Reduces spectral leakage; pre-computed at `_reset_algorithms()` |
+| HPS harmonics | P[k]·P[2k]·P[3k] | 2nd and 3rd | Reinforces fundamental; HPS search capped at nyquist/3 to keep 3rd harmonic in band |
+
+---
+
+### 10.7 Range and validation parameters (transversal)
+
+Applied by all HR algorithms equally to decide whether an output is reportable and whether SQI is forced to 0.
+
+| Parameter | Constant | Value | Scope |
+|---|---|---|---|
+| Reported valid HR lower bound | `hr_min_bpm` | 25 BPM | HR1, HR2, HR3 — ISO 80601-2-61; neonatal |
+| Reported valid HR upper bound | `hr_max_bpm` | 300 BPM | HR1, HR2, HR3 — neonatal tachycardia |
+| Internal search lower bound | `hr_search_min_bpm` | 22 BPM | Guard band: hr_min − 3 |
+| Internal search upper bound | `hr_search_max_bpm` | 303 BPM | Guard band: hr_max + 3 |
+| SpO2 reported valid lower bound | `spo2_min` | 70 % | SpO2 |
+| SpO2 reported valid upper bound | `spo2_max` | 100 % | SpO2 |
+| SpO2 clamp margin | `spo2_clamp_margin` | 3 % | Values within margin are clamped, not rejected |
+
+---
+
+### 10.8 Out-of-scope: physical and environmental factors
+
+The following factors affect the quality of the raw PPG signal but are **not configurable parameters of this library**. The library does not model, compensate for, or control them. They are listed here for completeness and to clarify the library's responsibility boundary.
+
+| Factor | How it manifests in the output | Library observable |
+|---|---|---|
+| **Tissue perfusion (PI)** | Low PI → weak AC component → unreliable SpO2 and HR | `pi` field and `spo2_sqi` (PI-based) |
+| **Ambient light** | Increases ambient channels (AmbRED, AmbIR); incomplete cancellation degrades SNR | `aled1`, `aled2`, `led1_aled1`, `led2_aled2` raw fields |
+| **Patient motion / artefacts** | Introduces aperiodic components that corrupt HR estimation | All `hr*_sqi` fields (regularity/periodicity metrics) |
+| **Probe type and placement** | Different optical path, tissue thickness, and spectral response; affects R-ratio calibration | `spo2_r` field; SpO2 accuracy depends on calibration matching the probe |
+| **Neonatal vs adult anatomy** | Different absorption spectra and pulsatile characteristics | Affects SpO2 coefficients `a`, `b` and HR signal amplitude |
+
+These factors belong to the test protocol, clinical validation documentation, and operator guidance for the parent IncuNest device — not to this library's specification. However, their effects are **observable** through the SQI fields and the raw signal fields exposed in `AFE4490Data`.
 
 ---
 
@@ -833,7 +928,8 @@ Requires C++17 and a standard compiler (g++ ≥ 10, MSVC ≥ 2019, clang ≥ 11)
 This section documents the exact value of each AFE4490 register written by the library during initialisation, compared against the three reference sources analysed.
 
 **Reference sources:**
-- **AFE44x0.h (EVM TI v1.4):** TI official firmware for the AFE4490EVM evaluation kit. Written for MSP430. The C code is not reusable, but the register values and timing formulas are TI's authoritative reference.
+- **[AFE4490 Datasheet (TI)](https://www.ti.com/lit/ds/symlink/afe4490.pdf):** primary hardware reference — register map, timing formulas, electrical characteristics.
+- **AFE44x0.h (EVM TI v1.4):** TI official firmware for the AFE4490EVM evaluation kit. Written for MSP430. The C code is not reusable, but the register values and timing formulas are TI's authoritative reference. See also: [AFE4490EVM User's Guide (SLAU480C)](https://www.ti.com/lit/ug/slau480c/slau480c.pdf).
 - **Datasheet AFE4490 Table 2:** example values from the datasheet for PRF=500Hz, duty cycle=25%.
 - **Protocentral (src/):** `src/protocentral_afe44xx.cpp` from the project — modified version of the Protocentral library adapted to the project.
 
@@ -983,3 +1079,117 @@ Key references for each algorithm implemented in this library.
 
 - **Severinghaus, J.W. & Astrup, P.B. (1986).** "History of blood gas analysis." *Journal of Clinical Monitoring*, 2(4), 270–288.
   Historical context for non-invasive oxygen saturation measurement.
+
+---
+
+## 13. Version history
+
+| Version | Description                                                                 |
+|---------|-----------------------------------------------------------------------------|
+| v0.21   | Parameters Reference added (§10): consolidated catalogue of all parameters  |
+|         | that influence library outputs, organised by layer: AFE hardware config     |
+|         | (§10.1), pre-processing (§10.2), SpO2 (§10.3), HR1 (§10.4), HR2 (§10.5),  |
+|         | HR3 (§10.6), range/validation (§10.7), and out-of-scope environmental       |
+|         | factors (§10.8). Version history moved to §13 (end of document).            |
+|         | §11 AFE4490 register config, §12 Bibliographic references renumbered.       |
+| v0.20   | Auto-CF: `_recalc_tia_cf()` selects the largest `AFE4490TIACF` that settles  |
+|         | within the adaptive TIA margin (10% of LED-on window, floor 12.5 µs).       |
+|         | `_compute_settle_margin()` shared by timing regs and auto-CF — always in     |
+|         | sync. Called from `_recalc_rate_params()` and `setTIAGain()`. `setTIACF()`  |
+|         | manual override still available. Default at 500 Hz / RF_500K: CF_20P        |
+|         | (was CF_5P). Spec §7.2 added.                                               |
+| v0.19   | Configuration readback: `AFE4490Config` struct + `getConfig()` method.      |
+|         | Returns a thread-safe snapshot of all runtime-configurable parameters       |
+|         | (sample rate, averages, LED currents, LED range, TIA gain/CF, stage 2 gain,|
+|         | PPG channel, filter type/cutoffs, HR2/HR3 filter cutoffs, SpO2 a/b).       |
+|         | Takes `_spi_mutex` + `_state_mutex` when initialized; safe before `begin()`.|
+| v0.18   | HR2_SQI: unbiased normalised autocorrelation. Previous biased estimator     |
+|         | systematically capped SQI at (N−τ)/N ≈ 0.875 at 60 BPM (τ=50, N=400)     |
+|         | even for a perfectly clean signal. Fix: divide by `acorr0·(N−τ)/N`         |
+|         | instead of `acorr0`. Clean signal now yields SQI ≈ 1.0 at all HR.          |
+|         | Updated: `_compute_hr2()` in `incunest_afe4490.cpp`, `HR2TestCalc.update()` |
+|         | in `pulsenest_lab.py`, `test_hr2.cpp` (thresholds raised to >0.95 clean,     |
+|         | >0.80 noisy). Spec §5.3. Observed with MS100 simulator: HR2 SQI ~0.9       |
+|         | vs HR1/HR3 ~1.0 — now consistent.                                           |
+| v0.17   | HR3_SQI: parabolic interpolation on HPS values (not P[k]) in numerator.    |
+|         | Fixes SQI collapse at inter-bin frequencies (e.g. 85 BPM = bin 14.5):      |
+|         | cubic product loss in HPS reduced SQI to ~0.5 for clean signals. Now SQI   |
+|         | > 0.80 across all frequencies. New unit test: `test_hr3_85bpm`. (§5.4)     |
+| v0.16   | Offline runner specification added (§9): `incunest_offline_runner` native C++   |
+|         | tool. `INCUNEST_OFFLINE` compile flag stubs Arduino/FreeRTOS and enables        |
+|         | `UNIT_TEST` API for algorithm-only builds. Hann window precomputation       |
+|         | moved to `_reset_algorithms()`. Input CSV: column-name-based parser,        |
+|         | format-agnostic, requires RED/IR/RED_Amb/IR_Amb/RED_Sub/IR_Sub. Output:        |
+|         | per-file `_result.csv` + `batch_summary.csv`. Build: CMake, C++17, no      |
+|         | external deps. Optional firmware delta columns for equivalence checking.    |
+| v0.15   | HR3_SQI redesigned: from linear spectral concentration to HPS peak           |
+|         | prominence (`HPS[peak_bin] / Σ HPS[k]`). Eliminates harmonic inflation of   |
+|         | the denominator. No new buffer — `hps_sum` accumulated in the existing loop. |
+|         | Updated: `incunest_afe4490.cpp` `_compute_hr3()`, `incunest_afe4490.h` comment,       |
+|         | `HR3TestCalc` in `pulsenest_lab.py`, spec §5.4.                               |
+| v0.14   | Timing instrumentation: `INCUNEST_TIMING_STATS` compile-time flag, `TimingStat` |
+|         | struct, `_emit_timing()` private method. Measures HR1/HR2/HR3/SpO2 per-call |
+|         | time and full cycle time (SPI + all algos) with `esp_timer_get_time()`.      |
+|         | `$TIMING` serial frame emitted every ~5 s. `TIMING` window added to         |
+|         | `pulsenest_lab.py` with green/orange/red budget indicator (budget = 2000 µs). |
+|         | Spec §8.4 added. Enabled in `platformio.ini` via `-DINCUNEST_TIMING_STATS=1`.    |
+| v0.13   | SQI continuous [0–1] for all algorithms. HR1_SQI: CV-based. HR2_SQI:       |
+|         | normalised autocorrelation peak. HR3_SQI: spectral concentration.           |
+|         | SpO2_SQI: PI-based (clamp PI from 0.5%–2.0%). All SQI fields added to      |
+|         | `AFE4490Data` and $M1 frame. 4 TEST windows completed (SPO2TEST, HR1TEST,  |
+|         | HR2TEST, HR3TEST). pulsenest_lab.py spec §8 updated.                          |
+| v0.12   | Added HR3 algorithm (FFT + HPS): `hr3`/`hr3_valid` in `AFE4490Data`,     |
+|         | `setHR3Filter()` in API, section 5.4. Self-contained radix-2 DIT FFT     |
+|         | in anonymous namespace. `_recalc_biquad_lp()` for LP anti-aliasing.      |
+|         | `INCUNEST_AFE4490_TASK_STACK` default 4096→8192. Architecture diagrams         |
+|         | (sections 1.1 and 1.3) updated. $M1 serial trama field 17 = HR3.        |
+| v0.11   | HR reported range corrected per ISO 80601-2-61 + neonatal use:           |
+|         | **[30, 250] → [25, 300] BPM**. Guard band updated to [22, 303] BPM.      |
+|         | `hr_refractory_s` 0.200→0.185 s (covers 303 BPM guard: 198 ms period).   |
+|         | `hr2_min_lag_s` 0.22→0.185 s. `hr2_acorr_max_lag` 111→137 samples.      |
+|         | Python `HR_MIN_HZ`/`HR_MAX_HZ`/`HR_SEARCH_*` updated accordingly.        |
+| v0.10   | Guard band: internal HR search range extended to [27, 253] BPM (±3 BPM  |
+|         | beyond reported [30, 250] BPM). HR2: `hr2_acorr_max_lag` 100→111        |
+|         | (27 BPM @ 50 Hz). HR3 Python: `HR_SEARCH_MIN_HZ`/`HR_SEARCH_MAX_HZ`     |
+|         | added. `hr_search_min_bpm`/`hr_search_max_bpm` constants documented.     |
+| v0.9    | HR measurement range extended: 40–240 BPM → **30–250 BPM**.             |
+|         | `hr_min_bpm` 40→30, `hr_max_bpm` 240→250, `hr_refractory_s` 0.3→0.2 s  |
+|         | (allows up to ~300 BPM), `hr2_acorr_max_lag` 75→100 samples (30 BPM    |
+|         | at 50 Hz). Spec header updated to v0.9.                                  |
+| v0.8    | Added HR2 algorithm (autocorrelation): `hr2`/`hr2_valid` in `AFE4490Data`, |
+|         | `setHR2Filter()` in API, section 5.3. Updated architecture diagrams        |
+|         | (sections 1.1 and 1.3). HR1/HR2 run in parallel in `_process_sample()`.   |
+|         | BiquadFilter refactored as struct; `_biquad_process()` extracted.          |
+|         | Section 5.2 (HR1) fully documented: DC removal IIR, moving average LP,    |
+|         | running-max threshold, refractory period, 5-interval averaging, peak       |
+|         | marker diagnostic, and key constants table.                                |
+| v0.7    | Added `stop()` (section 2.6): clean shutdown — detaches ISR, deletes       |
+|         | internal task and FreeRTOS objects, resets algorithm state. Allows          |
+|         | `begin()` to be called again. Added `_reset_algorithms()` (private).       |
+|         | Enables hot-swap between incunest_afe4490 and protocentral at runtime.          |
+| v0.6    | Biquad coefficients computed dynamically (`_recalc_biquad()`). Formula:    |
+|         | bilinear transform on a 2nd-order Butterworth bandpass prototype.          |
+|         | Coefficients moved from namespace constants to members `_bq_b0..a2`.       |
+|         | Called from `_recalc_rate_params()` and `setFilter()`. The "not yet        |
+|         | implemented" warning removed. `setFilter()` is now fully functional for    |
+|         | any fs, f_low, f_high.                                                     |
+| v0.5    | Internal constants reorganised at the top of the anonymous namespace in    |
+|         | `.cpp`, in snake_case. Algorithm time parameters expressed in physical      |
+|         | units (seconds): `spo2_warmup_s`, `dc_iir_tau_s`, `ac_ema_tau_s`,         |
+|         | `hr_refractory_s`. New members `_spo2_warmup_samples`,                     |
+|         | `_hr_refractory_samples`, `_dc_iir_alpha`, `_ac_ema_beta` derived from     |
+|         | `_sample_rate_hz` via `_recalc_rate_params()`, called in constructor and   |
+|         | in `setSampleRate()`. SpO2 and HR algorithms now correct at any PRF.       |
+| v0.4    | `AFE4490Data` extended with the 6 raw AFE4490 signals (led1, led2,         |
+|         | aled1, aled2, led1_aled1, led2_aled2). Struct is now equivalent in         |
+|         | information to the protocentral output.                                    |
+| v0.3    | Configurable NUMAV: added `setNumAverages(uint8_t num)` to the API.        |
+|         | Section 11.1 with NUMAV_max formula, table by PRF, clamping behaviour and  |
+|         | SNR effect. `setSampleRate()` recalculates NUMAV_max.                      |
+|         | **First implementation:** `include/incunest_afe4490.h` and                      |
+|         | `src/incunest_afe4490.cpp` generated. Pending hardware validation.              |
+| v0.2    | Added section 11 with comparative register tables (timing, analog, control,|
+|         | init sequence). Sources: AFE44x0.h EVM TI v1.4, Datasheet AFE4490 Table 2,|
+|         | Protocentral src/. incunest_afe4490 values justified register by register.      |
+|         | Updated defaults: NUMAV=7, ENSEPGAIN=0, Stage2 disabled.                   |
+| v0.1    | Initial complete specification                                              |

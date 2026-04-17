@@ -1,11 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.19 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.20 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
+// Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.19"
+#define INCUNEST_AFE4490_VERSION "0.20"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -118,6 +119,26 @@ enum class AFE4490Stage2Gain {
     GAIN_12DB
 };
 
+// ── Timing registers snapshot ─────────────────────────────────────────────────
+// Returned by getTimingConfig(). Raw register values (counts, AFECLK = 4 MHz → 1 count = 0.25 µs).
+// Field names follow datasheet Table 2 notation (t1–t28). t29 = PRPCOUNT is in AFE4490Config.
+struct AFE4490TimingConfig {
+    uint32_t t1,  t2;   // LED2STC,    LED2ENDC    — LED2 sampling window
+    uint32_t t3,  t4;   // LED2LEDSTC, LED2LEDENDC — LED2 LED pulse
+    uint32_t t5,  t6;   // ALED2STC,   ALED2ENDC   — ambient LED2 sampling
+    uint32_t t7,  t8;   // LED1STC,    LED1ENDC    — LED1 sampling window
+    uint32_t t9,  t10;  // LED1LEDSTC, LED1LEDENDC — LED1 LED pulse
+    uint32_t t11, t12;  // ALED1STC,   ALED1ENDC   — ambient LED1 sampling
+    uint32_t t13, t14;  // LED2CONVST,  LED2CONVEND  — LED2 ADC conversion
+    uint32_t t15, t16;  // ALED2CONVST, ALED2CONVEND — ambient LED2 ADC conversion
+    uint32_t t17, t18;  // LED1CONVST,  LED1CONVEND  — LED1 ADC conversion
+    uint32_t t19, t20;  // ALED1CONVST, ALED1CONVEND — ambient LED1 ADC conversion
+    uint32_t t21, t22;  // ADCRSTSTCT0, ADCRSTENDCT0 — ADC reset pulse 0
+    uint32_t t23, t24;  // ADCRSTSTCT1, ADCRSTENDCT1 — ADC reset pulse 1
+    uint32_t t25, t26;  // ADCRSTSTCT2, ADCRSTENDCT2 — ADC reset pulse 2
+    uint32_t t27, t28;  // ADCRSTSTCT3, ADCRSTENDCT3 — ADC reset pulse 3
+};
+
 // ── Chip configuration snapshot ───────────────────────────────────────────────
 // Returned by getConfig(). Groups all runtime-configurable parameters.
 struct AFE4490Config {
@@ -215,6 +236,26 @@ public:
     // Thread-safe: takes the relevant mutexes if the library is initialized.
     // Callable before or after begin().
     AFE4490Config getConfig();
+
+    // Returns all timing register values read directly from the AFE4490 chip via SPI.
+    // Requires begin() to have been called. Returns zeros if not initialized.
+    // Thread-safe: takes _spi_mutex.
+    AFE4490TimingConfig getTimingConfig();
+
+    // Writes a single timing register directly to the chip (takes effect on next PRP cycle).
+    // addr: register address (0x01–0x1C). value: 16-bit count (AFECLK = 4 MHz).
+    // No validation is performed — caller is responsible for constraint checking.
+    // Requires begin() to have been called. No-op if not initialized.
+    // Thread-safe: takes _spi_mutex.
+    void setTimingReg(uint8_t addr, uint32_t value);
+
+    // Runs the AFE4490 hardware diagnostics sequence (Table 3, section 8.4.3.3).
+    // Holds _spi_mutex for ~10 ms to prevent the data task from clearing CONTROL0.
+    // Returns the raw 24-bit DIAG register (0x30) with all 13 diagnostic flags.
+    // Returns 0 if the library is not initialized.
+#ifndef INCUNEST_OFFLINE
+    uint32_t runDiagnostics();
+#endif
 
     // ISR entry point (must be public for static trampoline)
 #ifndef INCUNEST_OFFLINE

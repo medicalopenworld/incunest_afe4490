@@ -1,6 +1,7 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.19 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.20 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
+// Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
 #include "incunest_afe4490.h"
@@ -560,6 +561,44 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     return cfg;
 }
 
+// ── getTimingConfig() — reads all timing registers from chip via SPI ──────────
+AFE4490TimingConfig INCUNEST_AFE4490::getTimingConfig() {
+    AFE4490TimingConfig t = {};
+#ifndef INCUNEST_OFFLINE
+    if (!_initialized) return t;
+    xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+    // Enable SPI_READ once, read all 28 registers sequentially, then disable.
+    _write_reg(REG_CONTROL0, ctrl0_spi_read);
+    t.t1  = _read_spi_raw(0x01); t.t2  = _read_spi_raw(0x02);
+    t.t3  = _read_spi_raw(0x03); t.t4  = _read_spi_raw(0x04);
+    t.t5  = _read_spi_raw(0x05); t.t6  = _read_spi_raw(0x06);
+    t.t7  = _read_spi_raw(0x07); t.t8  = _read_spi_raw(0x08);
+    t.t9  = _read_spi_raw(0x09); t.t10 = _read_spi_raw(0x0A);
+    t.t11 = _read_spi_raw(0x0B); t.t12 = _read_spi_raw(0x0C);
+    t.t13 = _read_spi_raw(0x0D); t.t14 = _read_spi_raw(0x0E);
+    t.t15 = _read_spi_raw(0x0F); t.t16 = _read_spi_raw(0x10);
+    t.t17 = _read_spi_raw(0x11); t.t18 = _read_spi_raw(0x12);
+    t.t19 = _read_spi_raw(0x13); t.t20 = _read_spi_raw(0x14);
+    t.t21 = _read_spi_raw(0x15); t.t22 = _read_spi_raw(0x16);
+    t.t23 = _read_spi_raw(0x17); t.t24 = _read_spi_raw(0x18);
+    t.t25 = _read_spi_raw(0x19); t.t26 = _read_spi_raw(0x1A);
+    t.t27 = _read_spi_raw(0x1B); t.t28 = _read_spi_raw(0x1C);
+    _write_reg(REG_CONTROL0, 0x000000UL);
+    xSemaphoreGive(_spi_mutex);
+#endif
+    return t;
+}
+
+// ── setTimingReg() — writes one timing register directly to chip ──────────────
+void INCUNEST_AFE4490::setTimingReg(uint8_t addr, uint32_t value) {
+#ifndef INCUNEST_OFFLINE
+    if (!_initialized) return;
+    xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+    _write_reg(addr, value);
+    xSemaphoreGive(_spi_mutex);
+#endif
+}
+
 // ── getData() ─────────────────────────────────────────────────────────────────
 #ifndef INCUNEST_OFFLINE
 bool INCUNEST_AFE4490::getData(AFE4490Data& data) {
@@ -662,6 +701,21 @@ uint32_t INCUNEST_AFE4490::_read_reg(uint8_t addr) {
     uint32_t val = _read_spi_raw(addr);
     _write_reg(REG_CONTROL0, 0x000000UL);
     return val;
+}
+
+uint32_t INCUNEST_AFE4490::runDiagnostics() {
+    if (!_initialized || !_spi_mutex) return 0;
+    // Hold _spi_mutex for the full diagnostic window: the data task writes
+    // CONTROL0=0 after every ADC read, which would clear DIAG_EN and abort
+    // the diagnostic. ~10 ms data gap is acceptable for a one-shot command.
+    xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+    _write_reg(REG_CONTROL0, 0x000004UL);       // DIAG_EN=1, SPI_READ=0
+    vTaskDelay(pdMS_TO_TICKS(10));              // t_DIAG = 8 ms (fast) + 2 ms margin
+    _write_reg(REG_CONTROL0, ctrl0_spi_read);   // SPI_READ=1 to read DIAG register
+    uint32_t result = _read_spi_raw(REG_DIAG);
+    _write_reg(REG_CONTROL0, 0x000000UL);       // restore CONTROL0 to idle
+    xSemaphoreGive(_spi_mutex);
+    return result;
 }
 #endif
 
