@@ -24,59 +24,45 @@ static const char* TAG = "incunest_afe4490";
 #endif
 
 namespace {
-    // ── Algorithm time constants (physical units) ────────────────────────────
-    constexpr float    spo2_warmup_s       = 5.0f;    // s  — warmup before reporting SpO2
-    constexpr float    spo2_dc_iir_tau_s        = 1.6f;    // s  — DC IIR time constant
-    constexpr float    spo2_ac_ema_tau_s        = 1.0f;    // s  — AC² EMA time constant
-    constexpr float    hr_refractory_s     = 0.185f;  // s  — HR refractory period (covers guard band 303 BPM: 198 ms period)
-    constexpr float    hr1_dc_tau_s             = 1.6f;   // s  — HR1 DC removal IIR time constant
-
-    // ── PPG / HR2 filter ──────────────────────────────────────────────────────
-    constexpr float    pi                       = 3.14159265358979f;
-
-    // ── HR1 moving average filter ─────────────────────────────────────────────
-    constexpr float    hr1_ma_cutoff_hz         = 5.0f;  // Hz — low-pass cutoff for HR peak detection
-
-    // ── HR2 autocorrelation ───────────────────────────────────────────────────
-    constexpr float    hr2_min_lag_s            = 0.185f; // s  — min RR lag searched (guard band 303 BPM: 60/303 = 0.198 s period)
-    constexpr float    hr2_min_corr             = 0.5f;  // normalised autocorrelation threshold
-
-    // ── HR3 FFT ───────────────────────────────────────────────────────────────
-    constexpr int      hr3_decim_factor         = 10;    // 500 Hz → 50 Hz effective sample rate
+    // ── Math ──────────────────────────────────────────────────────────────────
+    constexpr float    pi                  = 3.14159265358979f;
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
-    // Coefficients a and b derived from experimental calibration with a
+    constexpr float    spo2_warmup_s       = 5.0f;     // s  — warmup before reporting SpO2
+    constexpr float    spo2_dc_iir_tau_s   = 1.6f;     // s  — DC IIR time constant
+    constexpr float    spo2_ac_ema_tau_s   = 1.0f;     // s  — AC² EMA time constant
+    // Calibration coefficients derived from experimental data with a
     // UpnMed U401-D(01AS-F) probe, type Nellcor Non-Oximax.
     // Override at runtime with setSpO2Coefficients() for a different probe.
-    constexpr float    spo2_a_default      = 114.9208f;  // calibration coefficient  (SpO2 = a - b·R)
-    constexpr float    spo2_b_default      =  30.5547f;  // calibration coefficient
-    constexpr float    spo2_min            =  70.0f;  // % — valid lower bound
-    constexpr float    spo2_max            = 100.0f;  // % — valid upper bound (values clamped if within spo2_clamp_margin above)
-    constexpr float    spo2_clamp_margin   =   3.0f;  // % — clamp to spo2_max if spo2 <= spo2_max + margin
-    constexpr float    spo2_min_dc         = 1000.0f; // ADC counts — no-finger threshold
+    constexpr float    spo2_a_default      = 114.9208f; // SpO2 = a - b·R
+    constexpr float    spo2_b_default      =  30.5547f;
+    constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
+    constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
+    constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
+    constexpr float    spo2_min_dc         = 1000.0f;  // ADC counts — no-finger threshold
+    // SQI: Perfusion Index thresholds (Nellcor/Masimo clinical reference).
+    // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
+    constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
+    constexpr float    spo2_pi_sqi_hi      = 2.0f;     // % — PI above this → SQI = 1
 
-    // ── SQI ───────────────────────────────────────────────────────────────────
-    // SpO2 SQI: Perfusion Index thresholds (Nellcor/Masimo clinical reference).
-    // PI < spo2_pi_sqi_lo → SQI=0 (absent or very weak signal).
-    // PI ≥ spo2_pi_sqi_hi → SQI=1 (full quality). Linear ramp in between.
-    constexpr float spo2_pi_sqi_lo  = 0.5f;   // % — PI below this → SQI = 0
-    constexpr float spo2_pi_sqi_hi  = 2.0f;   // % — PI above this → SQI = 1
-
-    // HR1 SQI: coefficient of variation (CV = std/mean) of the 5 RR intervals.
+    // ── HR1 ───────────────────────────────────────────────────────────────────
+    constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
+    constexpr float    hr1_ma_cutoff_hz    = 5.0f;     // Hz — low-pass cutoff for peak detection MA
+    // SQI: CV = std/mean of the 5 most recent RR intervals.
     // CV=0 (perfectly regular) → SQI=1. CV ≥ hr1_sqi_cv_max → SQI=0.
-    // 15% CV threshold matches clinical criterion for rhythm regularity.
-    constexpr float hr1_sqi_cv_max  = 0.15f;  // dimensionless — CV above this → SQI = 0
+    constexpr float    hr1_sqi_cv_max      = 0.15f;    // dimensionless — 15% CV threshold
 
-    // ── HR ────────────────────────────────────────────────────────────────────
-    // Reported valid range: [hr_min_bpm, hr_max_bpm].
-    // Internal search range: [hr_search_min_bpm, hr_search_max_bpm] — guard band of ±3 BPM.
-    // Ensures signals at the boundary are detected reliably before the validity gate is applied.
-    constexpr float    hr_min_bpm          =  25.0f;  // bpm — reported valid lower bound (ISO 80601-2-61 minimum; neonatal use)
-    constexpr float    hr_max_bpm          = 300.0f;  // bpm — reported valid upper bound (neonatal tachycardia)
-    constexpr float    hr_search_min_bpm   =  22.0f;  // bpm — internal search lower bound (guard band: hr_min − 3)
-    constexpr float    hr_search_max_bpm   = 303.0f;  // bpm — internal search upper bound (guard band: hr_max + 3)
-    // HR1: refractory 200 ms naturally supports up to ~300 BPM; no explicit search bound needed.
-    // HR2: search bound applied via hr2_acorr_max_lag (header) and hr2_min_lag_s (below).
+    // ── HR2 ───────────────────────────────────────────────────────────────────
+    constexpr float    hr2_min_corr        = 0.5f;     // normalised autocorrelation threshold for SQI=1
+
+    // ── HR3 ───────────────────────────────────────────────────────────────────
+    constexpr int      hr3_decim_factor    = 10;       // 500 Hz → 50 Hz effective sample rate
+
+    // ── HR (all algorithms) ───────────────────────────────────────────────────
+    // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
+    constexpr float    hr_refractory_s     = 0.185f;   // s  — refractory period (covers 303 BPM)
+    constexpr float    hr_min_bpm          =  25.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
+    constexpr float    hr_max_bpm          = 300.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
     // ── HR3 FFT — radix-2 Cooley-Tukey DIT (in-place, complex interleaved) ──
     // x: float array of 2N elements [re0,im0, re1,im1, ..., re(N-1),im(N-1)]
