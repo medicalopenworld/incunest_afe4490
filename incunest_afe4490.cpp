@@ -26,8 +26,8 @@ static const char* TAG = "incunest_afe4490";
 namespace {
     // ── Algorithm time constants (physical units) ────────────────────────────
     constexpr float    spo2_warmup_s       = 5.0f;    // s  — warmup before reporting SpO2
-    constexpr float    dc_iir_tau_s        = 1.6f;    // s  — DC IIR time constant
-    constexpr float    ac_ema_tau_s        = 1.0f;    // s  — AC² EMA time constant
+    constexpr float    spo2_dc_iir_tau_s        = 1.6f;    // s  — DC IIR time constant
+    constexpr float    spo2_ac_ema_tau_s        = 1.0f;    // s  — AC² EMA time constant
     constexpr float    hr_refractory_s     = 0.185f;  // s  — HR refractory period (covers guard band 303 BPM: 198 ms period)
     constexpr float    hr1_dc_tau_s             = 1.6f;   // s  — HR1 DC removal IIR time constant
 
@@ -249,8 +249,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_lpf({0.0f, 10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
       _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0),
       _spo2_warmup_s(spo2_warmup_s),
-      _spo2_dc_iir_tau_s(dc_iir_tau_s),
-      _spo2_ac_ema_tau_s(ac_ema_tau_s),
+      _spo2_dc_iir_tau_s(spo2_dc_iir_tau_s),
+      _spo2_ac_ema_tau_s(spo2_ac_ema_tau_s),
       _spo2_min(spo2_min),
       _spo2_max(spo2_max),
       _spo2_min_dc(spo2_min_dc),
