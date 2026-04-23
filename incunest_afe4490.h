@@ -319,7 +319,7 @@ private:
     struct BiquadState { float v1, v2; };
 
     // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
-    // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _sample_rate_hz.
+    // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
     // _biquad_step() and _biquad_precharge() operate on state in-place.
     struct BiquadFilter {
         float f_low, f_high;          // cutoff frequencies (Hz) — parameterisable at runtime
@@ -338,17 +338,17 @@ private:
     // Sign-extend 22-bit two's complement ADC output
     static int32_t _sign_extend_22(uint32_t raw);
 
-    // Recomputes rate-dependent algorithm parameters from _sample_rate_hz
+    // Recomputes rate-dependent algorithm parameters from _afe_sample_rate_hz
     void _recalc_rate_params();
-    // Recomputes Butterworth bandpass biquad coefficients into filt from _sample_rate_hz and filt.f_low/f_high
+    // Recomputes Butterworth bandpass biquad coefficients into filt from _afe_sample_rate_hz and filt.f_low/f_high
     void _recalc_biquad(BiquadFilter& filt);
     // Recomputes Butterworth low-pass biquad coefficients into filt (uses filt.f_high as cutoff)
     void _recalc_biquad_lp(BiquadFilter& filt);
     // Returns TIA settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window)
     uint32_t _compute_settle_margin() const;
-    // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for _tia_gain.
+    // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for _afe_tia_gain.
     // Called automatically by _recalc_rate_params() and setTIAGain(); setTIACF() overrides this.
-    void _recalc_tia_cf();
+    void _recalc_afe_tia_cf();
 
     // Chip init
 #ifndef INCUNEST_OFFLINE
@@ -403,7 +403,7 @@ private:
     // ── FreeRTOS ──
     SemaphoreHandle_t _drdy_sem;
     SemaphoreHandle_t _spi_mutex;    // protects SPI bus access (_write_reg / _read_spi_raw)
-    SemaphoreHandle_t _state_mutex;  // protects internal processing state (_ppg_channel, filter
+    SemaphoreHandle_t _state_mutex;  // protects internal processing state (_ppgdisp_channel, filter
                                      // buffers, SpO2/HR accumulators) shared between _process_sample()
                                      // and the config setters that do not access the SPI bus
     QueueHandle_t     _data_queue;
@@ -450,27 +450,27 @@ private:
 #endif
 
     // ── Chip configuration ──
-    uint16_t          _sample_rate_hz;
-    uint8_t           _num_averages;     // user-visible count (1 = no averaging)
-    float             _led1_current_mA;
-    float             _led2_current_mA;
-    uint8_t           _led_range_mA;     // 75 or 150
-    AFE4490TIAGain    _tia_gain;
-    AFE4490TIACF      _tia_cf;
-    AFE4490Stage2Gain _stage2_gain;
+    uint16_t          _afe_sample_rate_hz;
+    uint8_t           _afe_adc_averages;     // user-visible count (1 = no averaging)
+    float             _afe_led1_current_mA;
+    float             _afe_led2_current_mA;
+    uint8_t           _afe_led_range_mA;     // 75 or 150
+    AFE4490TIAGain    _afe_tia_gain;
+    AFE4490TIACF      _afe_tia_cf;
+    AFE4490Stage2Gain _afe_stage2_gain;
 
     // ── Signal processing configuration ──
-    AFE4490Channel    _ppg_channel;
-    AFE4490Filter     _filter_type;
+    AFE4490Channel    _ppgdisp_channel;
+    AFE4490Filter     _ppgdisp_filter_type;
 
     // ── PPG display filter (Butterworth bandpass or MA, configurable via setFilter()) ──
-    BiquadFilter      _ppg_bpf;          // default: 0.5–20 Hz
+    BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz
 
-    // ── Moving average state (PPG display filter — used when _filter_type == MOVING_AVERAGE) ──
+    // ── Moving average state (PPG display filter — used when _ppgdisp_filter_type == MOVING_AVERAGE) ──
     static constexpr int ma_len = 8;
-    float    _ma_buf[ma_len];
-    int      _ma_idx;
-    float    _ma_sum;
+    float    _ppgdisp_ma_buf[ma_len];
+    int      _ppgdisp_ma_idx;
+    float    _ppgdisp_ma_sum;
 
     // ── HR1 moving average state (independent of PPG display filter) ──
     static constexpr int hr1_ma_max_len = 64;  // supports up to 640 Hz @ 5 Hz cutoff
@@ -479,18 +479,18 @@ private:
     int      _hr1_ma_idx;
     float    _hr1_ma_sum;
 
-    // ── Rate-dependent algorithm parameters (derived from _sample_rate_hz) ──
+    // ── Rate-dependent algorithm parameters (derived from _afe_sample_rate_hz) ──
     uint32_t          _spo2_warmup_samples;
     uint32_t          _hr1_refractory_samples;
-    float             _dc_iir_alpha;
-    float             _ac_ema_beta;
+    float             _spo2_dc_iir_alpha;
+    float             _spo2_ac_ema_beta;
     float             _hr1_dc_alpha;
 
     // ── SpO2 state ──
-    float    _dc_ir;
-    float    _dc_red;
-    float    _ac2_ir;
-    float    _ac2_red;
+    float    _spo2_dc_ir;
+    float    _spo2_dc_red;
+    float    _spo2_ac2_ir;
+    float    _spo2_ac2_red;
     uint32_t _spo2_sample_count;
     float    _spo2_a;
     float    _spo2_b;

@@ -223,21 +223,21 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr2_computing(false), _hr3_computing(false),
       _hr2_result(0.0f), _hr2_sqi_result(0.0f),
       _hr3_result(0.0f), _hr3_sqi_result(0.0f),
-      _sample_rate_hz(500), _num_averages(8),
-      _led1_current_mA(11.7f), _led2_current_mA(11.7f), _led_range_mA(150),
-      _tia_gain(AFE4490TIAGain::RF_500K),
-      _tia_cf(AFE4490TIACF::CF_5P),
-      _stage2_gain(AFE4490Stage2Gain::GAIN_0DB),
-      _ppg_channel(AFE4490Channel::LED1_ALED1),
-      _filter_type(AFE4490Filter::BUTTERWORTH),
-      _ppg_bpf({0.5f, 20.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
-      _ma_idx(0), _ma_sum(0.0f),
+      _afe_sample_rate_hz(500), _afe_adc_averages(8),
+      _afe_led1_current_mA(11.7f), _afe_led2_current_mA(11.7f), _afe_led_range_mA(150),
+      _afe_tia_gain(AFE4490TIAGain::RF_500K),
+      _afe_tia_cf(AFE4490TIACF::CF_5P),
+      _afe_stage2_gain(AFE4490Stage2Gain::GAIN_0DB),
+      _ppgdisp_channel(AFE4490Channel::LED1_ALED1),
+      _ppgdisp_filter_type(AFE4490Filter::BUTTERWORTH),
+      _ppgdisp_bpf({0.5f, 20.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
+      _ppgdisp_ma_idx(0), _ppgdisp_ma_sum(0.0f),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_dc_alpha(0.0f),
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
-      _dc_iir_alpha(0.0f), _ac_ema_beta(0.0f),
-      _dc_ir(0.0f), _dc_red(0.0f),
-      _ac2_ir(0.0f), _ac2_red(0.0f),
+      _spo2_dc_iir_alpha(0.0f), _spo2_ac_ema_beta(0.0f),
+      _spo2_dc_ir(0.0f), _spo2_dc_red(0.0f),
+      _spo2_ac2_ir(0.0f), _spo2_ac2_red(0.0f),
       _spo2_sample_count(0),
       _spo2_a(spo2_a_default), _spo2_b(spo2_b_default),
       _hr1_dc(0.0f),
@@ -265,7 +265,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm)
 {
-    memset(_ma_buf, 0, sizeof(_ma_buf));
+    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
     memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
     _hr1_ma_idx = 0; _hr1_ma_sum = 0.0f;
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
@@ -341,7 +341,7 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy) {
         INCUNEST_AFE4490_HR3_TASK_STACK, this,
         INCUNEST_AFE4490_HR23_TASK_PRIORITY, &_hr3_task_handle, 1);
 
-    ESP_LOGI(TAG, "Started: PRF=%u Hz, NUMAV=%u", _sample_rate_hz, _num_averages);
+    ESP_LOGI(TAG, "Started: PRF=%u Hz, NUMAV=%u", _afe_sample_rate_hz, _afe_adc_averages);
 }
 #endif
 
@@ -356,7 +356,7 @@ void INCUNEST_AFE4490::setSampleRate(uint16_t hz) {
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
 
-    _sample_rate_hz = hz;
+    _afe_sample_rate_hz = hz;
 
     // Maximum averages = floor(T_conv_window / T_conv_min) = floor(PRP/4 / 50µs) where PRP (Pulse Repetition Period)
     // With PRF 500 Hz then PRP is 2000 µs and max_averages = 10 (NUMAV = 9 = 10-1)
@@ -364,11 +364,11 @@ void INCUNEST_AFE4490::setSampleRate(uint16_t hz) {
     uint8_t numav_max = (uint8_t)((5000u / hz) - 1u);
     if (numav_max > 15) numav_max = 15;
 
-    if ((_num_averages - 1u) > numav_max) {
+    if ((_afe_adc_averages - 1u) > numav_max) {
         uint8_t clamped = numav_max + 1u;
         ESP_LOGE(TAG, "setSampleRate: num_averages clamped %u→%u at %u Hz",
-                 _num_averages, clamped, hz);
-        _num_averages = clamped;
+                 _afe_adc_averages, clamped, hz);
+        _afe_adc_averages = clamped;
     }
 
     _recalc_rate_params();
@@ -385,20 +385,20 @@ void INCUNEST_AFE4490::setSampleRate(uint16_t hz) {
 void INCUNEST_AFE4490::setAdcAverages(uint8_t num) {
     if (num == 0) num = 1;
 
-    uint8_t numav_max = (uint8_t)((5000u / _sample_rate_hz) - 1u);
+    uint8_t numav_max = (uint8_t)((5000u / _afe_sample_rate_hz) - 1u);
     if (numav_max > 15) numav_max = 15;
 
     if ((uint8_t)(num - 1u) > numav_max) {
         uint8_t clamped = numav_max + 1u;
         ESP_LOGE(TAG, "setAdcAverages: %u clamped to %u (max at %u Hz)",
-                 num, clamped, _sample_rate_hz);
+                 num, clamped, _afe_sample_rate_hz);
         num = clamped;
     }
 
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _num_averages = num;
+    _afe_adc_averages = num;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_control_regs();
@@ -411,7 +411,7 @@ void INCUNEST_AFE4490::setLED1Current(float mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _led1_current_mA = constrain(mA, 0.0f, (float)_led_range_mA);
+    _afe_led1_current_mA = constrain(mA, 0.0f, (float)_afe_led_range_mA);
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -424,7 +424,7 @@ void INCUNEST_AFE4490::setLED2Current(float mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _led2_current_mA = constrain(mA, 0.0f, (float)_led_range_mA);
+    _afe_led2_current_mA = constrain(mA, 0.0f, (float)_afe_led_range_mA);
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -441,7 +441,7 @@ void INCUNEST_AFE4490::setLEDRange(uint8_t mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _led_range_mA = mA;
+    _afe_led_range_mA = mA;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -454,8 +454,8 @@ void INCUNEST_AFE4490::setTIAGain(AFE4490TIAGain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _tia_gain = gain;
-    _recalc_tia_cf();   // update CF for new RF (setTIACF() can override afterwards)
+    _afe_tia_gain = gain;
+    _recalc_afe_tia_cf();   // update CF for new RF (setTIACF() can override afterwards)
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -468,7 +468,7 @@ void INCUNEST_AFE4490::setTIACF(AFE4490TIACF cf) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _tia_cf = cf;
+    _afe_tia_cf = cf;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -481,7 +481,7 @@ void INCUNEST_AFE4490::setStage2Gain(AFE4490Stage2Gain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _stage2_gain = gain;
+    _afe_stage2_gain = gain;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -492,27 +492,27 @@ void INCUNEST_AFE4490::setStage2Gain(AFE4490Stage2Gain gain) {
 
 void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _ppg_channel = channel;
+    _ppgdisp_channel = channel;
     // Reset filter state: changing channel means a different signal enters the filter
-    _ppg_bpf.state          = {0.0f, 0.0f};
-    _ppg_bpf.needs_precharge = true;
-    memset(_ma_buf, 0, sizeof(_ma_buf));
-    _ma_idx = 0;
-    _ma_sum = 0.0f;
+    _ppgdisp_bpf.state          = {0.0f, 0.0f};
+    _ppgdisp_bpf.needs_precharge = true;
+    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
+    _ppgdisp_ma_idx = 0;
+    _ppgdisp_ma_sum = 0.0f;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
 void INCUNEST_AFE4490::setFilter(AFE4490Filter type, float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _filter_type        = type;
-    _ppg_bpf.f_low      = f_low_hz;
-    _ppg_bpf.f_high     = f_high_hz;
-    if (type == AFE4490Filter::BUTTERWORTH) _recalc_biquad(_ppg_bpf);
-    _ppg_bpf.state           = {0.0f, 0.0f};
-    _ppg_bpf.needs_precharge = true;
-    memset(_ma_buf, 0, sizeof(_ma_buf));
-    _ma_idx = 0;
-    _ma_sum = 0.0f;
+    _ppgdisp_filter_type        = type;
+    _ppgdisp_bpf.f_low      = f_low_hz;
+    _ppgdisp_bpf.f_high     = f_high_hz;
+    if (type == AFE4490Filter::BUTTERWORTH) _recalc_biquad(_ppgdisp_bpf);
+    _ppgdisp_bpf.state           = {0.0f, 0.0f};
+    _ppgdisp_bpf.needs_precharge = true;
+    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
+    _ppgdisp_ma_idx = 0;
+    _ppgdisp_ma_sum = 0.0f;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -636,14 +636,14 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    cfg.afe_sample_rate_hz  = _sample_rate_hz;
-    cfg.afe_adc_averages    = _num_averages;
-    cfg.afe_led1_current_mA = _led1_current_mA;
-    cfg.afe_led2_current_mA = _led2_current_mA;
-    cfg.afe_led_range_mA    = _led_range_mA;
-    cfg.afe_tia_gain        = _tia_gain;
-    cfg.afe_tia_cf          = _tia_cf;
-    cfg.afe_stage2_gain     = _stage2_gain;
+    cfg.afe_sample_rate_hz  = _afe_sample_rate_hz;
+    cfg.afe_adc_averages    = _afe_adc_averages;
+    cfg.afe_led1_current_mA = _afe_led1_current_mA;
+    cfg.afe_led2_current_mA = _afe_led2_current_mA;
+    cfg.afe_led_range_mA    = _afe_led_range_mA;
+    cfg.afe_tia_gain        = _afe_tia_gain;
+    cfg.afe_tia_cf          = _afe_tia_cf;
+    cfg.afe_stage2_gain     = _afe_stage2_gain;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_spi_mutex);
 #endif
@@ -652,10 +652,10 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
 #endif
-    cfg.ppgdisp_channel      = _ppg_channel;
-    cfg.ppgdisp_filter_type  = _filter_type;
-    cfg.ppgdisp_f_low_hz     = _ppg_bpf.f_low;
-    cfg.ppgdisp_f_high_hz    = _ppg_bpf.f_high;
+    cfg.ppgdisp_channel      = _ppgdisp_channel;
+    cfg.ppgdisp_filter_type  = _ppgdisp_filter_type;
+    cfg.ppgdisp_f_low_hz     = _ppgdisp_bpf.f_low;
+    cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
     cfg.hr3_f_high_hz    = _hr3_lpf.f_high;
@@ -760,8 +760,8 @@ void INCUNEST_AFE4490::stop() {
 
 // ── _reset_algorithms() ───────────────────────────────────────────────────────
 void INCUNEST_AFE4490::_reset_algorithms() {
-    _dc_ir  = 0.0f; _dc_red  = 0.0f;
-    _ac2_ir = 0.0f; _ac2_red = 0.0f;
+    _spo2_dc_ir  = 0.0f; _spo2_dc_red  = 0.0f;
+    _spo2_ac2_ir = 0.0f; _spo2_ac2_red = 0.0f;
     _spo2_sample_count = 0;
     _hr1_dc                    = 0.0f;
     _hr1_running_max           = 0.0f;
@@ -770,10 +770,10 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr1_sample_idx     = 0;
     _hr1_interval_count = 0;
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
-    _ppg_bpf.state           = {0.0f, 0.0f};
-    _ppg_bpf.needs_precharge = true;
-    memset(_ma_buf, 0, sizeof(_ma_buf));
-    _ma_idx = 0; _ma_sum = 0.0f;
+    _ppgdisp_bpf.state           = {0.0f, 0.0f};
+    _ppgdisp_bpf.needs_precharge = true;
+    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
+    _ppgdisp_ma_idx = 0; _ppgdisp_ma_sum = 0.0f;
     _hr2_bpf.state           = {0.0f, 0.0f};
     _hr2_bpf.needs_precharge = true;
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
@@ -842,7 +842,7 @@ uint32_t INCUNEST_AFE4490::runDiagnostics(uint32_t diag_holdoff_ms) {
     xSemaphoreGive(_spi_mutex);
     // Set holdoff before clearing _diag_active so _task_body() cannot slip through
     // with a real SPI read between the two assignments.
-    _diag_holdoff_samples = (uint32_t)((uint64_t)diag_holdoff_ms * _sample_rate_hz / 1000);
+    _diag_holdoff_samples = (uint32_t)((uint64_t)diag_holdoff_ms * _afe_sample_rate_hz / 1000);
     _diag_active = false;                       // resume; holdoff takes over if diag_holdoff_ms > 0
     return result;
 }
@@ -877,13 +877,13 @@ void INCUNEST_AFE4490::_chip_init() {
 }
 
 void INCUNEST_AFE4490::_apply_timing_regs() {
-    // Datasheet Table 2 formulas, PRF = _sample_rate_hz
+    // Datasheet Table 2 formulas, PRF = _afe_sample_rate_hz
     // AFECLK = 4 MHz → 1 count = 0.25 µs  (afeclk is in the anonymous namespace)
     const uint32_t tia_margin = _compute_settle_margin();  // TIA settling after LED ON
     const uint32_t ambient_margin  = 200;  // counts (50 µs) — LED OFF decay before ambient sampling
     const uint32_t adc_reset       = 3;    // counts (0.75 µs → -60 dB crosstalk)
 
-    uint32_t phase = afeclk / _sample_rate_hz;
+    uint32_t phase = afeclk / _afe_sample_rate_hz;
     uint32_t prp   = phase - 1;
     uint32_t q     = phase / 4;        // quarter period
 
@@ -925,9 +925,9 @@ void INCUNEST_AFE4490::_apply_timing_regs() {
 }
 
 uint32_t INCUNEST_AFE4490::_build_tiagain() {
-    uint32_t reg = rf_code[(int)_tia_gain];       // bits [2:0]
-    reg         |= cf_code[(int)_tia_cf];         // bits [7:3]
-    reg         |= stg2_code[(int)_stage2_gain];  // bits [10:8] + bit[14]
+    uint32_t reg = rf_code[(int)_afe_tia_gain];       // bits [2:0]
+    reg         |= cf_code[(int)_afe_tia_cf];         // bits [7:3]
+    reg         |= stg2_code[(int)_afe_stage2_gain];  // bits [10:8] + bit[14]
     return reg;
 }
 
@@ -942,10 +942,10 @@ void INCUNEST_AFE4490::_apply_analog_regs() {
 
     // LEDCNTRL: LED_RANGE | (code_led1 << 8) | code_led2
     // I (mA) = (code / 256) * full_scale_mA
-    float fs = (float)_led_range_mA;
-    uint8_t code1 = (uint8_t)constrain(roundf((_led1_current_mA / fs) * 256.0f), 0.0f, 255.0f);
-    uint8_t code2 = (uint8_t)constrain(roundf((_led2_current_mA / fs) * 256.0f), 0.0f, 255.0f);
-    uint32_t range_bit = (_led_range_mA == 75) ? 0x010000UL : 0x000000UL;
+    float fs = (float)_afe_led_range_mA;
+    uint8_t code1 = (uint8_t)constrain(roundf((_afe_led1_current_mA / fs) * 256.0f), 0.0f, 255.0f);
+    uint8_t code2 = (uint8_t)constrain(roundf((_afe_led2_current_mA / fs) * 256.0f), 0.0f, 255.0f);
+    uint32_t range_bit = (_afe_led_range_mA == 75) ? 0x010000UL : 0x000000UL;
     _write_reg(REG_LEDCNTRL, range_bit | ((uint32_t)code1 << 8) | code2);
 
     // CONTROL2: TX_REF=0x00 (0.75 V), all subsystems powered on, H-bridge, crystal enabled
@@ -954,32 +954,32 @@ void INCUNEST_AFE4490::_apply_analog_regs() {
 
 void INCUNEST_AFE4490::_apply_control_regs() {
     // CONTROL1: TIMEREN | NUMAV
-    uint8_t numav = (_num_averages > 0) ? (_num_averages - 1u) : 0u;
+    uint8_t numav = (_afe_adc_averages > 0) ? (_afe_adc_averages - 1u) : 0u;
     _write_reg(REG_CONTROL1, ctrl1_timeren | numav);
 }
 #endif  // !INCUNEST_OFFLINE
 
 void INCUNEST_AFE4490::_recalc_rate_params() {
-    float fs              = (float)_sample_rate_hz;
+    float fs              = (float)_afe_sample_rate_hz;
     _spo2_warmup_samples    = (uint32_t)(_spo2_warmup_s    * fs);
     _hr1_refractory_samples = (uint32_t)(hr_refractory_s   * fs);
-    _dc_iir_alpha           = expf(-1.0f / (_spo2_dc_iir_tau_s * fs));
-    _ac_ema_beta            = 1.0f - expf(-1.0f / (_spo2_ac_ema_tau_s * fs));
+    _spo2_dc_iir_alpha           = expf(-1.0f / (_spo2_dc_iir_tau_s * fs));
+    _spo2_ac_ema_beta            = 1.0f - expf(-1.0f / (_spo2_ac_ema_tau_s * fs));
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
     _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
     if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) _hr1_ma_len = (uint32_t)hr1_ma_max_len;
-    _recalc_biquad(_ppg_bpf);
+    _recalc_biquad(_ppgdisp_bpf);
     _recalc_biquad(_hr2_bpf);
     _recalc_biquad_lp(_hr3_lpf);
-    _recalc_tia_cf();
+    _recalc_afe_tia_cf();
 }
 
 void INCUNEST_AFE4490::_recalc_biquad_lp(BiquadFilter& filt) {
     // 2nd-order Butterworth low-pass via bilinear transform.
     // Uses filt.f_high as the -3 dB cutoff frequency.
     // DC gain = 1.0; state unchanged (caller is responsible for resetting if needed).
-    float fs   = (float)_sample_rate_hz;
+    float fs   = (float)_afe_sample_rate_hz;
     float Ohm  = tanf(pi * filt.f_high / fs);  // prewarped cutoff
     float Ohm2 = Ohm * Ohm;
     float sqrt2 = 1.41421356f;
@@ -993,23 +993,23 @@ void INCUNEST_AFE4490::_recalc_biquad_lp(BiquadFilter& filt) {
 
 uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
     // Settle window = max(tia_settle_min, tia_settle_fraction × LED-on window)
-    // LED-on window = quarter period = afeclk / (4 × _sample_rate_hz) counts
-    uint32_t q      = (afeclk / _sample_rate_hz) / 4u;
+    // LED-on window = quarter period = afeclk / (4 × _afe_sample_rate_hz) counts
+    uint32_t q      = (afeclk / _afe_sample_rate_hz) / 4u;
     uint32_t margin = (uint32_t)((float)q * tia_settle_fraction);
     return (margin < tia_settle_min) ? tia_settle_min : margin;
 }
 
-void INCUNEST_AFE4490::_recalc_tia_cf() {
+void INCUNEST_AFE4490::_recalc_afe_tia_cf() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF)
     // Select the largest CF enum whose physical value (pF) satisfies the constraint.
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
-    float cf_max_pF = (tau_max / tia_rf_ohm[(int)_tia_gain]) * 1e12f;
+    float cf_max_pF = (tau_max / tia_rf_ohm[(int)_afe_tia_gain]) * 1e12f;
 
-    _tia_cf = AFE4490TIACF::CF_5P;   // minimum fallback
+    _afe_tia_cf = AFE4490TIACF::CF_5P;   // minimum fallback
     for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
         if (tia_cf_pF[i] <= cf_max_pF) {
-            _tia_cf = (AFE4490TIACF)i;
+            _afe_tia_cf = (AFE4490TIACF)i;
             break;
         }
     }
@@ -1018,7 +1018,7 @@ void INCUNEST_AFE4490::_recalc_tia_cf() {
 void INCUNEST_AFE4490::_recalc_biquad(BiquadFilter& filt) {
     // 2nd-order Butterworth bandpass via bilinear transform.
     // Analog prototype: H(s) = BW·s / (s² + BW·s + Ω₀²)
-    float fs    = (float)_sample_rate_hz;
+    float fs    = (float)_afe_sample_rate_hz;
     float k     = 2.0f * fs;
     float o_low = k * tanf(pi * filt.f_low  / fs);
     float o_hi  = k * tanf(pi * filt.f_high / fs);
@@ -1104,7 +1104,7 @@ void INCUNEST_AFE4490::_task_body() {
         _diag_last_led1_aled1 = led1_diff;
         _diag_last_led2_aled2 = led2_diff;
 
-        // _state_mutex: protects internal processing state (_ppg_channel, filter
+        // _state_mutex: protects internal processing state (_ppgdisp_channel, filter
         // buffers, SpO2/HR accumulators) against concurrent config setter calls.
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
         _process_sample(led1, led2, aled1, aled2, led1_diff, led2_diff);
@@ -1161,7 +1161,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
                                    int32_t led1_aled1, int32_t led2_aled2) {
     // Select PPG source
     float raw_ppg;
-    switch (_ppg_channel) {
+    switch (_ppgdisp_channel) {
         case AFE4490Channel::LED1:       raw_ppg = (float)led1;       break;
         case AFE4490Channel::LED2:       raw_ppg = (float)led2;       break;
         case AFE4490Channel::ALED1:      raw_ppg = (float)aled1;      break;
@@ -1172,16 +1172,16 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 
     // Apply filter
     float filtered;
-    switch (_filter_type) {
+    switch (_ppgdisp_filter_type) {
         case AFE4490Filter::BUTTERWORTH:
-            filtered = _biquad_process(raw_ppg, _ppg_bpf);
+            filtered = _biquad_process(raw_ppg, _ppgdisp_bpf);
             break;
         case AFE4490Filter::MOVING_AVERAGE: {
-            _ma_sum -= _ma_buf[_ma_idx];
-            _ma_buf[_ma_idx] = raw_ppg;
-            _ma_sum += raw_ppg;
-            _ma_idx = (_ma_idx + 1) % ma_len;
-            filtered = _ma_sum / (float)ma_len;
+            _ppgdisp_ma_sum -= _ppgdisp_ma_buf[_ppgdisp_ma_idx];
+            _ppgdisp_ma_buf[_ppgdisp_ma_idx] = raw_ppg;
+            _ppgdisp_ma_sum += raw_ppg;
+            _ppgdisp_ma_idx = (_ppgdisp_ma_idx + 1) % ma_len;
+            filtered = _ppgdisp_ma_sum / (float)ma_len;
             break;
         }
         default: /* NONE */
@@ -1281,7 +1281,7 @@ void INCUNEST_AFE4490::_emit_timing() {
 // Does NOT use uxTaskGetSystemState() — avoids requiring configUSE_TRACE_FACILITY=1
 // in the precompiled Arduino ESP32 FreeRTOS library.
 void INCUNEST_AFE4490::_emit_tasks() {
-    uint64_t window_us = (uint64_t)ts_emit_interval * 1000000u / _sample_rate_hz;
+    uint64_t window_us = (uint64_t)ts_emit_interval * 1000000u / _afe_sample_rate_hz;
 
     struct LibTask { const char* name; uint64_t sum_us; TaskHandle_t handle; };
     LibTask lib_tasks[] = {
@@ -1317,37 +1317,37 @@ void INCUNEST_AFE4490::_update_spo2(int32_t ir_corr, int32_t red_corr) {
     float red = (float)red_corr;
 
     // IIR DC extraction
-    _dc_ir  = _dc_iir_alpha * _dc_ir  + (1.0f - _dc_iir_alpha) * ir;
-    _dc_red = _dc_iir_alpha * _dc_red + (1.0f - _dc_iir_alpha) * red;
+    _spo2_dc_ir  = _spo2_dc_iir_alpha * _spo2_dc_ir  + (1.0f - _spo2_dc_iir_alpha) * ir;
+    _spo2_dc_red = _spo2_dc_iir_alpha * _spo2_dc_red + (1.0f - _spo2_dc_iir_alpha) * red;
 
     // EMA of AC²
-    float ac_ir  = ir  - _dc_ir;
-    float ac_red = red - _dc_red;
-    _ac2_ir  = _ac_ema_beta * ac_ir  * ac_ir  + (1.0f - _ac_ema_beta) * _ac2_ir;
-    _ac2_red = _ac_ema_beta * ac_red * ac_red + (1.0f - _ac_ema_beta) * _ac2_red;
+    float ac_ir  = ir  - _spo2_dc_ir;
+    float ac_red = red - _spo2_dc_red;
+    _spo2_ac2_ir  = _spo2_ac_ema_beta * ac_ir  * ac_ir  + (1.0f - _spo2_ac_ema_beta) * _spo2_ac2_ir;
+    _spo2_ac2_red = _spo2_ac_ema_beta * ac_red * ac_red + (1.0f - _spo2_ac_ema_beta) * _spo2_ac2_red;
 
     // Perfusion Index (always updated, independent of SpO2 warmup)
-    _current_data.pi = (_dc_ir > 1.0f) ? (sqrtf(_ac2_ir) / _dc_ir) * 100.0f : -1.0f;
+    _current_data.pi = (_spo2_dc_ir > 1.0f) ? (sqrtf(_spo2_ac2_ir) / _spo2_dc_ir) * 100.0f : -1.0f;
 
     _spo2_sample_count++;
 
     // Skip during warmup or if DC is too low (no finger)
     if (_spo2_sample_count < _spo2_warmup_samples ||
-        _dc_ir < _spo2_min_dc || _dc_red < _spo2_min_dc) {
+        _spo2_dc_ir < _spo2_min_dc || _spo2_dc_red < _spo2_min_dc) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
 
-    float rms_ac_ir  = sqrtf(_ac2_ir);
-    float rms_ac_red = sqrtf(_ac2_red);
+    float rms_ac_ir  = sqrtf(_spo2_ac2_ir);
+    float rms_ac_red = sqrtf(_spo2_ac2_red);
 
     // Avoid division by near-zero
-    if (_dc_ir < 1.0f || _dc_red < 1.0f || rms_ac_ir < 1.0f) {
+    if (_spo2_dc_ir < 1.0f || _spo2_dc_red < 1.0f || rms_ac_ir < 1.0f) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
 
-    float R    = (rms_ac_red / _dc_red) / (rms_ac_ir / _dc_ir);
+    float R    = (rms_ac_red / _spo2_dc_red) / (rms_ac_ir / _spo2_dc_ir);
     float spo2 = _spo2_a - _spo2_b * R;
 
     _current_data.spo2_r = R;
@@ -1414,7 +1414,7 @@ void INCUNEST_AFE4490::_update_hr1(int32_t led1_aled1) {
     for (int i = 0; i < 5; i++) sum += (float)_hr1_intervals[i];
     float avg_interval = sum / 5.0f;
 
-    float hr1 = ((float)_sample_rate_hz * 60.0f) / avg_interval;
+    float hr1 = ((float)_afe_sample_rate_hz * 60.0f) / avg_interval;
 
     if (hr1 >= _hr_min_bpm && hr1 <= _hr_max_bpm) {
         _current_data.hr1 = hr1;
@@ -1470,7 +1470,7 @@ void INCUNEST_AFE4490::_compute_hr2() {
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
     if (acorr0 < 1.0f) { _hr2_sqi_result = 0.0f; return; }
 
-    float fs2     = (float)_sample_rate_hz / (float)hr2_decim_factor;
+    float fs2     = (float)_afe_sample_rate_hz / (float)hr2_decim_factor;
     int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * fs2);
     if (min_lag < 1) min_lag = 1;
     int   max_lag = hr2_acorr_max_lag;
@@ -1573,7 +1573,7 @@ void INCUNEST_AFE4490::_compute_hr3() {
     _fft_r2(_hr3_fft, hr3_buf_len);
 
     // ── Find HPS peak in guard-band search range ──
-    float fs_dec   = (float)_sample_rate_hz / (float)hr3_decim_factor;
+    float fs_dec   = (float)_afe_sample_rate_hz / (float)hr3_decim_factor;
     float bin_res  = fs_dec / (float)hr3_buf_len;
 
     int search_min = (int)ceilf((_hr_min_bpm - 3.0f) / 60.0f / bin_res);
