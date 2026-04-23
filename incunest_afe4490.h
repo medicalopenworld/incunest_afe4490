@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.22"
+#define INCUNEST_AFE4490_VERSION "0.23"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -142,18 +142,18 @@ struct AFE4490TimingConfig {
 // ── Chip configuration snapshot ───────────────────────────────────────────────
 // Returned by getConfig(). Groups all runtime-configurable parameters.
 struct AFE4490Config {
-    uint16_t          sample_rate_hz;    // ADC sample rate [Hz]
-    uint8_t           num_averages;      // ADC hardware averages (1 = no averaging)
-    float             led1_current_mA;   // IR LED drive current [mA]
-    float             led2_current_mA;   // RED LED drive current [mA]
-    uint8_t           led_range_mA;      // LED full-scale range: 75 or 150 mA
-    AFE4490TIAGain    tia_gain;          // TIA transimpedance gain (RF)
-    AFE4490TIACF      tia_cf;            // TIA feedback capacitance
-    AFE4490Stage2Gain stage2_gain;       // Stage 2 amplifier gain
-    AFE4490Channel    ppg_channel;       // PPG display channel selection
-    AFE4490Filter     filter_type;       // PPG display filter type
-    float             filter_f_low_hz;   // PPG display bandpass lower cutoff [Hz]
-    float             filter_f_high_hz;  // PPG display bandpass upper cutoff [Hz]
+    uint16_t          afe_sample_rate_hz;    // ADC sample rate [Hz]
+    uint8_t           afe_adc_averages;      // ADC hardware averages (1 = no averaging)
+    float             afe_led1_current_mA;   // IR LED drive current [mA]
+    float             afe_led2_current_mA;   // RED LED drive current [mA]
+    uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
+    AFE4490TIAGain    afe_tia_gain;          // TIA transimpedance gain (RF)
+    AFE4490TIACF      afe_tia_cf;            // TIA feedback capacitance
+    AFE4490Stage2Gain afe_stage2_gain;       // Stage 2 amplifier gain
+    AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
+    AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
+    float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
+    float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;     // HR3 anti-aliasing LP cutoff [Hz]
@@ -177,7 +177,7 @@ public:
 
     // Chip configuration setters (callable before or after begin())
     void setSampleRate(uint16_t hz);        // 63–5000 Hz; recalculates NUMAV_max
-    void setNumAverages(uint8_t num);       // 1=no averaging; clamped to floor(5000/PRF)
+    void setAdcAverages(uint8_t num);       // 1=no averaging; clamped to floor(5000/PRF)
     void setLED1Current(float mA);
     void setLED2Current(float mA);
     void setLEDRange(uint8_t mA);           // 75 or 150 mA
@@ -253,8 +253,15 @@ public:
     // Holds _spi_mutex for ~10 ms to prevent the data task from clearing CONTROL0.
     // Returns the raw 24-bit DIAG register (0x30) with all 13 diagnostic flags.
     // Returns 0 if the library is not initialized.
+    //
+    // diag_holdoff_ms: after diagnostics end, _task_body() feeds the last valid
+    // raw ADC values into _process_sample() for this many milliseconds instead of
+    // reading the chip. This replaces transient outliers (analog front-end re-settling
+    // after DIAG_EN is cleared) with neutral frozen input that the IIR/BPF/LP filters
+    // absorb gracefully. Set to 0 to observe the raw diagnostic artefacts.
+    // Default: 10 ms (~5 samples at 500 Hz), covers worst-case TIA settling (RF_1M + CF_155P: 5τ ≈ 775 µs).
 #ifndef INCUNEST_OFFLINE
-    uint32_t runDiagnostics();
+    uint32_t runDiagnostics(uint32_t diag_holdoff_ms = 10);
 #endif
 
     // ISR entry point (must be public for static trampoline)
@@ -358,7 +365,11 @@ private:
     QueueHandle_t     _data_queue;
     TaskHandle_t      _task_handle;
     bool              _initialized;
-    volatile bool     _diag_active;  // true while runDiagnostics() holds DIAG_EN; _task_body() skips reads
+    volatile bool     _diag_active;          // true while runDiagnostics() holds DIAG_EN; _task_body() skips reads
+    volatile uint32_t _diag_holdoff_samples; // countdown after diagnostics end; _task_body() feeds frozen raw input
+    int32_t _diag_last_led1, _diag_last_led2;          // last valid raw ADC values, saved on every normal cycle
+    int32_t _diag_last_aled1, _diag_last_aled2;
+    int32_t _diag_last_led1_aled1, _diag_last_led2_aled2;
 
     // ── HR2/HR3 async computation tasks ──────────────────────────────────────
     // Task A (_task_body) runs the fast per-sample path and signals Task B/C when

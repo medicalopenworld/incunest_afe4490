@@ -115,7 +115,7 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 ### 2.3 Chip configuration
 ```cpp
 void setSampleRate(uint16_t hz);        // valid range: 63–5000 Hz. Updates PRF and recalculates NUMAV_max.
-void setNumAverages(uint8_t num);       // num = number of samples to average: 1 (no averaging) .. NUMAV_max+1
+void setAdcAverages(uint8_t num);       // num = number of samples to average: 1 (no averaging) .. NUMAV_max+1
                                         // NUMAV_max = floor(5000 / PRF) - 1  (e.g.: PRF=500Hz → max=9 → up to 10 samples)
                                         // Absolute hardware limit: 16 samples (NUMAV=15)
                                         // If num > NUMAV_max for current PRF, clamped and logE emitted
@@ -133,22 +133,22 @@ void setStage2Gain(AFE4490Stage2Gain gain);
 
 ```cpp
 struct AFE4490Config {
-    uint16_t          sample_rate_hz;    // ADC sample rate [Hz]
-    uint8_t           num_averages;      // ADC hardware averages (1 = no averaging)
-    float             led1_current_mA;   // IR LED drive current [mA]
-    float             led2_current_mA;   // RED LED drive current [mA]
-    uint8_t           led_range_mA;      // LED full-scale range: 75 or 150 mA
-    AFE4490TIAGain    tia_gain;          // TIA transimpedance gain (RF)
-    AFE4490TIACF      tia_cf;            // TIA feedback capacitance
-    AFE4490Stage2Gain stage2_gain;       // Stage 2 amplifier gain
-    AFE4490Channel    ppg_channel;       // PPG display channel selection
-    AFE4490Filter     filter_type;       // PPG display filter type
-    float             filter_f_low_hz;   // PPG display bandpass lower cutoff [Hz]
-    float             filter_f_high_hz;  // PPG display bandpass upper cutoff [Hz]
-    float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
-    float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
-    float             hr3_f_high_hz;     // HR3 anti-aliasing LP cutoff [Hz]
-    float             spo2_a;            // SpO2 = a - b*R (calibration coefficient)
+    uint16_t          afe_sample_rate_hz;    // ADC sample rate [Hz]
+    uint8_t           afe_adc_averages;      // ADC hardware averages (1 = no averaging)
+    float             afe_led1_current_mA;   // IR LED drive current [mA]
+    float             afe_led2_current_mA;   // RED LED drive current [mA]
+    uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
+    AFE4490TIAGain    afe_tia_gain;          // TIA transimpedance gain (RF)
+    AFE4490TIACF      afe_tia_cf;            // TIA feedback capacitance
+    AFE4490Stage2Gain afe_stage2_gain;       // Stage 2 amplifier gain
+    AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
+    AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
+    float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
+    float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
+    float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
+    float             hr2_f_high_hz;         // HR2 bandpass upper cutoff [Hz]
+    float             hr3_f_high_hz;         // HR3 anti-aliasing LP cutoff [Hz]
+    float             spo2_a;                // SpO2 = a - b*R (calibration coefficient)
     float             spo2_b;
 };
 AFE4490Config getConfig();
@@ -190,19 +190,25 @@ The internal queue holds up to 10 samples (`INCUNEST_AFE4490_QUEUE_SIZE`). When 
 
 ### 2.5b Hardware diagnostics
 ```cpp
-uint32_t runDiagnostics();
+uint32_t runDiagnostics(uint32_t diag_holdoff_ms = 100);
 ```
 Runs the AFE4490 hardware self-test sequence (datasheet section 8.4.3.3, Table 3).
 
+**Parameters:**
+- `diag_holdoff_ms` — duration (ms) of the post-diagnostic holdoff window. Default: 10 ms (~5 samples at 500 Hz), which covers the worst-case TIA settling time (RF_1M + CF_155P: 5τ ≈ 775 µs). Set to 0 to observe raw artefacts from the re-settling analog front-end.
+
 **Sequence:**
-1. Sets `_diag_active = true` — signals `_task_body()` to skip ADC reads.
+1. Sets `_diag_active = true` — signals `_task_body()` to skip ADC reads and repeat the last valid output.
 2. Acquires `_spi_mutex` briefly; writes `CONTROL0 = 0x000004` (DIAG_EN=1, SPI_READ=0); releases `_spi_mutex`.
 3. Waits 10 ms (chip requires 8 ms in fast mode; +2 ms margin). `_task_body()` consumes each DRDY sem, skips the SPI read, and pushes the last valid `_current_data` to the queue to preserve temporal continuity.
 4. Acquires `_spi_mutex`; sets `CONTROL0 = ctrl0_spi_read` (SPI_READ=1); reads `REG_DIAG` (0x30); restores `CONTROL0 = 0x000000`; releases `_spi_mutex`.
-5. Sets `_diag_active = false` — normal sampling resumes on the next DRDY.
+5. Sets `_diag_holdoff_samples = diag_holdoff_ms × sample_rate / 1000`, then sets `_diag_active = false`. The holdoff counter is written before the flag is cleared to prevent a race where `_task_body()` could slip through with a real SPI read between the two assignments.
+
+**Post-diagnostic holdoff (`_diag_holdoff_samples > 0`):**
+After DIAG_EN is cleared the analog front-end (TIA, stage 2) needs a few PRP cycles to re-settle. During holdoff, `_task_body()` skips the SPI read and instead calls `_process_sample()` with the frozen last-valid raw ADC values (`_diag_last_led1/2`, `_diag_last_aled1/2`, `_diag_last_led1/2_aled1/2`). A constant input is absorbed by all IIR/BPF/LP filters with near-zero AC contribution, making it far less disruptive to HR1/HR2/HR3/SpO2 than a transient outlier. The raw values are saved on every normal `_task_body()` cycle and are only accessed from that same task — no mutex is needed.
 
 **`_diag_active` flag — design rationale:**
-`_task_body()` writes `CONTROL0=0` after every ADC burst read. Without the flag, it would clear DIAG_EN mid-sequence and abort the diagnostic. The flag avoids holding `_spi_mutex` for the full 10 ms sleep (which is bad FreeRTOS practice and causes priority inversion). Instead, `_task_body()` checks `_diag_active` after `xSemaphoreTake(_drdy_sem)` and, when set, repeats the last valid `_current_data` into the queue (under `_state_mutex`) before looping. Repeating the last sample rather than dropping it preserves temporal equi-spacing, which is required by the autocorrelation (HR2) and FFT (HR3) algorithms and reduces IIR filter discontinuity at resumption. The chip physically cannot produce valid ADC data during diagnostics; the ~10 ms window (≈5 samples at 500 Hz) is unavoidable but transparent to the consumer.
+`_task_body()` writes `CONTROL0=0` after every ADC burst read. Without the flag, it would clear DIAG_EN mid-sequence and abort the diagnostic. The flag avoids holding `_spi_mutex` for the full 10 ms sleep (which is bad FreeRTOS practice and causes priority inversion). Instead, `_task_body()` checks `_diag_active` after `xSemaphoreTake(_drdy_sem)` and, when set, repeats the last valid `_current_data` into the queue (under `_state_mutex`) before looping. Repeating the last sample rather than dropping it preserves temporal equi-spacing for the autocorrelation (HR2) and FFT (HR3) algorithms and reduces IIR filter discontinuity at resumption. The chip physically cannot produce valid ADC data during diagnostics; the ~10 ms window (≈5 samples at 500 Hz) is unavoidable but transparent to the consumer.
 
 **Return value:** raw 24-bit `DIAG` register. Returns `0` if not initialized.
 
@@ -502,7 +508,7 @@ NUMAV_max = floor( (0.25 × PRP) / 50µs ) − 1
 
 **Absolute hardware limit:** NUMAV ≤ 15. Any value ≥ 15 behaves as 16 averages. This limit is only relevant at very low PRF (< 313 Hz).
 
-**`setNumAverages(uint8_t num)` behaviour:**
+**`setAdcAverages(uint8_t num)` behaviour:**
 - `num` is the number of samples to average (1 = no averaging, equivalent to NUMAV=0).
 - The library computes internally `NUMAV = num − 1`.
 - If `num > NUMAV_max + 1` for the current PRF: clamped to the maximum and `logE` emitted with the actual applied value.
@@ -803,7 +809,7 @@ Parameters written to chip registers during initialisation. Changing them requir
 | Parameter | API | Default | Range | Effect on output |
 |---|---|---|---|---|
 | Sample rate (PRF) | `setSampleRate()` | 500 Hz | 63 – 5000 Hz | Output rate; also determines LED-on window and max averages (see §7.1) |
-| Number of averages (NUMAV) | `setNumAverages()` | 8 (NUMAV=7) | 1 – NUMAV_max+1 | Hardware averaging before ADC output: SNR ∝ √N. Larger N = lower noise, higher latency. Automatically clamped to NUMAV_max for current PRF |
+| Number of averages (NUMAV) | `setAdcAverages()` | 8 (NUMAV=7) | 1 – NUMAV_max+1 | Hardware averaging before ADC output: SNR ∝ √N. Larger N = lower noise, higher latency. Automatically clamped to NUMAV_max for current PRF |
 
 > Averaging is the primary noise-reduction knob that does not alter signal bandwidth. At 500 Hz, 8 averages give ×2.83 SNR improvement at no bandwidth cost.
 
@@ -1013,7 +1019,7 @@ This section documents the exact value of each AFE4490 register written by the l
 | **CONTROL0** | 0x000000 | — | 0x000000→0x000008 | **0x000008 in init** | SW_RST ensures known state. Self-clearing. EVM does no explicit SW_RST — risk if chip was left in inconsistent state |
 | **CONTROL1** | 0x000107 | — | 0x010707 | **0x000107** | TIMEREN=1, NUMAV=7, no outputs on ALM pins |
 | → TIMEREN | 1 | — | 1 | **1** | Required for the internal timer to generate control signals |
-| → NUMAV | 7 (8 avg.) | — | 7 (8 avg.) | **7** | Default = 8 averaged samples → SNR ×√8 ≈ 2.8×. Configurable via `setNumAverages()`. See NUMAV_max formula in section 7.1 |
+| → NUMAV | 7 (8 avg.) | — | 7 (8 avg.) | **7** | Default = 8 averaged samples → SNR ×√8 ≈ 2.8×. Configurable via `setAdcAverages()`. See NUMAV_max formula in section 7.1 |
 | → CLKALMPIN | not config. | — | LED2_CONV\|LED1_CONV | **not config. (0x00)** | Protocentral outputs conversion signals on ALM pins (useful with oscilloscope). Unnecessary in production; may interfere with other uses of those pins on in3ator |
 | → bit 16 | 0 | — | 1 ⚠️ | **0** | Not documented in AFE44x0.h or identified in datasheet. Protocentral enables it without apparent justification. Not replicated until its purpose is understood |
 | **ALARM** | not config. | — | not config. | **not config.** | Not needed for basic operation. Will be added if chip diagnostics are implemented |
@@ -1085,6 +1091,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.23   | `runDiagnostics(diag_holdoff_ms = 10)`: post-diagnostic holdoff window.     |
+|         | After DIAG_EN is cleared, `_task_body()` feeds frozen last-valid raw ADC   |
+|         | values into `_process_sample()` for `diag_holdoff_ms` ms, replacing analog |
+|         | re-settling artefacts with neutral constant input that filters absorb       |
+|         | gracefully. Default 10 ms covers worst-case TIA settling (RF_1M+CF_155P:   |
+|         | 5τ ≈ 775 µs). Set to 0 to observe raw artefacts. Spec §2.5b updated.       |
 | v0.22   | `runDiagnostics()` redesigned: `_diag_active` flag replaces long mutex hold. |
 |         | `_spi_mutex` held only for brief SPI transactions, eliminating priority       |
 |         | inversion. During the ~10 ms diagnostic window, `_task_body()` repeats the   |
@@ -1188,7 +1200,7 @@ Key references for each algorithm implemented in this library.
 | v0.4    | `AFE4490Data` extended with the 6 raw AFE4490 signals (led1, led2,         |
 |         | aled1, aled2, led1_aled1, led2_aled2). Struct is now equivalent in         |
 |         | information to the protocentral output.                                    |
-| v0.3    | Configurable NUMAV: added `setNumAverages(uint8_t num)` to the API.        |
+| v0.3    | Configurable NUMAV: added `setAdcAverages(uint8_t num)` to the API.        |
 |         | Section 11.1 with NUMAV_max formula, table by PRF, clamping behaviour and  |
 |         | SNR effect. `setSampleRate()` recalculates NUMAV_max.                      |
 |         | **First implementation:** `include/incunest_afe4490.h` and                      |

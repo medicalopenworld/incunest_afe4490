@@ -214,6 +214,10 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _data_queue(nullptr), _task_handle(nullptr),
       _initialized(false),
       _diag_active(false),
+      _diag_holdoff_samples(0),
+      _diag_last_led1(0), _diag_last_led2(0),
+      _diag_last_aled1(0), _diag_last_aled2(0),
+      _diag_last_led1_aled1(0), _diag_last_led2_aled2(0),
       _hr2_calc_sem(nullptr), _hr3_calc_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _hr2_computing(false), _hr3_computing(false),
@@ -362,7 +366,7 @@ void INCUNEST_AFE4490::setSampleRate(uint16_t hz) {
 #endif
 }
 
-void INCUNEST_AFE4490::setNumAverages(uint8_t num) {
+void INCUNEST_AFE4490::setAdcAverages(uint8_t num) {
     if (num == 0) num = 1;
 
     uint8_t numav_max = (uint8_t)((5000u / _sample_rate_hz) - 1u);
@@ -370,7 +374,7 @@ void INCUNEST_AFE4490::setNumAverages(uint8_t num) {
 
     if ((uint8_t)(num - 1u) > numav_max) {
         uint8_t clamped = numav_max + 1u;
-        ESP_LOGE(TAG, "setNumAverages: %u clamped to %u (max at %u Hz)",
+        ESP_LOGE(TAG, "setAdcAverages: %u clamped to %u (max at %u Hz)",
                  num, clamped, _sample_rate_hz);
         num = clamped;
     }
@@ -530,14 +534,14 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    cfg.sample_rate_hz  = _sample_rate_hz;
-    cfg.num_averages    = _num_averages;
-    cfg.led1_current_mA = _led1_current_mA;
-    cfg.led2_current_mA = _led2_current_mA;
-    cfg.led_range_mA    = _led_range_mA;
-    cfg.tia_gain        = _tia_gain;
-    cfg.tia_cf          = _tia_cf;
-    cfg.stage2_gain     = _stage2_gain;
+    cfg.afe_sample_rate_hz  = _sample_rate_hz;
+    cfg.afe_adc_averages    = _num_averages;
+    cfg.afe_led1_current_mA = _led1_current_mA;
+    cfg.afe_led2_current_mA = _led2_current_mA;
+    cfg.afe_led_range_mA    = _led_range_mA;
+    cfg.afe_tia_gain        = _tia_gain;
+    cfg.afe_tia_cf          = _tia_cf;
+    cfg.afe_stage2_gain     = _stage2_gain;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_spi_mutex);
 #endif
@@ -546,10 +550,10 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
 #endif
-    cfg.ppg_channel      = _ppg_channel;
-    cfg.filter_type      = _filter_type;
-    cfg.filter_f_low_hz  = _ppg_bpf.f_low;
-    cfg.filter_f_high_hz = _ppg_bpf.f_high;
+    cfg.ppgdisp_channel      = _ppg_channel;
+    cfg.ppgdisp_filter_type  = _filter_type;
+    cfg.ppgdisp_f_low_hz     = _ppg_bpf.f_low;
+    cfg.ppgdisp_f_high_hz    = _ppg_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
     cfg.hr3_f_high_hz    = _hr3_lpf.f_high;
@@ -704,7 +708,7 @@ uint32_t INCUNEST_AFE4490::_read_reg(uint8_t addr) {
     return val;
 }
 
-uint32_t INCUNEST_AFE4490::runDiagnostics() {
+uint32_t INCUNEST_AFE4490::runDiagnostics(uint32_t diag_holdoff_ms) {
     if (!_initialized || !_spi_mutex) return 0;
     // Signal _task_body to skip reads during the diagnostic window.
     // Mutex is held only for brief SPI transactions, not for the full 10 ms sleep.
@@ -718,7 +722,10 @@ uint32_t INCUNEST_AFE4490::runDiagnostics() {
     uint32_t result = _read_spi_raw(REG_DIAG);
     _write_reg(REG_CONTROL0, 0x000000UL);       // restore CONTROL0 to idle
     xSemaphoreGive(_spi_mutex);
-    _diag_active = false;                       // resume normal sampling
+    // Set holdoff before clearing _diag_active so _task_body() cannot slip through
+    // with a real SPI read between the two assignments.
+    _diag_holdoff_samples = (uint32_t)((uint64_t)diag_holdoff_ms * _sample_rate_hz / 1000);
+    _diag_active = false;                       // resume; holdoff takes over if diag_holdoff_ms > 0
     return result;
 }
 #endif
@@ -928,13 +935,28 @@ void INCUNEST_AFE4490::_task_body() {
         }
 
         if (_diag_active) {
-            // Repeat last valid sample to preserve temporal continuity for HR and filter algorithms
+            // Chip cannot produce valid ADC data during diagnostics (~10 ms, ≈5 samples).
+            // Repeat last valid output to preserve temporal equi-spacing for HR2/HR3.
             xSemaphoreTake(_state_mutex, portMAX_DELAY);
             if (xQueueSend(_data_queue, &_current_data, 0) != pdTRUE) {
                 AFE4490Data dummy;
                 xQueueReceive(_data_queue, &dummy, 0);
                 xQueueSend(_data_queue, &_current_data, 0);
             }
+            xSemaphoreGive(_state_mutex);
+            continue;
+        }
+
+        if (_diag_holdoff_samples > 0) {
+            // Post-diagnostic holdoff: analog front-end is re-settling after DIAG_EN cleared.
+            // Feed the frozen last-valid raw values into _process_sample() instead of reading
+            // the chip. A constant input is absorbed by IIR/BPF/LP filters with near-zero AC
+            // contribution — far less disruptive to the algorithms than a transient outlier.
+            --_diag_holdoff_samples;
+            xSemaphoreTake(_state_mutex, portMAX_DELAY);
+            _process_sample(_diag_last_led1, _diag_last_led2,
+                            _diag_last_aled1, _diag_last_aled2,
+                            _diag_last_led1_aled1, _diag_last_led2_aled2);
             xSemaphoreGive(_state_mutex);
             continue;
         }
@@ -954,6 +976,15 @@ void INCUNEST_AFE4490::_task_body() {
         int32_t led1_diff = _sign_extend_22(_read_spi_raw(REG_LED1_ALED1VAL));
         _write_reg(REG_CONTROL0, 0x000000UL);
         xSemaphoreGive(_spi_mutex);
+
+        // Save raw values for use during any subsequent diagnostic holdoff.
+        // Written and read exclusively from _task_body() — no mutex required.
+        _diag_last_led1       = led1;
+        _diag_last_led2       = led2;
+        _diag_last_aled1      = aled1;
+        _diag_last_aled2      = aled2;
+        _diag_last_led1_aled1 = led1_diff;
+        _diag_last_led2_aled2 = led2_diff;
 
         // _state_mutex: protects internal processing state (_ppg_channel, filter
         // buffers, SpO2/HR accumulators) against concurrent config setter calls.
