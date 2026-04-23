@@ -157,8 +157,29 @@ struct AFE4490Config {
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;     // HR3 anti-aliasing LP cutoff [Hz]
-    float             spo2_a;            // SpO2 calibration: SpO2 = a - b*R
+    float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
     float             spo2_b;
+    // SpO2 algorithm parameters
+    float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
+    float             spo2_dc_iir_tau_s;         // DC removal IIR time constant [s]
+    float             spo2_ac_ema_tau_s;         // AC² EMA time constant [s]
+    float             spo2_min;                  // valid output lower bound [%]
+    float             spo2_max;                  // valid output upper bound [%]
+    float             spo2_min_dc;               // no-finger DC threshold [ADC counts]
+    float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
+    float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
+    // HR1 algorithm parameters
+    float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
+    float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
+    float             hr1_sqi_cv_max;            // CV above this → SQI=0 [dimensionless]
+    // HR2 algorithm parameters
+    float             hr2_min_corr;              // min normalised autocorrelation for SQI=1
+    uint32_t          hr2_update_interval;       // autocorrelation recompute period [decimated samples]
+    // HR3 algorithm parameters
+    uint32_t          hr3_update_interval;       // FFT+HPS recompute period [decimated samples]
+    // HR valid range (HR1 + HR2 + HR3)
+    float             hr_min_bpm;                // valid output lower bound [bpm]
+    float             hr_max_bpm;                // valid output upper bound [bpm]
 };
 
 // ── INCUNEST_AFE4490 class ─────────────────────────────────────────────────────────
@@ -194,6 +215,29 @@ public:
 
     // HR3 low-pass filter cutoff (default 10 Hz, anti-aliasing before decimation)
     void setHR3Filter(float f_high_hz = 10.0f);
+
+    // SpO2 algorithm setters (callable before or after begin())
+    void setSpO2WarmupS(float s);                              // warmup period before reporting SpO2
+    void setSpO2DcIirTauS(float tau_s);                        // DC IIR time constant; triggers recalc
+    void setSpO2AcEmaTauS(float tau_s);                        // AC² EMA time constant; triggers recalc
+    void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
+    void setSpO2MinDC(float counts);                           // no-finger DC threshold [ADC counts]
+    void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+
+    // HR1 algorithm setters
+    void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant; triggers recalc
+    void setHR1MaCutoffHz(float hz);                           // peak detection LP MA cutoff; triggers recalc
+    void setHR1SqiCvMax(float cv);                             // SQI CV threshold [dimensionless]
+
+    // HR2 algorithm setters
+    void setHR2MinCorr(float corr);                            // min autocorrelation for SQI=1
+    void setHR2UpdateInterval(uint32_t decimated_samples);     // autocorrelation recompute period
+
+    // HR3 algorithm setters
+    void setHR3UpdateInterval(uint32_t decimated_samples);     // FFT+HPS recompute period
+
+    // HR valid range setter (applies to HR1 + HR2 + HR3)
+    void setHRValidRange(float min_bpm, float max_bpm);
 
     /**
      * @brief Retrieves the next available sample from the internal queue (non-blocking).
@@ -467,7 +511,6 @@ private:
     static constexpr int hr2_buf_len         = 400;  // 8 s at 50 Hz (fs/hr2_decim_factor)
     static constexpr int hr2_acorr_max_lag   = 137;  // guard band lower bound 22 BPM at 50 Hz: 50*60/22 = 137 samples
     static constexpr int hr2_decim_factor    = 10;   // 500 Hz → 50 Hz
-    static constexpr int hr2_update_interval = 25;   // recompute every 0.5 s (25 decimated samples)
 
     BiquadFilter _hr2_bpf;                   // bandpass filter (default 0.5–5 Hz)
     float    _hr2_buf[hr2_buf_len];          // circular buffer of decimated filtered samples
@@ -484,7 +527,6 @@ private:
     // Harmonic Product Spectrum (fundamental × 2nd harmonic × 3rd harmonic).
     static constexpr int hr3_buf_len         = 512;  // 10.24 s at 50 Hz → freq resolution 0.098 Hz ≈ 5.9 BPM/bin
     static constexpr int hr3_decim_factor    = 10;   // 500 Hz → 50 Hz
-    static constexpr int hr3_update_interval = 25;   // recompute every 0.5 s (25 decimated samples)
 
     BiquadFilter _hr3_lpf;                     // low-pass anti-aliasing filter (default 10 Hz cutoff)
     float    _hr3_buf[hr3_buf_len];            // circular buffer of decimated LP-filtered samples
@@ -494,6 +536,24 @@ private:
     uint32_t _hr3_buf_count;                   // samples written (capped at hr3_buf_len)
     uint32_t _hr3_decim_counter;               // decimation phase counter
     uint32_t _hr3_update_counter;              // decimated samples since last FFT computation
+
+    // ── Algorithm tuning parameters (runtime-configurable) ──────────────────
+    float    _spo2_warmup_s;
+    float    _spo2_dc_iir_tau_s;
+    float    _spo2_ac_ema_tau_s;
+    float    _spo2_min;
+    float    _spo2_max;
+    float    _spo2_min_dc;
+    float    _spo2_pi_sqi_lo;
+    float    _spo2_pi_sqi_hi;
+    float    _hr1_dc_tau_s;
+    float    _hr1_ma_cutoff_hz;
+    float    _hr1_sqi_cv_max;
+    float    _hr2_min_corr;
+    uint32_t _hr2_update_interval;
+    uint32_t _hr3_update_interval;
+    float    _hr_min_bpm;
+    float    _hr_max_bpm;
 
     // ── Output snapshot (written by task, pushed to queue) ──
     AFE4490Data _current_data;

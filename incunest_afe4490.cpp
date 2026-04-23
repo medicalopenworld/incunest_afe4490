@@ -247,7 +247,23 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr2_bpf({0.5f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
       _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_decim_counter(0), _hr2_update_counter(0),
       _hr3_lpf({0.0f, 10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
-      _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0)
+      _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0),
+      _spo2_warmup_s(spo2_warmup_s),
+      _spo2_dc_iir_tau_s(dc_iir_tau_s),
+      _spo2_ac_ema_tau_s(ac_ema_tau_s),
+      _spo2_min(spo2_min),
+      _spo2_max(spo2_max),
+      _spo2_min_dc(spo2_min_dc),
+      _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
+      _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
+      _hr1_dc_tau_s(hr1_dc_tau_s),
+      _hr1_ma_cutoff_hz(hr1_ma_cutoff_hz),
+      _hr1_sqi_cv_max(hr1_sqi_cv_max),
+      _hr2_min_corr(hr2_min_corr),
+      _hr2_update_interval(25u),
+      _hr3_update_interval(25u),
+      _hr_min_bpm(hr_min_bpm),
+      _hr_max_bpm(hr_max_bpm)
 {
     memset(_ma_buf, 0, sizeof(_ma_buf));
     memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
@@ -526,6 +542,92 @@ void INCUNEST_AFE4490::setSpO2Coefficients(float a, float b) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+void INCUNEST_AFE4490::setSpO2WarmupS(float s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_warmup_s = s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setSpO2DcIirTauS(float tau_s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_dc_iir_tau_s = tau_s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setSpO2AcEmaTauS(float tau_s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_ac_ema_tau_s = tau_s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setSpO2Range(float min_pct, float max_pct) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_min = min_pct;
+    _spo2_max = max_pct;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setSpO2MinDC(float counts) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_min_dc = counts;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setSpO2PiSqiThresholds(float lo_pct, float hi_pct) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_pi_sqi_lo = lo_pct;
+    _spo2_pi_sqi_hi = hi_pct;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR1DcTauS(float tau_s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr1_dc_tau_s = tau_s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR1MaCutoffHz(float hz) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr1_ma_cutoff_hz = hz;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR1SqiCvMax(float cv) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr1_sqi_cv_max = cv;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR2MinCorr(float corr) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr2_min_corr = corr;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR2UpdateInterval(uint32_t decimated_samples) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr2_update_interval = decimated_samples;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR3UpdateInterval(uint32_t decimated_samples) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr3_update_interval = decimated_samples;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHRValidRange(float min_bpm, float max_bpm) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr_min_bpm = min_bpm;
+    _hr_max_bpm = max_bpm;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 // ── getConfig() ───────────────────────────────────────────────────────────────
 AFE4490Config INCUNEST_AFE4490::getConfig() {
     AFE4490Config cfg;
@@ -559,6 +661,22 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hr3_f_high_hz    = _hr3_lpf.f_high;
     cfg.spo2_a           = _spo2_a;
     cfg.spo2_b           = _spo2_b;
+    cfg.spo2_warmup_s         = _spo2_warmup_s;
+    cfg.spo2_dc_iir_tau_s     = _spo2_dc_iir_tau_s;
+    cfg.spo2_ac_ema_tau_s     = _spo2_ac_ema_tau_s;
+    cfg.spo2_min              = _spo2_min;
+    cfg.spo2_max              = _spo2_max;
+    cfg.spo2_min_dc           = _spo2_min_dc;
+    cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
+    cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
+    cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
+    cfg.hr1_ma_cutoff_hz      = _hr1_ma_cutoff_hz;
+    cfg.hr1_sqi_cv_max        = _hr1_sqi_cv_max;
+    cfg.hr2_min_corr          = _hr2_min_corr;
+    cfg.hr2_update_interval   = _hr2_update_interval;
+    cfg.hr3_update_interval   = _hr3_update_interval;
+    cfg.hr_min_bpm            = _hr_min_bpm;
+    cfg.hr_max_bpm            = _hr_max_bpm;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
 #endif
@@ -843,12 +961,12 @@ void INCUNEST_AFE4490::_apply_control_regs() {
 
 void INCUNEST_AFE4490::_recalc_rate_params() {
     float fs              = (float)_sample_rate_hz;
-    _spo2_warmup_samples    = (uint32_t)(spo2_warmup_s   * fs);
-    _hr1_refractory_samples = (uint32_t)(hr_refractory_s * fs);
-    _dc_iir_alpha           = expf(-1.0f / (dc_iir_tau_s * fs));
-    _ac_ema_beta            = 1.0f - expf(-1.0f / (ac_ema_tau_s * fs));
-    _hr1_dc_alpha           = expf(-1.0f / (hr1_dc_tau_s * fs));
-    _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * hr1_ma_cutoff_hz));
+    _spo2_warmup_samples    = (uint32_t)(_spo2_warmup_s    * fs);
+    _hr1_refractory_samples = (uint32_t)(hr_refractory_s   * fs);
+    _dc_iir_alpha           = expf(-1.0f / (_spo2_dc_iir_tau_s * fs));
+    _ac_ema_beta            = 1.0f - expf(-1.0f / (_spo2_ac_ema_tau_s * fs));
+    _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
+    _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
     if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) _hr1_ma_len = (uint32_t)hr1_ma_max_len;
     _recalc_biquad(_ppg_bpf);
@@ -1215,7 +1333,7 @@ void INCUNEST_AFE4490::_update_spo2(int32_t ir_corr, int32_t red_corr) {
 
     // Skip during warmup or if DC is too low (no finger)
     if (_spo2_sample_count < _spo2_warmup_samples ||
-        _dc_ir < spo2_min_dc || _dc_red < spo2_min_dc) {
+        _dc_ir < _spo2_min_dc || _dc_red < _spo2_min_dc) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
@@ -1234,12 +1352,12 @@ void INCUNEST_AFE4490::_update_spo2(int32_t ir_corr, int32_t red_corr) {
 
     _current_data.spo2_r = R;
 
-    if (spo2 >= spo2_min && spo2 <= spo2_max + spo2_clamp_margin) {
-        _current_data.spo2 = fminf(spo2, spo2_max);
+    if (spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
+        _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
         // PI < spo2_pi_sqi_lo → SQI = 0 (no finger or very weak signal).
         // PI ≥ spo2_pi_sqi_hi → SQI = 1 (full quality, per Nellcor/Masimo thresholds).
-        float sqi = (_current_data.pi - spo2_pi_sqi_lo) / (spo2_pi_sqi_hi - spo2_pi_sqi_lo);
+        float sqi = (_current_data.pi - _spo2_pi_sqi_lo) / (_spo2_pi_sqi_hi - _spo2_pi_sqi_lo);
         _current_data.spo2_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
         _current_data.spo2_sqi = 0.0f;
@@ -1298,7 +1416,7 @@ void INCUNEST_AFE4490::_update_hr1(int32_t led1_aled1) {
 
     float hr1 = ((float)_sample_rate_hz * 60.0f) / avg_interval;
 
-    if (hr1 >= hr_min_bpm && hr1 <= hr_max_bpm) {
+    if (hr1 >= _hr_min_bpm && hr1 <= _hr_max_bpm) {
         _current_data.hr1 = hr1;
         // SQI: coefficient of variation (CV = std / mean) of the 5 RR intervals.
         // Perfectly regular rhythm → CV = 0 → SQI = 1.
@@ -1309,7 +1427,7 @@ void INCUNEST_AFE4490::_update_hr1(int32_t led1_aled1) {
             var += diff * diff;
         }
         float cv  = (avg_interval > 0.0f) ? sqrtf(var / 5.0f) / avg_interval : 1.0f;
-        float sqi = 1.0f - cv / hr1_sqi_cv_max;
+        float sqi = 1.0f - cv / _hr1_sqi_cv_max;
         _current_data.hr1_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
         _current_data.hr1_sqi = 0.0f;
@@ -1332,7 +1450,7 @@ bool INCUNEST_AFE4490::_update_hr2_sample(int32_t led1_aled1) {
     if (_hr2_buf_count < (uint32_t)hr2_buf_len) _hr2_buf_count++;
 
     _hr2_update_counter++;
-    if (_hr2_update_counter < (uint32_t)hr2_update_interval) return false;
+    if (_hr2_update_counter < _hr2_update_interval) return false;
     _hr2_update_counter = 0;
 
     return _hr2_buf_count >= (uint32_t)hr2_buf_len;
@@ -1353,7 +1471,7 @@ void INCUNEST_AFE4490::_compute_hr2() {
     if (acorr0 < 1.0f) { _hr2_sqi_result = 0.0f; return; }
 
     float fs2     = (float)_sample_rate_hz / (float)hr2_decim_factor;
-    int   min_lag = (int)(hr2_min_lag_s * fs2);
+    int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * fs2);
     if (min_lag < 1) min_lag = 1;
     int   max_lag = hr2_acorr_max_lag;
     int   n_lags  = max_lag - min_lag + 1;
@@ -1376,7 +1494,7 @@ void INCUNEST_AFE4490::_compute_hr2() {
     for (int i = 1; i < n_lags - 1; i++) {
         if (acorr_buf[i] > acorr_buf[i - 1] &&
             acorr_buf[i] > acorr_buf[i + 1] &&
-            acorr_buf[i] >= hr2_min_corr) {
+            acorr_buf[i] >= _hr2_min_corr) {
             peak_idx = i;
             y_prev   = acorr_buf[i - 1];
             y_peak   = acorr_buf[i];
@@ -1394,7 +1512,7 @@ void INCUNEST_AFE4490::_compute_hr2() {
     if (peak_lag_s <= 0.0f) { _hr2_sqi_result = 0.0f; return; }
 
     float hr2 = 60.0f / peak_lag_s;
-    if (hr2 >= hr_min_bpm && hr2 <= hr_max_bpm) {
+    if (hr2 >= _hr_min_bpm && hr2 <= _hr_max_bpm) {
         _hr2_result     = hr2;
         _hr2_sqi_result = y_peak;
     } else {
@@ -1427,7 +1545,7 @@ bool INCUNEST_AFE4490::_update_hr3_sample(int32_t led1_aled1) {
     if (_hr3_buf_count < (uint32_t)hr3_buf_len) _hr3_buf_count++;
 
     _hr3_update_counter++;
-    if (_hr3_update_counter < (uint32_t)hr3_update_interval) return false;
+    if (_hr3_update_counter < _hr3_update_interval) return false;
     _hr3_update_counter = 0;
 
     return _hr3_buf_count >= (uint32_t)hr3_buf_len;
@@ -1458,8 +1576,8 @@ void INCUNEST_AFE4490::_compute_hr3() {
     float fs_dec   = (float)_sample_rate_hz / (float)hr3_decim_factor;
     float bin_res  = fs_dec / (float)hr3_buf_len;
 
-    int search_min = (int)ceilf(hr_search_min_bpm / 60.0f / bin_res);
-    int search_max = (int)floorf(hr_search_max_bpm / 60.0f / bin_res);
+    int search_min = (int)ceilf((_hr_min_bpm - 3.0f) / 60.0f / bin_res);
+    int search_max = (int)floorf((_hr_max_bpm + 3.0f) / 60.0f / bin_res);
     int nyquist    = hr3_buf_len / 2;
     if (search_max >= nyquist)    search_max = nyquist - 2;
     if (search_max > nyquist / 3) search_max = nyquist / 3;  // 3rd harmonic must stay inside Nyquist
@@ -1495,7 +1613,7 @@ void INCUNEST_AFE4490::_compute_hr3() {
     if (peak_freq <= 0.0f) { _hr3_sqi_result = 0.0f; return; }
 
     float hr3 = 60.0f * peak_freq;
-    if (hr3 >= hr_min_bpm && hr3 <= hr_max_bpm) {
+    if (hr3 >= _hr_min_bpm && hr3 <= _hr_max_bpm) {
         _hr3_result = hr3;
         // SQI: HPS peak prominence — fraction of total HPS energy at the interpolated peak.
         //

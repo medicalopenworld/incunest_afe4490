@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.22
+# incunest_afe4490 — Specification v0.24
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -148,8 +148,29 @@ struct AFE4490Config {
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;         // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;         // HR3 anti-aliasing LP cutoff [Hz]
-    float             spo2_a;                // SpO2 = a - b*R (calibration coefficient)
+    float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
     float             spo2_b;
+    // SpO2 algorithm parameters
+    float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
+    float             spo2_dc_iir_tau_s;         // DC removal IIR time constant [s]
+    float             spo2_ac_ema_tau_s;         // AC² EMA time constant [s]
+    float             spo2_min;                  // valid output lower bound [%]
+    float             spo2_max;                  // valid output upper bound [%]
+    float             spo2_min_dc;               // no-finger DC threshold [ADC counts]
+    float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
+    float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
+    // HR1 algorithm parameters
+    float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
+    float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
+    float             hr1_sqi_cv_max;            // CV above this → SQI=0 [dimensionless]
+    // HR2 algorithm parameters
+    float             hr2_min_corr;              // min normalised autocorrelation for SQI=1
+    uint32_t          hr2_update_interval;       // autocorrelation recompute period [decimated samples]
+    // HR3 algorithm parameters
+    uint32_t          hr3_update_interval;       // FFT+HPS recompute period [decimated samples]
+    // HR valid range (HR1 + HR2 + HR3)
+    float             hr_min_bpm;                // valid output lower bound [bpm]
+    float             hr_max_bpm;                // valid output upper bound [bpm]
 };
 AFE4490Config getConfig();
 ```
@@ -168,7 +189,36 @@ void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 void setHR3Filter(float f_high_hz = 10.0f);
 ```
 
-### 2.5 Data retrieval
+### 2.5 Algorithm parameter setters
+
+All setters callable before or after `begin()`. Setters marked *recalc* internally call `_recalc_rate_params()` when invoked after `begin()`.
+
+```cpp
+// SpO2
+void setSpO2WarmupS(float s);                              // warmup before reporting SpO2 [s] — recalc
+void setSpO2DcIirTauS(float tau_s);                        // DC IIR time constant [s] — recalc
+void setSpO2AcEmaTauS(float tau_s);                        // AC² EMA time constant [s] — recalc
+void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
+void setSpO2MinDC(float counts);                           // no-finger DC threshold [ADC counts]
+void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+
+// HR1
+void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant [s] — recalc
+void setHR1MaCutoffHz(float hz);                           // peak detection LP MA cutoff [Hz] — recalc
+void setHR1SqiCvMax(float cv);                             // SQI CV threshold [dimensionless]
+
+// HR2
+void setHR2MinCorr(float corr);                            // min autocorrelation for SQI=1
+void setHR2UpdateInterval(uint32_t decimated_samples);     // autocorrelation recompute period
+
+// HR3
+void setHR3UpdateInterval(uint32_t decimated_samples);     // FFT+HPS recompute period
+
+// HR1 + HR2 + HR3
+void setHRValidRange(float min_bpm, float max_bpm);        // valid HR output range [bpm]
+```
+
+### 2.6 Data retrieval
 ```cpp
 bool getData(AFE4490Data& data);
 // Returns true and fills data if an item is available in the queue.
@@ -188,7 +238,7 @@ The internal queue holds up to 10 samples (`INCUNEST_AFE4490_QUEUE_SIZE`). When 
 
 > The internal algorithms (HR1, HR2, HR3, SpO2) process every sample at 500 Hz regardless of the consumption rate. The call frequency of `getData()` does not affect calculation quality — only how many result samples the user receives and with what latency.
 
-### 2.5b Hardware diagnostics
+### 2.6b Hardware diagnostics
 ```cpp
 uint32_t runDiagnostics(uint32_t diag_holdoff_ms = 100);
 ```
@@ -232,7 +282,7 @@ After DIAG_EN is cleared the analog front-end (TIA, stage 2) needs a few PRP cyc
 
 ---
 
-### 2.6 Shutdown
+### 2.7 Shutdown
 ```cpp
 void stop();
 ```
@@ -1091,6 +1141,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.24   | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
+|         | via 13 new setters (setSpO2WarmupS, setSpO2DcIirTauS, setSpO2AcEmaTauS,   |
+|         | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
+|         | setHR1MaCutoffHz, setHR1SqiCvMax, setHR2MinCorr, setHR2UpdateInterval,    |
+|         | setHR3UpdateInterval, setHRValidRange). hr_search_{min,max}_bpm now        |
+|         | derived from hr_{min,max}_bpm ± 3 BPM guard band.                         |
 | v0.23   | `runDiagnostics(diag_holdoff_ms = 10)`: post-diagnostic holdoff window.     |
 |         | After DIAG_EN is cleared, `_task_body()` feeds frozen last-valid raw ADC   |
 |         | values into `_process_sample()` for `diag_holdoff_ms` ms, replacing analog |
