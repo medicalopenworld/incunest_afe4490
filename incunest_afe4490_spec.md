@@ -125,6 +125,7 @@ void setLEDRange(uint8_t mA);           // 75 or 150 mA (with TX_REF=0.75V defau
 void setTIAGain(AFE4490TIAGain gain);   // auto-recalculates CF (see §7.2); setTIACF() can override
 void setTIACF(AFE4490TIACF cf);         // manual override; overridden again if setTIAGain()/setSampleRate() is called
 void setStage2Gain(AFE4490Stage2Gain gain);
+void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
 ```
 
 ### 2.3b Configuration readback
@@ -141,6 +142,7 @@ struct AFE4490Config {
     AFE4490TIAGain    afe_tia_gain;          // TIA transimpedance gain (RF)
     AFE4490TIACF      afe_tia_cf;            // TIA feedback capacitance
     AFE4490Stage2Gain afe_stage2_gain;       // Stage 2 amplifier gain
+    uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
     AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
@@ -850,7 +852,7 @@ Parameters written to chip registers during initialisation. Changing them requir
 | Parameter | API | Default | Options | Effect on output |
 |---|---|---|---|---|
 | Stage 2 gain | `setStage2Gain()` | GAIN_0DB (disabled) | 0, 3.5, 6, 9.5, 12 dB | Additional gain after ambient subtraction; expands dynamic range for low-perfusion signals |
-| Ambient cancellation DAC (I_CANCEL) | not exposed (set internally) | 0 µA | 0 – 10 µA, 1 µA steps | Subtracts ambient leakage current before Stage 2; allows centring the signal within ADC range |
+| Ambient cancellation DAC (I_CANCEL) | `setAmbDac()` | 0 µA | 0 – 10 µA, 1 µA steps | Subtracts ambient leakage current before Stage 2; allows centring the signal within ADC range when strong ambient light saturates aled1/aled2 |
 
 > Stage 2 gain is useful when LED current is low and the pleth component is small. Enabling it when the signal is already large risks clipping.
 
@@ -1141,6 +1143,10 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.25   | `setAmbDac(uint8_t uA)`: exposes AMBDAC[3:0] in TIA_AMB_GAIN D19:D16.      |
+|         | `AFE4490Config` gains `afe_ambdac_uA`. `$CFG` frame gains `ambdac` field.   |
+|         | PulseNest HW CONFIG window gains "Ambient Cancellation" group with AMBDAC   |
+|         | spinbox and `$SET,ambdac,<value>` command.                                  |
 | v0.24   | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
 |         | via 13 new setters (setSpO2WarmupS, setSpO2DcIirTauS, setSpO2AcEmaTauS,   |
 |         | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |

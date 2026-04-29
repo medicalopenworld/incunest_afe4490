@@ -214,6 +214,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_tia_gain(AFE4490TIAGain::RF_500K),
       _afe_tia_cf(AFE4490TIACF::CF_5P),
       _afe_stage2_gain(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1_ALED1),
       _ppgdisp_filter_type(AFE4490Filter::BUTTERWORTH),
       _ppgdisp_bpf({0.5f, 20.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
@@ -476,6 +477,20 @@ void INCUNEST_AFE4490::setStage2Gain(AFE4490Stage2Gain gain) {
 #endif
 }
 
+void INCUNEST_AFE4490::setAmbDac(uint8_t uA) {
+    if (uA > 10) uA = 10;
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+#endif
+    _afe_ambdac_uA = uA;
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) {
+        _apply_analog_regs();
+        xSemaphoreGive(_spi_mutex);
+    }
+#endif
+}
+
 void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _ppgdisp_channel = channel;
@@ -630,6 +645,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.afe_tia_gain        = _afe_tia_gain;
     cfg.afe_tia_cf          = _afe_tia_cf;
     cfg.afe_stage2_gain     = _afe_stage2_gain;
+    cfg.afe_ambdac_uA       = _afe_ambdac_uA;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_spi_mutex);
 #endif
@@ -920,11 +936,11 @@ uint32_t INCUNEST_AFE4490::_build_tiagain() {
 void INCUNEST_AFE4490::_apply_analog_regs() {
     uint32_t tia = _build_tiagain();
 
-    // TIAGAIN and TIA_AMB_GAIN get the same RF/CF/Stage2 bits.
-    // ENSEPGAIN=0 (bit 15 of TIAGAIN): both channels share TIAGAIN → TIA_AMB_GAIN RF irrelevant.
-    // FLTRCNRSEL=0 (500 Hz, bit 15 of TIA_AMB_GAIN), AMBDAC=0.
+    // TIAGAIN and TIA_AMB_GAIN share the same RF/CF/Stage2 bits (ENSEPGAIN=0).
+    // TIA_AMB_GAIN additionally carries AMBDAC[3:0] at D19:D16 (ambient cancellation DAC, 0–10 µA).
+    // FLTRCNRSEL=0 (D15), ENSEPGAIN=0 (bit in TIAGAIN): single TIA gain for all phases.
     _write_reg(REG_TIAGAIN,      tia);
-    _write_reg(REG_TIA_AMB_GAIN, tia);
+    _write_reg(REG_TIA_AMB_GAIN, tia | ((uint32_t)_afe_ambdac_uA << 16));
 
     // LEDCNTRL: LED_RANGE | (code_led1 << 8) | code_led2
     // I (mA) = (code / 256) * full_scale_mA

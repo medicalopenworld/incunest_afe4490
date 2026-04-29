@@ -150,6 +150,7 @@ struct AFE4490Config {
     AFE4490TIAGain    afe_tia_gain;          // TIA transimpedance gain (RF)
     AFE4490TIACF      afe_tia_cf;            // TIA feedback capacitance
     AFE4490Stage2Gain afe_stage2_gain;       // Stage 2 amplifier gain
+    uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
     AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
@@ -205,6 +206,7 @@ public:
     void setTIAGain(AFE4490TIAGain gain);
     void setTIACF(AFE4490TIACF cf);
     void setStage2Gain(AFE4490Stage2Gain gain);
+    void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
 
     // Signal and filter configuration
     void setPPGChannel(AFE4490Channel channel);
@@ -458,6 +460,7 @@ private:
     AFE4490TIAGain    _afe_tia_gain;
     AFE4490TIACF      _afe_tia_cf;
     AFE4490Stage2Gain _afe_stage2_gain;
+    uint8_t           _afe_ambdac_uA;        // AMBDAC[3:0] value (0–10), written to TIA_AMB_GAIN D19:D16
 
     // ── Signal processing configuration ──
     AFE4490Channel    _ppgdisp_channel;
