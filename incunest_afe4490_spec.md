@@ -149,7 +149,8 @@ struct AFE4490Config {
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;         // HR2 bandpass upper cutoff [Hz]
-    float             hr3_f_high_hz;         // HR3 anti-aliasing LP cutoff [Hz]
+    float             hr3_f_low_hz;          // HR3 bandpass lower cutoff [Hz]
+    float             hr3_f_high_hz;         // HR3 bandpass upper cutoff [Hz]
     float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
     float             spo2_b;
     // SpO2 algorithm parameters
@@ -187,8 +188,8 @@ void setPPGChannel(AFE4490Channel channel);
 void setFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
 // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
 void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
-// HR3 low-pass filter cutoff (default 10 Hz); callable before or after begin()
-void setHR3Filter(float f_high_hz = 10.0f);
+// HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
+void setHR3Filter(float f_low_hz = 0.4f, float f_high_hz = 15.0f);
 ```
 
 ### 2.5 Algorithm parameter setters
@@ -939,7 +940,7 @@ See §5.4 for algorithm description.
 
 | Parameter | Constant | Value | Effect |
 |---|---|---|---|
-| LP filter cutoff | `hr3_f_high_hz` | 10 Hz | Anti-aliasing before decimation; passes up to 3rd harmonic of 200 BPM |
+| BP filter cutoffs | `hr3_f_low_hz` / `hr3_f_high_hz` | 0.4–15 Hz | Removes DC/baseline drift; passes up to 3rd harmonic of 260 BPM (13 Hz) |
 | Decimation factor | `hr3_decim_factor` | 10 | 500 Hz → 50 Hz |
 | FFT / buffer length | `hr3_buf_len` | 512 samples (10.24 s) | Frequency resolution = 50/512 ≈ 0.098 Hz ≈ 0.35 BPM at 1 Hz |
 | Update interval | `hr3_update_interval` | 25 decimated samples (0.5 s) | HR3 output refresh rate |

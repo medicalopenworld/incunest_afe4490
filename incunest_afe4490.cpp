@@ -233,7 +233,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_interval_count(0),
       _hr2_bpf({0.5f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
       _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_decim_counter(0), _hr2_update_counter(0),
-      _hr3_lpf({0.0f, 10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
+      _hr3_bpf({0.4f, 15.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
       _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0),
       _spo2_warmup_s(spo2_warmup_s),
       _spo2_dc_iir_tau_s(spo2_dc_iir_tau_s),
@@ -527,12 +527,13 @@ void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHR3Filter(float f_high_hz) {
+void INCUNEST_AFE4490::setHR3Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr3_lpf.f_high     = f_high_hz;
-    _recalc_biquad_lp(_hr3_lpf);
-    _hr3_lpf.state           = {0.0f, 0.0f};
-    _hr3_lpf.needs_precharge = true;
+    _hr3_bpf.f_low           = f_low_hz;
+    _hr3_bpf.f_high          = f_high_hz;
+    _recalc_biquad(_hr3_bpf);
+    _hr3_bpf.state           = {0.0f, 0.0f};
+    _hr3_bpf.needs_precharge = true;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -660,7 +661,8 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
-    cfg.hr3_f_high_hz    = _hr3_lpf.f_high;
+    cfg.hr3_f_low_hz     = _hr3_bpf.f_low;
+    cfg.hr3_f_high_hz    = _hr3_bpf.f_high;
     cfg.spo2_a           = _spo2_a;
     cfg.spo2_b           = _spo2_b;
     cfg.spo2_warmup_s         = _spo2_warmup_s;
@@ -781,8 +783,8 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
     _hr2_decim_counter = 0; _hr2_update_counter = 0;
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
-    _hr3_lpf.state           = {0.0f, 0.0f};
-    _hr3_lpf.needs_precharge = true;
+    _hr3_bpf.state           = {0.0f, 0.0f};
+    _hr3_bpf.needs_precharge = true;
     _hr3_buf_idx = 0; _hr3_buf_count = 0;
     _hr3_decim_counter = 0; _hr3_update_counter = 0;
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
@@ -980,7 +982,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) _hr1_ma_len = (uint32_t)hr1_ma_max_len;
     _recalc_biquad(_ppgdisp_bpf);
     _recalc_biquad(_hr2_bpf);
-    _recalc_biquad_lp(_hr3_lpf);
+    _recalc_biquad(_hr3_bpf);
     _recalc_afe_tia_cf();
 }
 
@@ -1543,7 +1545,7 @@ void INCUNEST_AFE4490::_update_hr2(int32_t led1_aled1) {
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
 bool INCUNEST_AFE4490::_update_hr3_sample(int32_t led1_aled1) {
-    float filtered = -_biquad_process((float)led1_aled1, _hr3_lpf);  // negate: peaks up
+    float filtered = -_biquad_process((float)led1_aled1, _hr3_bpf);  // negate: peaks up
 
     _hr3_decim_counter++;
     if (_hr3_decim_counter < (uint32_t)hr3_decim_factor) return false;

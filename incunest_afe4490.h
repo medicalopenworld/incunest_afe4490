@@ -157,7 +157,8 @@ struct AFE4490Config {
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
-    float             hr3_f_high_hz;     // HR3 anti-aliasing LP cutoff [Hz]
+    float             hr3_f_low_hz;      // HR3 bandpass lower cutoff [Hz]
+    float             hr3_f_high_hz;     // HR3 bandpass upper cutoff [Hz]
     float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
     float             spo2_b;
     // SpO2 algorithm parameters
@@ -215,8 +216,8 @@ public:
     // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
     void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 
-    // HR3 low-pass filter cutoff (default 10 Hz, anti-aliasing before decimation)
-    void setHR3Filter(float f_high_hz = 10.0f);
+    // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
+    void setHR3Filter(float f_low_hz = 0.4f, float f_high_hz = 15.0f);
 
     // SpO2 algorithm setters (callable before or after begin())
     void setSpO2WarmupS(float s);                              // warmup period before reporting SpO2
@@ -531,7 +532,7 @@ private:
     static constexpr int hr3_buf_len         = 512;  // 10.24 s at 50 Hz → freq resolution 0.098 Hz ≈ 5.9 BPM/bin
     static constexpr int hr3_decim_factor    = 10;   // 500 Hz → 50 Hz
 
-    BiquadFilter _hr3_lpf;                     // low-pass anti-aliasing filter (default 10 Hz cutoff)
+    BiquadFilter _hr3_bpf;                     // bandpass filter (default 0.4–15 Hz)
     float    _hr3_buf[hr3_buf_len];            // circular buffer of decimated LP-filtered samples
     float    _hr3_hann[hr3_buf_len];           // precomputed Hann window coefficients (computed once in begin())
     float    _hr3_fft[hr3_buf_len * 2];        // complex FFT buffer (interleaved re/im), also scratch for windowed input
