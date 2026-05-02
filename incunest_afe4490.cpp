@@ -51,6 +51,7 @@ namespace {
     // SQI: CV = std/mean of the 5 most recent RR intervals.
     // CV=0 (perfectly regular) → SQI=1. CV ≥ hr1_sqi_cv_max → SQI=0.
     constexpr float    hr1_sqi_cv_max      = 0.15f;    // dimensionless — 15% CV threshold
+    constexpr float    hr1_refractory_s    = 0.185f;   // s  — refractory period (covers 263 BPM guard band)
 
     // ── HR2 ───────────────────────────────────────────────────────────────────
     constexpr float    hr2_min_corr        = 0.5f;     // normalised autocorrelation threshold for SQI=1
@@ -60,7 +61,6 @@ namespace {
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
-    constexpr float    hr1_refractory_s    = 0.185f;   // s  — HR1 refractory period (covers 263 BPM guard band)
     constexpr float    hr_min_bpm          =  30.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
     constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
