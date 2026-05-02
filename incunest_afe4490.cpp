@@ -62,7 +62,7 @@ namespace {
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
     constexpr float    hr_refractory_s     = 0.185f;   // s  — refractory period (covers 303 BPM)
     constexpr float    hr_min_bpm          =  30.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
-    constexpr float    hr_max_bpm          = 300.0f;   // bpm — valid upper bound (neonatal tachycardia)
+    constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
     // ── HR3 FFT — radix-2 Cooley-Tukey DIT (in-place, complex interleaved) ──
     // x: float array of 2N elements [re0,im0, re1,im1, ..., re(N-1),im(N-1)]
