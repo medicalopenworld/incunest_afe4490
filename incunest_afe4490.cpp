@@ -60,7 +60,7 @@ namespace {
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
-    constexpr float    hr_refractory_s     = 0.185f;   // s  — refractory period (covers 303 BPM)
+    constexpr float    hr1_refractory_s    = 0.185f;   // s  — HR1 refractory period (covers 263 BPM guard band)
     constexpr float    hr_min_bpm          =  30.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
     constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
@@ -971,7 +971,7 @@ void INCUNEST_AFE4490::_apply_control_regs() {
 void INCUNEST_AFE4490::_recalc_rate_params() {
     float fs              = (float)_afe_sample_rate_hz;
     _spo2_warmup_samples    = (uint32_t)(_spo2_warmup_s    * fs);
-    _hr1_refractory_samples = (uint32_t)(hr_refractory_s   * fs);
+    _hr1_refractory_samples = (uint32_t)(hr1_refractory_s  * fs);
     _spo2_dc_iir_alpha           = expf(-1.0f / (_spo2_dc_iir_tau_s * fs));
     _spo2_ac_ema_beta            = 1.0f - expf(-1.0f / (_spo2_ac_ema_tau_s * fs));
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));

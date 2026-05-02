@@ -417,7 +417,7 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_dc_tau_s` | 1.6 s | IIR DC removal time constant |
 | `hr1_ma_cutoff_hz` | 5 Hz | Moving average low-pass cutoff |
 | `hr1_ma_max_len` | 64 samples | Max moving average length |
-| `hr_refractory_s` | 0.2 s | Refractory period between peaks (~300 BPM max) |
+| `hr1_refractory_s` | 0.2 s | Refractory period between peaks (~300 BPM max) |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
 | `hr_min_bpm` | 25 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
 | `hr_max_bpm` | 300 BPM | Reported valid HR range maximum (neonatal tachycardia) |
@@ -852,7 +852,7 @@ Parameters written to chip registers during initialisation. Changing them requir
 | Parameter | API | Default | Options | Effect on output |
 |---|---|---|---|---|
 | Stage 2 gain | `setStage2Gain()` | GAIN_0DB (disabled) | 0, 3.5, 6, 9.5, 12 dB | Additional gain after ambient subtraction; expands dynamic range for low-perfusion signals |
-| Ambient cancellation DAC (I_CANCEL) | `setAmbDac()` | 0 µA | 0 – 10 µA, 1 µA steps | Subtracts ambient leakage current before Stage 2; allows centring the signal within ADC range when strong ambient light saturates aled1/aled2 |
+| Ambient cancellation DAC (I_CANCEL) | `setAmbDac()` | 0 µA | 0 – 10 µA, 1 µA steps | Subtracts ambient leakage current via Stage 2. **Requires Stage 2 active (STAGE2EN2).** When `uA > 0`, `_apply_analog_regs()` automatically sets STAGE2EN2 (D14 of TIA_AMB_GAIN) regardless of the Stage 2 gain setting for LED phases. |
 
 > Stage 2 gain is useful when LED current is low and the pleth component is small. Enabling it when the signal is already large risks clipping.
 
@@ -910,7 +910,7 @@ See §5.2 for algorithm description.
 | Low-pass MA cutoff | `hr1_ma_cutoff_hz` | 5 Hz | Noise smoothing before peak detection; affects peak sharpness |
 | Max MA length | `hr1_ma_max_len` | 64 samples | Prevents excessively long moving average at low heart rates |
 | Peak threshold fraction | 0.6 | 0.6 × running_max | Trade-off: higher → misses low-amplitude peaks; lower → false detections on noise |
-| Refractory period | `hr_refractory_s` | 0.2 s | Minimum interval between detected peaks; sets practical upper HR limit (~300 BPM) |
+| Refractory period | `hr1_refractory_s` | 0.2 s | Minimum interval between detected peaks; sets practical upper HR limit (~300 BPM) |
 | RR interval buffer length | 5 intervals | 5 | Number of consecutive intervals averaged for HR1 output |
 | SQI CV threshold | `hr1_sqi_cv_max` | 0.15 (15 %) | CV above this → SQI = 0 (arrhythmia / motion artefact) |
 
@@ -1143,6 +1143,10 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.25b  | Fix `setAmbDac()`: `_apply_analog_regs()` now sets STAGE2EN2 (D14 of          |
+|         | TIA_AMB_GAIN) automatically when `uA > 0`. Stage 2 must be active for AMBDAC  |
+|         | to have effect; STAGE2EN2 is independent of TIAGAIN's Stage 2 enable even    |
+|         | with ENSEPGAIN=0.                                                            |
 | v0.25   | `setAmbDac(uint8_t uA)`: exposes AMBDAC[3:0] in TIA_AMB_GAIN D19:D16.      |
 |         | `AFE4490Config` gains `afe_ambdac_uA`. `$CFG` frame gains `ambdac` field.   |
 |         | PulseNest HW CONFIG window gains "Ambient Cancellation" group with AMBDAC   |
@@ -1224,7 +1228,7 @@ Key references for each algorithm implemented in this library.
 |         | (sections 1.1 and 1.3) updated. $M1 serial trama field 17 = HR3.        |
 | v0.11   | HR reported range corrected per ISO 80601-2-61 + neonatal use:           |
 |         | **[30, 250] → [25, 300] BPM**. Guard band updated to [22, 303] BPM.      |
-|         | `hr_refractory_s` 0.200→0.185 s (covers 303 BPM guard: 198 ms period).   |
+|         | `hr1_refractory_s` 0.200→0.185 s (covers 303 BPM guard: 198 ms period).   |
 |         | `hr2_min_lag_s` 0.22→0.185 s. `hr2_acorr_max_lag` 111→137 samples.      |
 |         | Python `HR_MIN_HZ`/`HR_MAX_HZ`/`HR_SEARCH_*` updated accordingly.        |
 | v0.10   | Guard band: internal HR search range extended to [27, 253] BPM (±3 BPM  |
@@ -1232,7 +1236,7 @@ Key references for each algorithm implemented in this library.
 |         | (27 BPM @ 50 Hz). HR3 Python: `HR_SEARCH_MIN_HZ`/`HR_SEARCH_MAX_HZ`     |
 |         | added. `hr_search_min_bpm`/`hr_search_max_bpm` constants documented.     |
 | v0.9    | HR measurement range extended: 40–240 BPM → **30–250 BPM**.             |
-|         | `hr_min_bpm` 40→30, `hr_max_bpm` 240→250, `hr_refractory_s` 0.3→0.2 s  |
+|         | `hr_min_bpm` 40→30, `hr_max_bpm` 240→250, `hr1_refractory_s` 0.3→0.2 s  |
 |         | (allows up to ~300 BPM), `hr2_acorr_max_lag` 75→100 samples (30 BPM    |
 |         | at 50 Hz). Spec header updated to v0.9.                                  |
 | v0.8    | Added HR2 algorithm (autocorrelation): `hr2`/`hr2_valid` in `AFE4490Data`, |
@@ -1255,8 +1259,8 @@ Key references for each algorithm implemented in this library.
 | v0.5    | Internal constants reorganised at the top of the anonymous namespace in    |
 |         | `.cpp`, in snake_case. Algorithm time parameters expressed in physical      |
 |         | units (seconds): `spo2_warmup_s`, `dc_iir_tau_s`, `ac_ema_tau_s`,         |
-|         | `hr_refractory_s`. New members `_spo2_warmup_samples`,                     |
-|         | `_hr_refractory_samples`, `_dc_iir_alpha`, `_ac_ema_beta` derived from     |
+|         | `hr1_refractory_s`. New members `_spo2_warmup_samples`,                     |
+|         | `_hr1_refractory_samples`, `_dc_iir_alpha`, `_ac_ema_beta` derived from     |
 |         | `_sample_rate_hz` via `_recalc_rate_params()`, called in constructor and   |
 |         | in `setSampleRate()`. SpO2 and HR algorithms now correct at any PRF.       |
 | v0.4    | `AFE4490Data` extended with the 6 raw AFE4490 signals (led1, led2,         |
