@@ -61,7 +61,7 @@ namespace {
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
     constexpr float    hr_refractory_s     = 0.185f;   // s  — refractory period (covers 303 BPM)
-    constexpr float    hr_min_bpm          =  25.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
+    constexpr float    hr_min_bpm          =  30.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
     constexpr float    hr_max_bpm          = 300.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
     // ── HR3 FFT — radix-2 Cooley-Tukey DIT (in-place, complex interleaved) ──
@@ -936,11 +936,18 @@ uint32_t INCUNEST_AFE4490::_build_tiagain() {
 void INCUNEST_AFE4490::_apply_analog_regs() {
     uint32_t tia = _build_tiagain();
 
-    // TIAGAIN and TIA_AMB_GAIN share the same RF/CF/Stage2 bits (ENSEPGAIN=0).
-    // TIA_AMB_GAIN additionally carries AMBDAC[3:0] at D19:D16 (ambient cancellation DAC, 0–10 µA).
-    // FLTRCNRSEL=0 (D15), ENSEPGAIN=0 (bit in TIAGAIN): single TIA gain for all phases.
-    _write_reg(REG_TIAGAIN,      tia);
-    _write_reg(REG_TIA_AMB_GAIN, tia | ((uint32_t)_afe_ambdac_uA << 16));
+    // TIAGAIN controls RF/CF/Stage2 for all phases (ENSEPGAIN=0: single TIA gain).
+    // TIA_AMB_GAIN shares the same RF/CF/Stage2 bits plus AMBDAC[3:0] at D19:D16.
+    // STAGE2EN2 (D14 of TIA_AMB_GAIN) is independent of TIAGAIN's Stage2 enable:
+    // it must be set when AMBDAC > 0 because Stage 2 is what applies the cancellation.
+    _write_reg(REG_TIAGAIN, tia);
+    // TIA_AMB_GAIN: same RF/CF/Stage2 as TIAGAIN, plus AMBDAC[3:0] at D19:D16.
+    // STAGE2EN2 (D14) must be set whenever AMBDAC > 0: Stage 2 is the cancellation
+    // stage that applies AMBDAC. Without STAGE2EN2, AMBDAC has no effect even if
+    // TIAGAIN has Stage 2 disabled (ENSEPGAIN=0 does not couple the two EN bits).
+    uint32_t amb = tia | ((uint32_t)_afe_ambdac_uA << 16);
+    if (_afe_ambdac_uA > 0) amb |= 0x004000UL;  // STAGE2EN2 required for AMBDAC
+    _write_reg(REG_TIA_AMB_GAIN, amb);
 
     // LEDCNTRL: LED_RANGE | (code_led1 << 8) | code_led2
     // I (mA) = (code / 256) * full_scale_mA
