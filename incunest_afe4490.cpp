@@ -211,7 +211,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_result(0.0f), _hr3_sqi_result(0.0f),
       _afe_sample_rate_hz(500), _afe_adc_averages(8),
       _afe_led1_current_mA(11.7f), _afe_led2_current_mA(11.7f), _afe_led_range_mA(150),
-      _afe_ensepgain(false),
+      _afe_ensepgain(true),
       _afe_tia_gain_led1(AFE4490TIAGain::RF_500K),
       _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
       _afe_stage2_gain_led1(AFE4490Stage2Gain::GAIN_0DB),
