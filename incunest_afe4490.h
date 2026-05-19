@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.23"
+#define INCUNEST_AFE4490_VERSION "0.24"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -147,9 +147,16 @@ struct AFE4490Config {
     float             afe_led1_current_mA;   // IR LED drive current [mA]
     float             afe_led2_current_mA;   // RED LED drive current [mA]
     uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
-    AFE4490TIAGain    afe_tia_gain;          // TIA transimpedance gain (RF)
-    AFE4490TIACF      afe_tia_cf;            // TIA feedback capacitance
-    AFE4490Stage2Gain afe_stage2_gain;       // Stage 2 amplifier gain
+    // TIA gain — separate per-channel (ENSEPGAIN=1) or shared (ENSEPGAIN=0)
+    // When afe_ensepgain=false: hardware uses LED2 fields for both channels (TIAGAIN LED1 fields ignored by chip)
+    // When afe_ensepgain=true:  TIAGAIN register controls LED1 (IR); TIA_AMB_GAIN controls LED2 (RED)
+    bool              afe_ensepgain;         // ENSEPGAIN bit D15 in TIAGAIN register
+    AFE4490TIAGain    afe_tia_gain_led1;     // RF for LED1 (IR)  — active when afe_ensepgain=true
+    AFE4490TIACF      afe_tia_cf_led1;       // CF for LED1 (IR)  — active when afe_ensepgain=true
+    AFE4490Stage2Gain afe_stage2_gain_led1;  // Stage 2 for LED1 (IR) — active when afe_ensepgain=true
+    AFE4490TIAGain    afe_tia_gain_led2;     // RF for LED2 (RED) — always active (both channels when ENSEPGAIN=0)
+    AFE4490TIACF      afe_tia_cf_led2;       // CF for LED2 (RED) — always active
+    AFE4490Stage2Gain afe_stage2_gain_led2;  // Stage 2 for LED2 (RED) — always active
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
     AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
@@ -204,9 +211,19 @@ public:
     void setLED1Current(float mA);
     void setLED2Current(float mA);
     void setLEDRange(uint8_t mA);           // 75 or 150 mA
-    void setTIAGain(AFE4490TIAGain gain);
-    void setTIACF(AFE4490TIACF cf);
-    void setStage2Gain(AFE4490Stage2Gain gain);
+    // Joint setters — apply the same value to both LED1 and LED2 channels; also sets ENSEPGAIN=0
+    void setTIAGain(AFE4490TIAGain gain);   // sets afe_tia_gain_led1 = afe_tia_gain_led2 = gain
+    void setTIACF(AFE4490TIACF cf);         // sets afe_tia_cf_led1 = afe_tia_cf_led2 = cf
+    void setStage2Gain(AFE4490Stage2Gain gain); // sets afe_stage2_gain_led1 = afe_stage2_gain_led2 = gain
+    // Separate gain mode — enable independent LED1/LED2 TIA settings (ENSEPGAIN bit D15 in TIAGAIN)
+    void setEnSepGain(bool enable);
+    // Per-channel setters — only meaningful when ENSEPGAIN=1 (setEnSepGain(true))
+    void setTIAGainLED1(AFE4490TIAGain gain);   // RF for LED1 (IR)  — writes TIAGAIN RF_LED1[2:0]
+    void setTIACFLED1(AFE4490TIACF cf);         // CF for LED1 (IR)  — writes TIAGAIN CF_LED1[4:0]
+    void setStage2GainLED1(AFE4490Stage2Gain gain); // Stage 2 for LED1 (IR)
+    void setTIAGainLED2(AFE4490TIAGain gain);   // RF for LED2 (RED) — writes TIA_AMB_GAIN RF_LED2[2:0]
+    void setTIACFLED2(AFE4490TIACF cf);         // CF for LED2 (RED) — writes TIA_AMB_GAIN CF_LED2[4:0]
+    void setStage2GainLED2(AFE4490Stage2Gain gain); // Stage 2 for LED2 (RED)
     void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
 
     // Signal and filter configuration
@@ -349,9 +366,10 @@ private:
     void _recalc_biquad_lp(BiquadFilter& filt);
     // Returns TIA settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window)
     uint32_t _compute_settle_margin() const;
-    // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for _afe_tia_gain.
-    // Called automatically by _recalc_rate_params() and setTIAGain(); setTIACF() overrides this.
-    void _recalc_afe_tia_cf();
+    // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for the given RF.
+    // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
+    void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_gain_led1
+    void _recalc_afe_tia_cf_led2();   // updates _afe_tia_cf_led2 from _afe_tia_gain_led2
 
     // Chip init
 #ifndef INCUNEST_OFFLINE
@@ -359,7 +377,8 @@ private:
     void _apply_timing_regs();
     void _apply_analog_regs();
     void _apply_control_regs();
-    uint32_t _build_tiagain();
+    uint32_t _build_tiagain_led1();        // TIAGAIN register value (LED1 fields + ENSEPGAIN bit)
+    uint32_t _build_tia_amb_gain_led2();   // TIA_AMB_GAIN register value (LED2 fields + AMBDAC)
 #endif
 
     // FreeRTOS task
@@ -458,9 +477,16 @@ private:
     float             _afe_led1_current_mA;
     float             _afe_led2_current_mA;
     uint8_t           _afe_led_range_mA;     // 75 or 150
-    AFE4490TIAGain    _afe_tia_gain;
-    AFE4490TIACF      _afe_tia_cf;
-    AFE4490Stage2Gain _afe_stage2_gain;
+    // TIA gain — separate per-channel when _afe_ensepgain=true
+    // When false: chip uses LED2 fields for both channels; LED1 fields written but ignored by hardware
+    // When true:  TIAGAIN→LED1(IR), TIA_AMB_GAIN→LED2(RED)
+    bool              _afe_ensepgain;
+    AFE4490TIAGain    _afe_tia_gain_led1;    // RF_LED1 in TIAGAIN
+    AFE4490TIACF      _afe_tia_cf_led1;      // CF_LED1 in TIAGAIN
+    AFE4490Stage2Gain _afe_stage2_gain_led1; // STG2GAIN1/STAGE2EN1 in TIAGAIN
+    AFE4490TIAGain    _afe_tia_gain_led2;    // RF_LED2 in TIA_AMB_GAIN
+    AFE4490TIACF      _afe_tia_cf_led2;      // CF_LED2 in TIA_AMB_GAIN
+    AFE4490Stage2Gain _afe_stage2_gain_led2; // STG2GAIN2/STAGE2EN2 in TIA_AMB_GAIN
     uint8_t           _afe_ambdac_uA;        // AMBDAC[3:0] value (0–10), written to TIA_AMB_GAIN D19:D16
 
     // ── Signal processing configuration ──
