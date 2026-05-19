@@ -995,85 +995,48 @@ This section documents the exact value of each AFE4490 register written by the l
 
 ### 11.1 Timing registers (PRF = 500 Hz, AFECLK = 4 MHz, 1 count = 0.25 µs)
 
-| Register | AFE44x0.h (PRF=500) | Datasheet Table 2 | Protocentral (src/) | **incunest_afe4490** | **Rationale** |
-|---|---|---|---|---|---|
-| PRPCOUNT | 7999 | 7999 (t29) | 7999 | **7999** | PRF=500Hz: (4,000,000/500)−1=7999 |
-| LED2LEDSTC | 6000 | 6000 (t3) | 6000 | **6000** | LED2 starts exactly at the beginning of its phase (75% of period) |
-| LED2LEDENDC | 7599 | 7999 (t4) | 7999 | **7999** | 25% duty cycle: 2000 counts = 500µs → maximises photons |
-| LED2STC | 6080 | 6050 (t1) | 6000 | **6050** | `3q + tia_margin` — adaptive TIA settle margin (§7.2). At 500 Hz: 200 counts (50 µs). TI EVM uses 80 (fixed, insufficient at high gain); Protocentral uses 0 (risky) |
-| LED2ENDC | 7598 | 7998 (t2) | 7998 | **7998** | Closes 2 counts before end of phase |
-| ALED2STC | 80 | 200 (t5) | 0 | **200** | 200 counts (50 µs) after LED2 OFF — timing margin; ambient ripple confirmed as optical/electrical crosstalk (not timing) |
-| ALED2ENDC | 1598 | 1998 (t6) | 1998 | **1998** | Uses full window except last 2 counts |
-| LED1LEDSTC | 2000 | 2000 (t9) | 2000 | **2000** | LED1 starts at beginning of its phase (25% of period) |
-| LED1LEDENDC | 3599 | 3999 (t10) | 3999 | **3999** | 25% duty cycle, same as LED2 |
-| LED1STC | 2080 | 2050 (t7) | 2000 | **2050** | Same criterion as LED2STC: 50-count margin |
-| LED1ENDC | 3598 | 3998 (t8) | 3998 | **3998** | Same as LED2ENDC |
-| ALED1STC | 4080 | 4200 (t11) | 4000 | **4200** | 200 counts (50 µs) after LED1 OFF — same criterion as ALED2STC |
-| ALED1ENDC | 5598 | 5998 (t12) | 5998 | **5998** | Same as ALED2ENDC |
-| LED2CONVST | 7 | 4 (t13) | 2 | **4** | 1 count after ADC reset end (end=3). Required: "Must start one AFE clock cycle after the ADC reset pulse ends" |
-| LED2CONVEND | 2000 | 1999 (t14) | 1999 | **1999** | 1 count before next reset (ADCRSTSTCT1=2000) |
-| ALED2CONVST | 2007 | 2004 (t15) | 2002 | **2004** | 1 count after ADCRSTENDCT1=2003 |
-| ALED2CONVEND | 4000 | 3999 (t16) | 3999 | **3999** | 1 count before ADCRSTSTCT2=4000 |
-| LED1CONVST | 4007 | 4004 (t17) | 4002 | **4004** | 1 count after ADCRSTENDCT2=4003 |
-| LED1CONVEND | 6000 | 5999 (t18) | 5999 | **5999** | 1 count before ADCRSTSTCT3=6000 |
-| ALED1CONVST | 6007 | 6004 (t19) | 6002 | **6004** | 1 count after ADCRSTENDCT3=6003 |
-| ALED1CONVEND | ⚠️ 8000 | 7999 (t20) | 7999 | **7999** | =PRPCOUNT. TI EVM formula overflows at 500Hz (designed for 100Hz) |
-| ADCRSTSTCT0 | 0 | 0 (t21) | 0 | **0** | Start of period |
-| ADCRSTENDCT0 | 5 | 3 (t22) | 0 | **3** | 3 counts = 0.75µs → −60 dB crosstalk. Protocentral uses 0 (unquantified risk). 6 counts would eliminate crosstalk entirely but unnecessary with hardware ambient cancellation |
-| ADCRSTSTCT1 | 2000 | 2000 (t23) | 2000 | **2000** | Start of phase 2 |
-| ADCRSTENDCT1 | 2005 | 2003 (t24) | 2000 | **2003** | ADCRSTSTCT1 + 3 counts |
-| ADCRSTSTCT2 | 4000 | 4000 (t25) | 4000 | **4000** | Start of phase 3 |
-| ADCRSTENDCT2 | 4005 | 4003 (t26) | 4000 | **4003** | ADCRSTSTCT2 + 3 counts |
-| ADCRSTSTCT3 | 6000 | 6000 (t27) | 6000 | **6000** | Start of phase 4 |
-| ADCRSTENDCT3 | 6005 | 6003 (t28) | 6000 | **6003** | ADCRSTSTCT3 + 3 counts |
+The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000–7999); its ADC conversion runs in the first quarter of the next cycle (0–1999), pipelined with ALED2 sampling. All registers are absolute positions in [0, 7999]. "circ." denotes a modular constraint across the cycle boundary. Table ordered by **temporal sequence**.
 
-**Notes on the Table 2 formula:**
-- `PRPCOUNT = (AFECLK / PRF) − 1`
-- 25% duty cycle: LED window = `(PRPCOUNT+1) / 4` counts
-- TIA margin: `max(50, floor(q × 0.10))` counts — 10% of LED-on window, floor 12.5 µs. Used both by timing registers and auto-CF (§7.2)
-- ADC reset: 3 fixed counts. For 6 counts (zero crosstalk), set CONVST to reset_end+1
-- TI EVM formula uses 20% duty cycle and 80-count margin → **not valid at 500Hz** (ALED1CONVEND overflows)
+`PRPCOUNT` = 7999 — period register: `(AFECLK / PRF) − 1` = (4 000 000 / 500) − 1 = 7999.
 
-#### Temporal sequence and constraints (PRF = 500 Hz, period = 8 000 counts)
-
-The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000–7999); its ADC conversion runs in the first quarter of the next cycle (0–1999), pipelined with ALED2 sampling. All registers are absolute positions in [0, 7999]. "circ." denotes a modular constraint across the cycle boundary.
-
-| # | Identifier | Default (counts) | Constraints |
-|--:|---|---|---|
-| 1 | **t21** ADCRSTSTCT0 | 0 | < t22; ≤ t13 |
-| 2 | **t22** ADCRSTENDCT0 | 3 | > t21; < t13; (t22−t21) ≥ 4 |
-| 3 | **t13** LED2CONVST | 4 | ≥ t22; ≥ t2+1 (circ.); < t14 |
-| 4 | **t5** ALED2STC | 200 | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs (settling) |
-| 5 | **t6** ALED2ENDC | 1 998 | > t5; < t9; ≤ t15 |
-| 6 | **t14** LED2CONVEND | 1 999 | > t13; (t14−t13) ≥ 1 950 (§8.3.1.2) |
-| 7 | **t23** ADCRSTSTCT1 | 2 000 | < t24; ≤ t15 |
-| 8 | **t9** LED1LEDSTC | 2 000 | ≤ t7; < t10 |
-| 9 | **t24** ADCRSTENDCT1 | 2 003 | > t23; < t15; (t24−t23) ≥ 4 |
-| 10 | **t15** ALED2CONVST | 2 004 | ≥ t24; ≥ t6+1; < t16 |
-| 11 | **t7** LED1STC | 2 050 | ≥ t9; < t8; RF×CF < (t8−t7)×0.25µs/10 (§8.3.1.1) |
-| 12 | **t8** LED1ENDC | 3 998 | > t7; ≤ t10; < t17 |
-| 13 | **t10** LED1LEDENDC | 3 999 | ≥ t8; > t9 |
-| 14 | **t16** ALED2CONVEND | 3 999 | > t15; (t16−t15) ≥ 1 950 |
-| 15 | **t25** ADCRSTSTCT2 | 4 000 | < t26; ≤ t17 |
-| 16 | **t26** ADCRSTENDCT2 | 4 003 | > t25; < t17; (t26−t25) ≥ 4 |
-| 17 | **t17** LED1CONVST | 4 004 | ≥ t26; ≥ t8+1; < t18 |
-| 18 | **t11** ALED1STC | 4 200 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs (settling) |
-| 19 | **t12** ALED1ENDC | 5 998 | > t11; < t3 (circ.); ≤ t19 |
-| 20 | **t18** LED1CONVEND | 5 999 | > t17; (t18−t17) ≥ 1 950 |
-| 21 | **t27** ADCRSTSTCT3 | 6 000 | < t28; ≤ t19 |
-| 22 | **t3** LED2LEDSTC | 6 000 | ≤ t1; < t4 |
-| 23 | **t28** ADCRSTENDCT3 | 6 003 | > t27; < t19; (t28−t27) ≥ 4 |
-| 24 | **t19** ALED1CONVST | 6 004 | ≥ t28; ≥ t12+1; < t20 |
-| 25 | **t1** LED2STC | 6 050 | ≥ t3; < t2; RF×CF < (t2−t1)×0.25µs/10 (§8.3.1.1) |
-| 26 | **t2** LED2ENDC | 7 998 | > t1; ≤ t4; < t13+period (circ.) |
-| 27 | **t4** LED2LEDENDC | 7 999 | ≥ t2; > t3 |
-| 28 | **t20** ALED1CONVEND | 7 999 | > t19; (t20−t19) ≥ 1 950 |
+| # | Identifier | Default (counts) | Rationale | Constraints |
+|--:|---|---|---|---|
+| 1 | **t21** ADCRSTSTCT0 | 0 | Start of period | < t22; ≤ t13 |
+| 2 | **t22** ADCRSTENDCT0 | 3 | 3-count reset pulse (0.75 µs, −60 dB crosstalk) | > t21; < t13; (t22−t21) ≥ 4 |
+| 3 | **t13** LED2CONVST | 4 | 1 count after reset end (t22=3); conversion starts one AFECLK after reset | ≥ t22; ≥ t2+1 (circ.); < t14 |
+| 4 | **t5** ALED2STC | 200 | 200 counts (50 µs) after LED2 OFF for TIA settling; use 400+ at ≥ 50 mA | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs |
+| 5 | **t6** ALED2ENDC | 1 998 | Uses full window; closes 2 counts before t9 (LED1 on) | > t5; < t9; ≤ t15 |
+| 6 | **t14** LED2CONVEND | 1 999 | 1 count before next reset (t23=2000); conv. window = 1 995 counts | > t13; (t14−t13) ≥ 1 950 (§8.3.1.2) |
+| 7 | **t23** ADCRSTSTCT1 | 2 000 | Start of phase 2 | < t24; ≤ t15 |
+| 8 | **t9** LED1LEDSTC | 2 000 | LED1 on at start of its phase (25% of period) | ≤ t7; < t10 |
+| 9 | **t24** ADCRSTENDCT1 | 2 003 | t23 + 3 counts | > t23; < t15; (t24−t23) ≥ 4 |
+| 10 | **t15** ALED2CONVST | 2 004 | 1 count after t24=2003 | ≥ t24; ≥ t6+1; < t16 |
+| 11 | **t7** LED1STC | 2 050 | 50 counts after LED1 on; TIA settle margin = max(50, 10% of LED window) | ≥ t9; < t8; RF×CF < (t8−t7)×0.25µs/10 (§8.3.1.1) |
+| 12 | **t8** LED1ENDC | 3 998 | Closes 2 counts before end of LED1 phase | > t7; ≤ t10; < t17 |
+| 13 | **t10** LED1LEDENDC | 3 999 | 25% duty cycle: 2 000 counts = 500 µs → maximises photons | ≥ t8; > t9 |
+| 14 | **t16** ALED2CONVEND | 3 999 | 1 count before t25=4000; conv. window = 1 995 counts | > t15; (t16−t15) ≥ 1 950 |
+| 15 | **t25** ADCRSTSTCT2 | 4 000 | Start of phase 3 | < t26; ≤ t17 |
+| 16 | **t26** ADCRSTENDCT2 | 4 003 | t25 + 3 counts | > t25; < t17; (t26−t25) ≥ 4 |
+| 17 | **t17** LED1CONVST | 4 004 | 1 count after t26=4003 | ≥ t26; ≥ t8+1; < t18 |
+| 18 | **t11** ALED1STC | 4 200 | 200 counts (50 µs) after LED1 OFF for TIA settling; same criterion as t5 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs |
+| 19 | **t12** ALED1ENDC | 5 998 | Full window; closes 2 counts before t3 (LED2 on) | > t11; < t3 (circ.); ≤ t19 |
+| 20 | **t18** LED1CONVEND | 5 999 | 1 count before t27=6000; conv. window = 1 995 counts | > t17; (t18−t17) ≥ 1 950 |
+| 21 | **t27** ADCRSTSTCT3 | 6 000 | Start of phase 4 | < t28; ≤ t19 |
+| 22 | **t3** LED2LEDSTC | 6 000 | LED2 on at start of its phase (75% of period) | ≤ t1; < t4 |
+| 23 | **t28** ADCRSTENDCT3 | 6 003 | t27 + 3 counts | > t27; < t19; (t28−t27) ≥ 4 |
+| 24 | **t19** ALED1CONVST | 6 004 | 1 count after t28=6003 | ≥ t28; ≥ t12+1; < t20 |
+| 25 | **t1** LED2STC | 6 050 | 50 counts after LED2 on; TIA settle margin = max(50, 10% of LED window) | ≥ t3; < t2; RF×CF < (t2−t1)×0.25µs/10 (§8.3.1.1) |
+| 26 | **t2** LED2ENDC | 7 998 | Closes 2 counts before end of LED2 phase | > t1; ≤ t4; < t13+period (circ.) |
+| 27 | **t4** LED2LEDENDC | 7 999 | 25% duty cycle: 2 000 counts = 500 µs → maximises photons | ≥ t2; > t3 |
+| 28 | **t20** ALED1CONVEND | 7 999 | = PRPCOUNT; conv. window = 1 995 counts | > t19; (t20−t19) ≥ 1 950 |
 
 **Notes:**
-- t5 and t11 (ambient sample start) use 200/4200 instead of the datasheet minimum (50/4050) to provide adequate TIA settling at LED currents up to ~25 mA. At higher currents (≥ 50 mA) consider increasing to 400+ counts.
+- Simultaneous events are valid: t9=t23=2000, t10=t16=3999, t3=t27=6000, t4=t20=7999.
 - ADC conversion minimum (§8.3.1.2): ≈ PRPCOUNT/4 − 50 ≈ 1 950 counts. Recommended values give 1 995 counts per channel.
-- RF×CF constraint (§8.3.1.1): with RF=500 KΩ, CF=5 pF → RF×CF = 2.5 µs; sample windows ≈ 487 µs → limit = 48.7 µs → comfortable margin (×19).
-- Events at the same count are simultaneous and valid: t9=t23=2000, t10=t16=3999, t3=t27=6000, t4=t20=7999.
+- RF×CF (§8.3.1.1): with RF=500 KΩ, CF=5 pF → RF×CF=2.5 µs; sample windows ≈ 487 µs → limit=48.7 µs → margin ×19.
+- Ambient settling (t5, t11): 200 counts (50 µs) is adequate up to ~25 mA LED current. At ≥ 50 mA increase to 400+ counts.
+- TIA margin formula: `max(50, floor(LED_window × 0.10))` counts. Also used by auto-CF (§7.2).
+- Historical comparison: TI EVM uses 20% duty cycle + 80-count margins (ALED1CONVEND overflows at 500 Hz); Protocentral uses 0 for reset and sample margins (no settling guard).
 
 ---
 
