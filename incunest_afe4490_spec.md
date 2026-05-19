@@ -1034,6 +1034,47 @@ This section documents the exact value of each AFE4490 register written by the l
 - ADC reset: 3 fixed counts. For 6 counts (zero crosstalk), set CONVST to reset_end+1
 - TI EVM formula uses 20% duty cycle and 80-count margin → **not valid at 500Hz** (ALED1CONVEND overflows)
 
+#### Temporal sequence and constraints (PRF = 500 Hz, period = 8 000 counts)
+
+The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000–7999); its ADC conversion runs in the first quarter of the next cycle (0–1999), pipelined with ALED2 sampling. All registers are absolute positions in [0, 7999]. "circ." denotes a modular constraint across the cycle boundary.
+
+| # | Identifier | Default (counts) | Constraints |
+|--:|---|---|---|
+| 1 | **t21** ADCRSTSTCT0 | 0 | < t22; ≤ t13 |
+| 2 | **t22** ADCRSTENDCT0 | 3 | > t21; < t13; (t22−t21) ≥ 4 |
+| 3 | **t13** LED2CONVST | 4 | ≥ t22; ≥ t2+1 (circ.); < t14 |
+| 4 | **t5** ALED2STC | 200 | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs (settling) |
+| 5 | **t6** ALED2ENDC | 1 998 | > t5; < t9; ≤ t15 |
+| 6 | **t14** LED2CONVEND | 1 999 | > t13; (t14−t13) ≥ 1 950 (§8.3.1.2) |
+| 7 | **t23** ADCRSTSTCT1 | 2 000 | < t24; ≤ t15 |
+| 8 | **t9** LED1LEDSTC | 2 000 | ≤ t7; < t10 |
+| 9 | **t24** ADCRSTENDCT1 | 2 003 | > t23; < t15; (t24−t23) ≥ 4 |
+| 10 | **t15** ALED2CONVST | 2 004 | ≥ t24; ≥ t6+1; < t16 |
+| 11 | **t7** LED1STC | 2 050 | ≥ t9; < t8; RF×CF < (t8−t7)×0.25µs/10 (§8.3.1.1) |
+| 12 | **t8** LED1ENDC | 3 998 | > t7; ≤ t10; < t17 |
+| 13 | **t10** LED1LEDENDC | 3 999 | ≥ t8; > t9 |
+| 14 | **t16** ALED2CONVEND | 3 999 | > t15; (t16−t15) ≥ 1 950 |
+| 15 | **t25** ADCRSTSTCT2 | 4 000 | < t26; ≤ t17 |
+| 16 | **t26** ADCRSTENDCT2 | 4 003 | > t25; < t17; (t26−t25) ≥ 4 |
+| 17 | **t17** LED1CONVST | 4 004 | ≥ t26; ≥ t8+1; < t18 |
+| 18 | **t11** ALED1STC | 4 200 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs (settling) |
+| 19 | **t12** ALED1ENDC | 5 998 | > t11; < t3 (circ.); ≤ t19 |
+| 20 | **t18** LED1CONVEND | 5 999 | > t17; (t18−t17) ≥ 1 950 |
+| 21 | **t27** ADCRSTSTCT3 | 6 000 | < t28; ≤ t19 |
+| 22 | **t3** LED2LEDSTC | 6 000 | ≤ t1; < t4 |
+| 23 | **t28** ADCRSTENDCT3 | 6 003 | > t27; < t19; (t28−t27) ≥ 4 |
+| 24 | **t19** ALED1CONVST | 6 004 | ≥ t28; ≥ t12+1; < t20 |
+| 25 | **t1** LED2STC | 6 050 | ≥ t3; < t2; RF×CF < (t2−t1)×0.25µs/10 (§8.3.1.1) |
+| 26 | **t2** LED2ENDC | 7 998 | > t1; ≤ t4; < t13+period (circ.) |
+| 27 | **t4** LED2LEDENDC | 7 999 | ≥ t2; > t3 |
+| 28 | **t20** ALED1CONVEND | 7 999 | > t19; (t20−t19) ≥ 1 950 |
+
+**Notes:**
+- t5 and t11 (ambient sample start) use 200/4200 instead of the datasheet minimum (50/4050) to provide adequate TIA settling at LED currents up to ~25 mA. At higher currents (≥ 50 mA) consider increasing to 400+ counts.
+- ADC conversion minimum (§8.3.1.2): ≈ PRPCOUNT/4 − 50 ≈ 1 950 counts. Recommended values give 1 995 counts per channel.
+- RF×CF constraint (§8.3.1.1): with RF=500 KΩ, CF=5 pF → RF×CF = 2.5 µs; sample windows ≈ 487 µs → limit = 48.7 µs → comfortable margin (×19).
+- Events at the same count are simultaneous and valid: t9=t23=2000, t10=t16=3999, t3=t27=6000, t4=t20=7999.
+
 ---
 
 ### 11.2 Analog configuration
