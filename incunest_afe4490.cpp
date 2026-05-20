@@ -174,14 +174,13 @@ namespace {
     constexpr uint32_t tia_settle_min      = 50;     // floor: 12.5 µs @ 4 MHz (covers RF_500K/CF_5P at high Fs)
     constexpr float    tia_n_tau           = 5.0f;   // 5τ → <0.7% settling error
 
-    // TIAGAIN: STG2GAIN bits [10:8] + STAGE2EN bit[14]
-    // enum order: GAIN_0DB=0..GAIN_12DB=4 → register bits (0 = disabled, rest = enabled)
-    constexpr uint32_t stg2_code[5] = {
-        0x000000UL,                   // GAIN_0DB: stage 2 disabled
-        0x000100UL | 0x004000UL,      // GAIN_3_5DB: STG2=1 + EN
-        0x000200UL | 0x004000UL,      // GAIN_6DB
-        0x000300UL | 0x004000UL,      // GAIN_9_5DB
-        0x000400UL | 0x004000UL       // GAIN_12DB
+    // TIAGAIN: STG2GAIN bits D[10:8] only — STAGE2EN (D14) is set separately via _afe_stage2_en1/2
+    constexpr uint32_t stg2_gain_code[5] = {
+        0x000000UL,   // GAIN_0DB:   STG2=0
+        0x000100UL,   // GAIN_3_5DB: STG2=1
+        0x000200UL,   // GAIN_6DB:   STG2=2
+        0x000300UL,   // GAIN_9_5DB: STG2=3
+        0x000400UL    // GAIN_12DB:  STG2=4
     };
 }
 
@@ -215,9 +214,11 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_tia_gain_led1(AFE4490TIAGain::RF_500K),
       _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
       _afe_stage2_gain_led1(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_stage2_en1(true),
       _afe_tia_gain_led2(AFE4490TIAGain::RF_500K),
       _afe_tia_cf_led2(AFE4490TIACF::CF_5P),
       _afe_stage2_gain_led2(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_stage2_en2(true),
       _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1_ALED1),
       _ppgdisp_filter_type(AFE4490Filter::BUTTERWORTH),
@@ -579,6 +580,32 @@ void INCUNEST_AFE4490::setStage2GainLED2(AFE4490Stage2Gain gain) {
 #endif
 }
 
+void INCUNEST_AFE4490::setStage2En1(bool en) {
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+#endif
+    _afe_stage2_en1 = en;
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) {
+        _apply_analog_regs();
+        xSemaphoreGive(_spi_mutex);
+    }
+#endif
+}
+
+void INCUNEST_AFE4490::setStage2En2(bool en) {
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+#endif
+    _afe_stage2_en2 = en;
+#ifndef INCUNEST_OFFLINE
+    if (_initialized) {
+        _apply_analog_regs();
+        xSemaphoreGive(_spi_mutex);
+    }
+#endif
+}
+
 void INCUNEST_AFE4490::setAmbDac(uint8_t uA) {
     if (uA > 10) uA = 10;
 #ifndef INCUNEST_OFFLINE
@@ -749,9 +776,11 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.afe_tia_gain_led1    = _afe_tia_gain_led1;
     cfg.afe_tia_cf_led1      = _afe_tia_cf_led1;
     cfg.afe_stage2_gain_led1 = _afe_stage2_gain_led1;
+    cfg.afe_stage2_en1       = _afe_stage2_en1;
     cfg.afe_tia_gain_led2    = _afe_tia_gain_led2;
     cfg.afe_tia_cf_led2      = _afe_tia_cf_led2;
     cfg.afe_stage2_gain_led2 = _afe_stage2_gain_led2;
+    cfg.afe_stage2_en2       = _afe_stage2_en2;
     cfg.afe_ambdac_uA        = _afe_ambdac_uA;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_spi_mutex);
@@ -1036,23 +1065,24 @@ void INCUNEST_AFE4490::_apply_timing_regs() {
 
 uint32_t INCUNEST_AFE4490::_build_tiagain_led1() {
     // TIAGAIN register (0x20): RF_LED1[2:0] | CF_LED1[4:0] | STG2GAIN1[2:0] | STAGE2EN1 | ENSEPGAIN
-    uint32_t reg = rf_code[(int)_afe_tia_gain_led1];        // bits D[2:0]
-    reg         |= cf_code[(int)_afe_tia_cf_led1];          // bits D[7:3]
-    reg         |= stg2_code[(int)_afe_stage2_gain_led1];   // bits D[10:8] + D14 (STAGE2EN1)
-    if (_afe_ensepgain) reg |= 0x008000UL;                  // D15: ENSEPGAIN
+    uint32_t reg = rf_code[(int)_afe_tia_gain_led1];           // bits D[2:0]
+    reg         |= cf_code[(int)_afe_tia_cf_led1];             // bits D[7:3]
+    reg         |= stg2_gain_code[(int)_afe_stage2_gain_led1]; // bits D[10:8]: gain only
+    if (_afe_stage2_en1)  reg |= 0x004000UL;                   // D14: STAGE2EN1 (explicit)
+    if (_afe_ensepgain)   reg |= 0x008000UL;                   // D15: ENSEPGAIN
     return reg;
 }
 
 uint32_t INCUNEST_AFE4490::_build_tia_amb_gain_led2() {
     // TIA_AMB_GAIN register (0x21): RF_LED2[2:0] | CF_LED2[4:0] | STG2GAIN2[2:0] | STAGE2EN2 | AMBDAC[3:0]
     // RF/CF/Stage2 fields control LED2 (RED) when ENSEPGAIN=1, or both channels when ENSEPGAIN=0.
-    uint32_t reg = rf_code[(int)_afe_tia_gain_led2];        // bits D[2:0]
-    reg         |= cf_code[(int)_afe_tia_cf_led2];          // bits D[7:3]
-    reg         |= stg2_code[(int)_afe_stage2_gain_led2];   // bits D[10:8] + D14 (STAGE2EN2)
-    reg         |= ((uint32_t)_afe_ambdac_uA << 16);        // bits D[19:16]: AMBDAC[3:0]
-    // STAGE2EN2 (D14) must be set when AMBDAC > 0: Stage 2 is the cancellation stage.
-    // Without STAGE2EN2 the cancellation current has no effect regardless of AMBDAC value.
-    if (_afe_ambdac_uA > 0) reg |= 0x004000UL;
+    uint32_t reg = rf_code[(int)_afe_tia_gain_led2];           // bits D[2:0]
+    reg         |= cf_code[(int)_afe_tia_cf_led2];             // bits D[7:3]
+    reg         |= stg2_gain_code[(int)_afe_stage2_gain_led2]; // bits D[10:8]: gain only
+    reg         |= ((uint32_t)_afe_ambdac_uA << 16);           // bits D[19:16]: AMBDAC[3:0]
+    // STAGE2EN2 (D14): set when explicitly enabled OR when AMBDAC > 0.
+    // When AMBDAC > 0, Stage 2 must be active — the cancellation current has no effect without it.
+    if (_afe_stage2_en2 || _afe_ambdac_uA > 0) reg |= 0x004000UL;
     return reg;
 }
 

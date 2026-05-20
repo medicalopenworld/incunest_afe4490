@@ -124,7 +124,11 @@ void setLED2Current(float mA);          // depends on setLEDRange()
 void setLEDRange(uint8_t mA);           // 75 or 150 mA (with TX_REF=0.75V default)
 void setTIAGain(AFE4490TIAGain gain);   // auto-recalculates CF (see §7.2); setTIACF() can override
 void setTIACF(AFE4490TIACF cf);         // manual override; overridden again if setTIAGain()/setSampleRate() is called
-void setStage2Gain(AFE4490Stage2Gain gain);
+void setStage2Gain(AFE4490Stage2Gain gain);      // sets gain for both channels; does NOT touch STAGE2EN1/2
+void setStage2GainLED1(AFE4490Stage2Gain gain);  // STG2GAIN1 only; does NOT touch STAGE2EN1
+void setStage2GainLED2(AFE4490Stage2Gain gain);  // STG2GAIN2 only; does NOT touch STAGE2EN2
+void setStage2En1(bool en);                      // STAGE2EN1 (D14 of TIAGAIN) — independent of gain
+void setStage2En2(bool en);                      // STAGE2EN2 (D14 of TIA_AMB_GAIN) — independent of gain; also auto-set when AMBDAC > 0
 void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
 ```
 
@@ -139,9 +143,14 @@ struct AFE4490Config {
     float             afe_led1_current_mA;   // IR LED drive current [mA]
     float             afe_led2_current_mA;   // RED LED drive current [mA]
     uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
-    AFE4490TIAGain    afe_tia_gain;          // TIA transimpedance gain (RF)
-    AFE4490TIACF      afe_tia_cf;            // TIA feedback capacitance
-    AFE4490Stage2Gain afe_stage2_gain;       // Stage 2 amplifier gain
+    AFE4490TIAGain    afe_tia_gain_led1;      // TIA RF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
+    AFE4490TIACF      afe_tia_cf_led1;       // TIA CF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
+    AFE4490Stage2Gain afe_stage2_gain_led1;  // STG2GAIN1 for LED1 — gain bits only, no enable
+    bool              afe_stage2_en1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit enable
+    AFE4490TIAGain    afe_tia_gain_led2;     // TIA RF for LED2 (RED) — TIA_AMB_GAIN; always active
+    AFE4490TIACF      afe_tia_cf_led2;       // TIA CF for LED2 (RED) — TIA_AMB_GAIN; always active
+    AFE4490Stage2Gain afe_stage2_gain_led2;  // STG2GAIN2 for LED2 — gain bits only, no enable
+    bool              afe_stage2_en2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit enable; also forced ON when AMBDAC > 0
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
     AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
@@ -852,10 +861,13 @@ Parameters written to chip registers during initialisation. Changing them requir
 
 | Parameter | API | Default | Options | Effect on output |
 |---|---|---|---|---|
-| Stage 2 gain | `setStage2Gain()` | GAIN_0DB (disabled) | 0, 3.5, 6, 9.5, 12 dB | Additional gain after ambient subtraction; expands dynamic range for low-perfusion signals |
-| Ambient cancellation DAC (I_CANCEL) | `setAmbDac()` | 0 µA | 0 – 10 µA, 1 µA steps | Subtracts ambient leakage current via Stage 2. **Requires Stage 2 active (STAGE2EN2).** When `uA > 0`, `_apply_analog_regs()` automatically sets STAGE2EN2 (D14 of TIA_AMB_GAIN) regardless of the Stage 2 gain setting for LED phases. |
+| Stage 2 gain LED1 | `setStage2GainLED1()` | GAIN_0DB | 0, 3.5, 6, 9.5, 12 dB | STG2GAIN1[2:0] D[10:8] of TIAGAIN. Sets gain only; does NOT touch STAGE2EN1. Active when ENSEPGAIN=1. |
+| Stage 2 gain LED2 | `setStage2GainLED2()` | GAIN_0DB | 0, 3.5, 6, 9.5, 12 dB | STG2GAIN2[2:0] D[10:8] of TIA_AMB_GAIN. Sets gain only; does NOT touch STAGE2EN2. Always active. |
+| Stage 2 enable LED1 | `setStage2En1(bool)` | true | true / false | STAGE2EN1 bit D14 of TIAGAIN. Decoupled from gain: can be ON at 0 dB or OFF despite non-zero gain. Active when ENSEPGAIN=1. |
+| Stage 2 enable LED2 | `setStage2En2(bool)` | true | true / false | STAGE2EN2 bit D14 of TIA_AMB_GAIN. Decoupled from gain. Also forced ON by `_apply_analog_regs()` when `AMBDAC > 0` (cancellation current needs Stage 2 active). Always active. |
+| Ambient cancellation DAC (I_CANCEL) | `setAmbDac()` | 0 µA | 0 – 10 µA, 1 µA steps | AMBDAC[3:0] D[19:16] of TIA_AMB_GAIN. Subtracts ambient leakage before ADC via Stage 2. When `uA > 0`, `_apply_analog_regs()` forces STAGE2EN2=1 regardless of `setStage2En2()`. Applies to both LED1 and LED2 ambient phases (single shared DAC). |
 
-> Stage 2 gain is useful when LED current is low and the pleth component is small. Enabling it when the signal is already large risks clipping.
+> Stage 2 gain and enable are now independent bits. GAIN_0DB with STAGE2EN=1 → Stage 2 active at unity gain (useful for AMBDAC at minimum overhead). STAGE2EN=0 regardless of gain → Stage 2 bypassed.
 
 #### ADC and averaging
 
@@ -1001,34 +1013,34 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 
 | # | Identifier | Default (counts) | Rationale | Constraints |
 |--:|---|---|---|---|
-| 1 | **t21** ADCRSTSTCT0 | 0 | Start of period | < t22; ≤ t13 |
-| 2 | **t22** ADCRSTENDCT0 | 3 | 3-count reset pulse (0.75 µs, −60 dB crosstalk) | > t21; < t13; (t22−t21) ≥ 4 |
-| 3 | **t13** LED2CONVST | 4 | 1 count after reset end (t22=3); conversion starts one AFECLK after reset | ≥ t22; ≥ t2+1 (circ.); < t14 |
-| 4 | **t5** ALED2STC | 200 | 200 counts (50 µs) after LED2 OFF for TIA settling; use 400+ at ≥ 50 mA | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs |
-| 5 | **t6** ALED2ENDC | 1 998 | Uses full window; closes 2 counts before t9 (LED1 on) | > t5; < t9; ≤ t15 |
-| 6 | **t14** LED2CONVEND | 1 999 | 1 count before next reset (t23=2000); conv. window = 1 995 counts | > t13; (t14−t13) ≥ 1 950 (§8.3.1.2) |
-| 7 | **t23** ADCRSTSTCT1 | 2 000 | Start of phase 2 | < t24; ≤ t15 |
-| 8 | **t9** LED1LEDSTC | 2 000 | LED1 on at start of its phase (25% of period) | ≤ t7; < t10 |
-| 9 | **t24** ADCRSTENDCT1 | 2 003 | t23 + 3 counts | > t23; < t15; (t24−t23) ≥ 4 |
-| 10 | **t15** ALED2CONVST | 2 004 | 1 count after t24=2003 | ≥ t24; ≥ t6+1; < t16 |
-| 11 | **t7** LED1STC | 2 050 | 50 counts after LED1 on; TIA settle margin = max(50, 10% of LED window) | ≥ t9; < t8; RF×CF < (t8−t7)×0.25µs/10 (§8.3.1.1) |
-| 12 | **t8** LED1ENDC | 3 998 | Closes 2 counts before end of LED1 phase | > t7; ≤ t10; < t17 |
-| 13 | **t10** LED1LEDENDC | 3 999 | 25% duty cycle: 2 000 counts = 500 µs → maximises photons | ≥ t8; > t9 |
-| 14 | **t16** ALED2CONVEND | 3 999 | 1 count before t25=4000; conv. window = 1 995 counts | > t15; (t16−t15) ≥ 1 950 |
-| 15 | **t25** ADCRSTSTCT2 | 4 000 | Start of phase 3 | < t26; ≤ t17 |
-| 16 | **t26** ADCRSTENDCT2 | 4 003 | t25 + 3 counts | > t25; < t17; (t26−t25) ≥ 4 |
-| 17 | **t17** LED1CONVST | 4 004 | 1 count after t26=4003 | ≥ t26; ≥ t8+1; < t18 |
-| 18 | **t11** ALED1STC | 4 200 | 200 counts (50 µs) after LED1 OFF for TIA settling; same criterion as t5 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs |
-| 19 | **t12** ALED1ENDC | 5 998 | Full window; closes 2 counts before t3 (LED2 on) | > t11; < t3 (circ.); ≤ t19 |
-| 20 | **t18** LED1CONVEND | 5 999 | 1 count before t27=6000; conv. window = 1 995 counts | > t17; (t18−t17) ≥ 1 950 |
-| 21 | **t27** ADCRSTSTCT3 | 6 000 | Start of phase 4 | < t28; ≤ t19 |
-| 22 | **t3** LED2LEDSTC | 6 000 | LED2 on at start of its phase (75% of period) | ≤ t1; < t4 |
-| 23 | **t28** ADCRSTENDCT3 | 6 003 | t27 + 3 counts | > t27; < t19; (t28−t27) ≥ 4 |
-| 24 | **t19** ALED1CONVST | 6 004 | 1 count after t28=6003 | ≥ t28; ≥ t12+1; < t20 |
-| 25 | **t1** LED2STC | 6 050 | 50 counts after LED2 on; TIA settle margin = max(50, 10% of LED window) | ≥ t3; < t2; RF×CF < (t2−t1)×0.25µs/10 (§8.3.1.1) |
-| 26 | **t2** LED2ENDC | 7 998 | Closes 2 counts before end of LED2 phase | > t1; ≤ t4; < t13+period (circ.) |
-| 27 | **t4** LED2LEDENDC | 7 999 | 25% duty cycle: 2 000 counts = 500 µs → maximises photons | ≥ t2; > t3 |
-| 28 | **t20** ALED1CONVEND | 7 999 | = PRPCOUNT; conv. window = 1 995 counts | > t19; (t20−t19) ≥ 1 950 |
+| 1 | **t21** ADCRSTSTCT0 — *ADC reset 0 start count* | 0 | Start of period | < t22; ≤ t13 |
+| 2 | **t22** ADCRSTENDCT0 — *ADC reset 0 end count* | 3 | 3-count reset pulse (0.75 µs, −60 dB crosstalk) | > t21; < t13; (t22−t21) ≥ 4 |
+| 3 | **t13** LED2CONVST — *LED2 convert start count* | 4 | 1 count after reset end (t22=3); conversion starts one AFECLK after reset | ≥ t22; ≥ t2+1 (circ.); < t14 |
+| 4 | **t5** ALED2STC — *Sample ambient LED2 start count* | 200 | 200 counts (50 µs) after LED2 OFF for TIA settling; use 400+ at ≥ 50 mA | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs |
+| 5 | **t6** ALED2ENDC — *Sample ambient LED2 end count* | 1 998 | Uses full window; closes 2 counts before t9 (LED1 on) | > t5; < t9; ≤ t15 |
+| 6 | **t14** LED2CONVEND — *LED2 convert end count* | 1 999 | 1 count before next reset (t23=2000); conv. window = 1 995 counts | > t13; (t14−t13) ≥ 1 950 (§8.3.1.2) |
+| 7 | **t23** ADCRSTSTCT1 — *ADC reset 1 start count* | 2 000 | Start of phase 2 | < t24; ≤ t15 |
+| 8 | **t9** LED1LEDSTC — *LED1 start count* | 2 000 | LED1 on at start of its phase (25% of period) | ≤ t7; < t10 |
+| 9 | **t24** ADCRSTENDCT1 — *ADC reset 1 end count* | 2 003 | t23 + 3 counts | > t23; < t15; (t24−t23) ≥ 4 |
+| 10 | **t15** ALED2CONVST — *LED2 ambient convert start count* | 2 004 | 1 count after t24=2003 | ≥ t24; ≥ t6+1; < t16 |
+| 11 | **t7** LED1STC — *Sample LED1 start count* | 2 050 | 50 counts after LED1 on; TIA settle margin = max(50, 10% of LED window) | ≥ t9; < t8; RF×CF < (t8−t7)×0.25µs/10 (§8.3.1.1) |
+| 12 | **t8** LED1ENDC — *Sample LED1 end count* | 3 998 | Closes 2 counts before end of LED1 phase | > t7; ≤ t10; < t17 |
+| 13 | **t10** LED1LEDENDC — *LED1 end count* | 3 999 | 25% duty cycle: 2 000 counts = 500 µs → maximises photons | ≥ t8; > t9 |
+| 14 | **t16** ALED2CONVEND — *LED2 ambient convert end count* | 3 999 | 1 count before t25=4000; conv. window = 1 995 counts | > t15; (t16−t15) ≥ 1 950 |
+| 15 | **t25** ADCRSTSTCT2 — *ADC reset 2 start count* | 4 000 | Start of phase 3 | < t26; ≤ t17 |
+| 16 | **t26** ADCRSTENDCT2 — *ADC reset 2 end count* | 4 003 | t25 + 3 counts | > t25; < t17; (t26−t25) ≥ 4 |
+| 17 | **t17** LED1CONVST — *LED1 convert start count* | 4 004 | 1 count after t26=4003 | ≥ t26; ≥ t8+1; < t18 |
+| 18 | **t11** ALED1STC — *Sample ambient LED1 start count* | 4 200 | 200 counts (50 µs) after LED1 OFF for TIA settling; same criterion as t5 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs |
+| 19 | **t12** ALED1ENDC — *Sample ambient LED1 end count* | 5 998 | Full window; closes 2 counts before t3 (LED2 on) | > t11; < t3 (circ.); ≤ t19 |
+| 20 | **t18** LED1CONVEND — *LED1 convert end count* | 5 999 | 1 count before t27=6000; conv. window = 1 995 counts | > t17; (t18−t17) ≥ 1 950 |
+| 21 | **t27** ADCRSTSTCT3 — *ADC reset 3 start count* | 6 000 | Start of phase 4 | < t28; ≤ t19 |
+| 22 | **t3** LED2LEDSTC — *LED2 start count* | 6 000 | LED2 on at start of its phase (75% of period) | ≤ t1; < t4 |
+| 23 | **t28** ADCRSTENDCT3 — *ADC reset 3 end count* | 6 003 | t27 + 3 counts | > t27; < t19; (t28−t27) ≥ 4 |
+| 24 | **t19** ALED1CONVST — *LED1 ambient convert start count* | 6 004 | 1 count after t28=6003 | ≥ t28; ≥ t12+1; < t20 |
+| 25 | **t1** LED2STC — *Sample LED2 start count* | 6 050 | 50 counts after LED2 on; TIA settle margin = max(50, 10% of LED window) | ≥ t3; < t2; RF×CF < (t2−t1)×0.25µs/10 (§8.3.1.1) |
+| 26 | **t2** LED2ENDC — *Sample LED2 end count* | 7 998 | Closes 2 counts before end of LED2 phase | > t1; ≤ t4; < t13+period (circ.) |
+| 27 | **t4** LED2LEDENDC — *LED2 end count* | 7 999 | 25% duty cycle: 2 000 counts = 500 µs → maximises photons | ≥ t2; > t3 |
+| 28 | **t20** ALED1CONVEND — *LED1 ambient convert end count* | 7 999 | = PRPCOUNT; conv. window = 1 995 counts | > t19; (t20−t19) ≥ 1 950 |
 
 **Notes:**
 - Simultaneous events are valid: t9=t23=2000, t10=t16=3999, t3=t27=6000, t4=t20=7999.
@@ -1148,6 +1160,14 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.26   | Decouple STAGE2EN1/STAGE2EN2 from Stage 2 gain. `stg2_gain_code[]` now         |
+|         | contains only D[10:8] gain bits (no enable). `setStage2En1(bool)` and          |
+|         | `setStage2En2(bool)` expose STAGE2EN1 (D14 of TIAGAIN) and STAGE2EN2           |
+|         | (D14 of TIA_AMB_GAIN) as independent explicit parameters. `AFE4490Config`      |
+|         | gains `afe_stage2_en1` and `afe_stage2_en2`. `$CFG` frame gains                |
+|         | `stage2en1` and `stage2en2` fields. `$SET,stage2en1/2,<0\|1>` commands added.  |
+|         | PulseNest HW CONFIG TIA section gains STAGE2EN1/STAGE2EN2 checkboxes.          |
+|         | STAGE2EN2 is still forced ON when AMBDAC > 0.                                  |
 | v0.25b  | Fix `setAmbDac()`: `_apply_analog_regs()` now sets STAGE2EN2 (D14 of          |
 |         | TIA_AMB_GAIN) automatically when `uA > 0`. Stage 2 must be active for AMBDAC  |
 |         | to have effect; STAGE2EN2 is independent of TIAGAIN's Stage 2 enable even    |
