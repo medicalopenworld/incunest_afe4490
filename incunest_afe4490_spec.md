@@ -1140,6 +1140,23 @@ Reference table for HGAC and RSQM algorithm design. Maps AFE4490 datasheet signa
 
 All 6 values are sign-extended from 22-bit two's complement by `_sign_extend_22()`. Valid range: [−2 097 152, +2 097 151]. Saturation (TIA railing) produces a near-maximum constant value (~2 096 921) across all channels.
 
+### 12.3 Hardware probe states
+
+Three distinct hardware states are distinguishable from the raw ADC channel pattern. Used by RSQM (probe presence detection) and HGAC (inhibit control when probe not on patient).
+
+| State | `led1` | `led2` | `aled1` | `aled2` | Physical cause |
+|---|---|---|---|---|---|
+| **CABLE_DISCONNECTED** | ≈ −5000 | ≈ −5000 | ≈ −5000 | ≈ −5000 | Photodiode open-circuit; TIA input floating → input offset current × RF produces small negative output |
+| **NO_TISSUE** | saturated | saturated | low–mid | low–mid | No tissue attenuation; LEDs illuminate photodiode directly. ALED channels depend on ambient light level |
+| **PROBE_ON_PATIENT** | PPG signal | PPG signal | low | low | Normal operation; tissue attenuates LED light; ambient channels remain low |
+
+**Detection thresholds (indicative, validated on hardware):**
+- `CABLE_DISCONNECTED`: all four channels satisfy `|value| < 10 000`
+- `NO_TISSUE`: `led1 > SAT_THRESHOLD` or `led2 > SAT_THRESHOLD` (SAT_THRESHOLD ≈ 95% of 2 097 151 ≈ 1 992 294)
+- `PROBE_ON_PATIENT`: neither of the above
+
+> These states are inputs to RSQM DiagCode and gate HGAC operation: HGAC must not act in `CABLE_DISCONNECTED` or `NO_TISSUE` states.
+
 ---
 
 ## 13. Bibliographic references
