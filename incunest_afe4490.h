@@ -112,7 +112,7 @@ enum class AFE4490TIACF {
 };
 
 enum class AFE4490Stage2Gain {
-    GAIN_0DB,    // Stage 2 disabled (default)
+    GAIN_0DB,    // 0 dB (×1, unity gain) — Stage 2 active; disable via setEnStage2GainLED1/2(false)
     GAIN_3_5DB,
     GAIN_6DB,
     GAIN_9_5DB,
@@ -232,7 +232,7 @@ public:
 
     // Signal and filter configuration
     void setPPGChannel(AFE4490Channel channel);
-    void setFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
+    void setPPGDispFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
 
     // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
     void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
@@ -501,7 +501,7 @@ private:
     AFE4490Channel    _ppgdisp_channel;
     AFE4490Filter     _ppgdisp_filter_type;
 
-    // ── PPG display filter (Butterworth bandpass or MA, configurable via setFilter()) ──
+    // ── PPG display filter (Butterworth bandpass or MA, configurable via setPPGDispFilter()) ──
     BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz
 
     // ── Moving average state (PPG display filter — used when _ppgdisp_filter_type == MOVING_AVERAGE) ──

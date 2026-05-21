@@ -133,7 +133,7 @@ void setup() {
     // ── Optional configuration (call after begin) ─────────────────────────────
 
     // Change the PPG bandpass filter (default 0.5–20 Hz is fine for most cases)
-    // afe.setFilter(AFE4490Filter::BUTTERWORTH, 0.5f, 20.0f);
+    // afe.setPPGDispFilter(AFE4490Filter::BUTTERWORTH, 0.5f, 20.0f);
 
     // Use Webster (1997) coefficients instead of the default (source-traceable)
     // NOTE: both sets assume ~940 nm IR. For 905 nm probes (e.g. UpnMed U401-D)

@@ -51,7 +51,7 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 6 raw signals
     │
     ├─→ selected channel (setPPGChannel)
-    │       └─→ bandpass filter (setFilter) → ppg + HR1 (peak detection)
+    │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
     │
     ├─→ LED1-ALED1 (IR corr.) → bandpass 0.5–5 Hz → decimate ×10 → HR2 (autocorrelation)
     │
@@ -194,7 +194,7 @@ AFE4490Config getConfig();
 ### 2.4 Signal and filter configuration
 ```cpp
 void setPPGChannel(AFE4490Channel channel);
-void setFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
+void setPPGDispFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
 // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
 void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
@@ -351,7 +351,7 @@ enum class AFE4490TIACF {
 };
 
 enum class AFE4490Stage2Gain {
-    GAIN_0DB,    // default (stage 2 disabled)
+    GAIN_0DB,    // 0 dB (×1, unity gain) — Stage 2 active; disable via setEnStage2GainLED1/2(false)
     GAIN_3_5DB,
     GAIN_6DB,
     GAIN_9_5DB,
@@ -1109,11 +1109,44 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 
 ---
 
-## 12. Bibliographic references
+## 12. Datasheet-to-library identifier mapping
+
+Reference table for HGAC and RSQM algorithm design. Maps AFE4490 datasheet signal names to library identifiers.
+
+### 12.1 Analog gain parameters
+
+| Datasheet name | HW register | `AFE4490Config` field | Setter | Type / enum |
+|---|---|---|---|---|
+| **RF_LED1** | `TIAGAIN` D[2:0] | `afe_tia_gain_led1` | `setTIAGain()` | `AFE4490TIAGain` (`RF_10K`…`RF_1M`) |
+| **RF_LED2** | `TIA_AMB_GAIN` D[2:0] | `afe_tia_gain_led2` | `setTIAGain()` (shared when `ENSEPGAIN=0`) | `AFE4490TIAGain` |
+| **STG2GAIN1** | `TIAGAIN` D[10:8] | `afe_stage2_gain_led1` | `setStage2GainLED1()` | `AFE4490Stage2Gain` (`GAIN_0DB`…`GAIN_12DB`) |
+| **STG2GAIN2** | `TIA_AMB_GAIN` D[10:8] | `afe_stage2_gain_led2` | `setStage2GainLED2()` | `AFE4490Stage2Gain` |
+| **AMBDAC** | `TIA_AMB_GAIN` D[19:16] | `afe_ambdac_uA` | `setAmbDac(uint8_t uA)` | `uint8_t` 0–10 µA |
+| **LED1** (IR current) | `LEDCNTRL` D[15:8] | `afe_led1_current_mA` | `setLED1Current(float mA)` | `float` 0–range mA (DAC-quantised) |
+| **LED2** (RED current) | `LEDCNTRL` D[7:0] | `afe_led2_current_mA` | `setLED2Current(float mA)` | `float` 0–range mA (DAC-quantised) |
+
+> **RF_LED2 note:** when `ENSEPGAIN=0` (default), `setTIAGain()` writes the same RF value to both `TIAGAIN` and `TIA_AMB_GAIN`. `afe_tia_gain_led2` acts independently only when `ENSEPGAIN=1`.
+
+### 12.2 ADC data registers
+
+| Datasheet name | Register address | `AFE4490Sample` field | Semantic channel |
+|---|---|---|---|
+| **LED2VAL** | `0x2A` | `led2` | RED raw |
+| **ALED2VAL** | `0x2B` | `aled2` | Ambient after LED2 (RED amb) |
+| **LED1VAL** | `0x2C` | `led1` | IR raw |
+| **ALED1VAL** | `0x2D` | `aled1` | Ambient after LED1 (IR amb) |
+| **LED2−ALED2VAL** | `0x2E` | `led2_aled2` | RED ambient-corrected |
+| **LED1−ALED1VAL** | `0x2F` | `led1_aled1` | IR ambient-corrected *(primary PPG/SpO2 signal)* |
+
+All 6 values are sign-extended from 22-bit two's complement by `_sign_extend_22()`. Valid range: [−2 097 152, +2 097 151]. Saturation (TIA railing) produces a near-maximum constant value (~2 096 921) across all channels.
+
+---
+
+## 13. Bibliographic references
 
 Key references for each algorithm implemented in this library.
 
-### 12.1 HR1 — Adaptive threshold peak detection
+### 13.1 HR1 — Adaptive threshold peak detection
 
 - **Pan, J. & Tompkins, W.J. (1985).** "A Real-Time QRS Detection Algorithm." *IEEE Transactions on Biomedical Engineering*, 32(3), 230–236.
   The classical reference for cardiac peak detection with adaptive threshold and refractory period. HR1 is a simplified adaptation for PPG.
@@ -1121,7 +1154,7 @@ Key references for each algorithm implemented in this library.
 - **Elgendi, M. et al. (2013).** "Systolic Peak Detection in Acceleration Photoplethysmograms Measured from Emergency Responders in Tropical Conditions." *PLoS ONE*, 8(10), e76585.
   More specific to PPG peak detection in challenging conditions.
 
-### 12.2 HR2 — Normalised autocorrelation
+### 13.2 HR2 — Normalised autocorrelation
 
 - **de Cheveigné, A. & Kawahara, H. (2002).** "YIN, a fundamental frequency estimator for speech and music." *Journal of the Acoustical Society of America*, 111(4), 1917–1930.
   The primary reference for normalised autocorrelation-based fundamental frequency estimation. HR2 is directly derived from this approach.
@@ -1129,7 +1162,7 @@ Key references for each algorithm implemented in this library.
 - **Rabiner, L.R. & Schafer, R.W. (1978).** *Digital Processing of Speech Signals.* Prentice-Hall.
   Foundational coverage of autocorrelation methods for pitch estimation.
 
-### 12.3 HR3 — FFT + Harmonic Product Spectrum
+### 13.3 HR3 — FFT + Harmonic Product Spectrum
 
 - **Schroeder, M.R. (1968).** "Period histogram and product spectrum: New methods for fundamental-frequency measurement." *Journal of the Acoustical Society of America*, 43(4), 829–834.
   Original paper introducing the Harmonic Product Spectrum concept.
@@ -1140,7 +1173,7 @@ Key references for each algorithm implemented in this library.
 - **Paradkar, N. & Chowdhary, S.R. (2017).** "Cardiac arrhythmia detection using photoplethysmography." *IEEE EMBC 2017*.
   Application of FFT-based HR estimation on PPG signals in a wearable context similar to this project.
 
-### 12.4 SpO2 — AC/DC ratio (R-curve method)
+### 13.4 SpO2 — AC/DC ratio (R-curve method)
 
 - **Webster, J.G. (Ed.) (1997).** *Design of Pulse Oximeters.* IOP Publishing.
   The definitive reference. Covers Beer-Lambert law, the R ratio, empirical calibration, and sources of measurement error.
@@ -1156,7 +1189,7 @@ Key references for each algorithm implemented in this library.
 
 ---
 
-## 13. Version history
+## 14. Version history
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
@@ -1282,8 +1315,8 @@ Key references for each algorithm implemented in this library.
 | v0.6    | Biquad coefficients computed dynamically (`_recalc_biquad()`). Formula:    |
 |         | bilinear transform on a 2nd-order Butterworth bandpass prototype.          |
 |         | Coefficients moved from namespace constants to members `_bq_b0..a2`.       |
-|         | Called from `_recalc_rate_params()` and `setFilter()`. The "not yet        |
-|         | implemented" warning removed. `setFilter()` is now fully functional for    |
+|         | Called from `_recalc_rate_params()` and `setPPGDispFilter()`. The "not yet        |
+|         | implemented" warning removed. `setPPGDispFilter()` is now fully functional for    |
 |         | any fs, f_low, f_high.                                                     |
 | v0.5    | Internal constants reorganised at the top of the anonymous namespace in    |
 |         | `.cpp`, in snake_case. Algorithm time parameters expressed in physical      |

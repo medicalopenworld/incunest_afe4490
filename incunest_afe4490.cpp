@@ -644,7 +644,7 @@ void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setFilter(AFE4490Filter type, float f_low_hz, float f_high_hz) {
+void INCUNEST_AFE4490::setPPGDispFilter(AFE4490Filter type, float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _ppgdisp_filter_type        = type;
     _ppgdisp_bpf.f_low      = f_low_hz;
