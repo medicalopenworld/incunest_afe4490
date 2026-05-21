@@ -257,6 +257,9 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm)
 {
+    // Quantize initial LED currents to the DAC grid (range already set in init list)
+    _afe_led1_current_mA = _quantize_led_mA(_afe_led1_current_mA);
+    _afe_led2_current_mA = _quantize_led_mA(_afe_led2_current_mA);
     memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
     memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
     _hr1_ma_idx = 0; _hr1_ma_sum = 0.0f;
@@ -399,11 +402,17 @@ void INCUNEST_AFE4490::setAdcAverages(uint8_t num) {
 #endif
 }
 
+float INCUNEST_AFE4490::_quantize_led_mA(float mA) const {
+    float fs = (float)_afe_led_range_mA;
+    uint8_t code = (uint8_t)constrain(roundf((mA / fs) * 256.0f), 0.0f, 255.0f);
+    return (code / 256.0f) * fs;
+}
+
 void INCUNEST_AFE4490::setLED1Current(float mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_led1_current_mA = constrain(mA, 0.0f, (float)_afe_led_range_mA);
+    _afe_led1_current_mA = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -416,7 +425,7 @@ void INCUNEST_AFE4490::setLED2Current(float mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_led2_current_mA = constrain(mA, 0.0f, (float)_afe_led_range_mA);
+    _afe_led2_current_mA = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -434,6 +443,9 @@ void INCUNEST_AFE4490::setLEDRange(uint8_t mA) {
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
     _afe_led_range_mA = mA;
+    // Re-quantize LED currents to the new range's DAC grid
+    _afe_led1_current_mA = _quantize_led_mA(_afe_led1_current_mA);
+    _afe_led2_current_mA = _quantize_led_mA(_afe_led2_current_mA);
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();

@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.20 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.25 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.24"
+#define INCUNEST_AFE4490_VERSION "0.25"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -374,6 +374,8 @@ private:
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_gain_led1
     void _recalc_afe_tia_cf_led2();   // updates _afe_tia_cf_led2 from _afe_tia_gain_led2
+    // Returns mA rounded to the nearest DAC step: round(mA/range*256)/256*range
+    float _quantize_led_mA(float mA) const;
 
     // Chip init
 #ifndef INCUNEST_OFFLINE

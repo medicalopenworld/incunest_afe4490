@@ -119,9 +119,9 @@ void setAdcAverages(uint8_t num);       // num = number of samples to average: 1
                                         // NUMAV_max = floor(5000 / PRF) - 1  (e.g.: PRF=500Hz → max=9 → up to 10 samples)
                                         // Absolute hardware limit: 16 samples (NUMAV=15)
                                         // If num > NUMAV_max for current PRF, clamped and logE emitted
-void setLED1Current(float mA);          // depends on setLEDRange()
-void setLED2Current(float mA);          // depends on setLEDRange()
-void setLEDRange(uint8_t mA);           // 75 or 150 mA (with TX_REF=0.75V default)
+void setLED1Current(float mA);          // stored as actual DAC-quantised value; depends on setLEDRange()
+void setLED2Current(float mA);          // stored as actual DAC-quantised value; depends on setLEDRange()
+void setLEDRange(uint8_t mA);           // 75 or 150 mA (with TX_REF=0.75V default); re-quantises both LED currents
 void setTIAGain(AFE4490TIAGain gain);   // auto-recalculates CF (see §7.2); setTIACF() can override
 void setTIACF(AFE4490TIACF cf);         // manual override; overridden again if setTIAGain()/setSampleRate() is called
 void setStage2Gain(AFE4490Stage2Gain gain);      // sets gain for both channels; does NOT touch STAGE2EN1/2
@@ -140,8 +140,8 @@ void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0�
 struct AFE4490Config {
     uint16_t          afe_sample_rate_hz;    // ADC sample rate [Hz]
     uint8_t           afe_adc_averages;      // ADC hardware averages (1 = no averaging)
-    float             afe_led1_current_mA;   // IR LED drive current [mA]
-    float             afe_led2_current_mA;   // RED LED drive current [mA]
+    float             afe_led1_current_mA;   // IR LED drive current [mA] — actual DAC-quantised value
+    float             afe_led2_current_mA;   // RED LED drive current [mA] — actual DAC-quantised value
     uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
     AFE4490TIAGain    afe_tia_gain_led1;      // TIA RF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
     AFE4490TIACF      afe_tia_cf_led1;       // TIA CF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
@@ -1176,6 +1176,10 @@ Key references for each algorithm implemented in this library.
 |         | `AFE4490Config` gains `afe_ambdac_uA`. `$CFG` frame gains `ambdac` field.   |
 |         | PulseNest HW CONFIG window gains "Ambient Cancellation" group with AMBDAC   |
 |         | spinbox and `$SET,ambdac,<value>` command.                                  |
+| v0.25   | LED current setters now store the actual DAC-quantised value (nearest step  |
+|         | of range/256 mA) instead of the requested float. `setLEDRange()` re-        |
+|         | quantises both currents to the new grid. `getConfig()` thus returns the      |
+|         | real programmed current. New private helper `_quantize_led_mA()`.           |
 | v0.24   | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
 |         | via 13 new setters (setSpO2WarmupS, setSpO2DcIirTauS, setSpO2AcEmaTauS,   |
 |         | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
