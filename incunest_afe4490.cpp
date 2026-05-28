@@ -1069,12 +1069,9 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
                                                     ? rsqm_ot_saturated
                                                     : s2 / (_afe_led2_current_mA * rf2 * rg2);
 
-        // Hysteresis: exit NOT_APPLIED only when both channels drop below lo_thr.
-        // Uses committed _rsqm_probe_state (not pending) — correct reference for hysteresis.
-        const bool prev_not_applied = (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED);
-        const float thr = prev_not_applied ? rsqm_ot_lo_thr : rsqm_ot_hi_thr;
-        // OR logic: one saturated channel is enough to flag NOT_APPLIED
-        _set_probe_state(((optical_transmittance_led1 > thr) || (optical_transmittance_led2 > thr))
+        // OR logic: one saturated channel is enough to flag NOT_APPLIED.
+        // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.
+        _set_probe_state(((optical_transmittance_led1 > rsqm_ot_thr) || (optical_transmittance_led2 > rsqm_ot_thr))
                              ? ProbeState::PROBE_NOT_APPLIED
                              : ProbeState::PROBE_APPLIED);
     }

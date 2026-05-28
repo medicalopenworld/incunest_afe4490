@@ -601,8 +601,8 @@ optical_transmittance = LED_Sub / (LED_mA × RF_Ω × RG_linear)
 
 - **OT computed from instantaneous `LED_Sub` values** (not EMA). Responds in one sample; margin of ×54 makes PPG noise (2% modulation → ±0.001 OT) negligible.
 - When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
-- Entry threshold: `ot1 > 0.20` OR `ot2 > 0.20`   *(OR logic: one channel is enough)*
-- Exit threshold:  `ot1 ≤ 0.15` AND `ot2 ≤ 0.15` *(both must drop — hysteresis prevents oscillation)*
+- Threshold: `ot1 > 0.30` OR `ot2 > 0.30` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*
+- Single threshold (no hysteresis) — state oscillation is prevented by the 50-sample debounce in `_set_probe_state()` instead.
 
 Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.7–2.96 (factor ×54).
 
@@ -610,7 +610,7 @@ Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED 
 
 **PROBE_APPLIED** — neither of the above.
 
-**State transition debounce (`_set_probe_state`):** any state change requires 50 consecutive samples (~100 ms @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events.
+**State transition debounce (`_set_probe_state`):** any state change requires 100 consecutive samples (~200 ms @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events.
 
 #### 5.6.3 DiagCode
 
@@ -1287,7 +1287,7 @@ Three distinct hardware states are distinguishable from the raw ADC channel patt
 | **PROBE_NOT_APPLIED** | saturated | saturated | low–mid | low–mid | No tissue attenuation; LEDs illuminate photodiode directly. ALED channels depend on ambient light level |
 | **PROBE_APPLIED** | PPG signal | PPG signal | low | low | Normal operation; tissue attenuates LED light; ambient channels remain low |
 
-**Detection method:** EMA-based (see §5.6). Not instantaneous thresholds — uses 750-sample warmup and optical transmittance with hysteresis.
+**Detection method:** see §5.6. DISCONNECTED is instantaneous; NOT_APPLIED/APPLIED use optical transmittance (single threshold + 50-sample debounce); APPLIED uses 750-sample EMA warmup for RSQM_SIGNAL_WEAK.
 
 > These states are computed by RSQM (_update_rsqm) and gate HGAC operation: HGAC must not act in `PROBE_DISCONNECTED` or `PROBE_NOT_APPLIED` states.
 
@@ -1349,8 +1349,9 @@ Key references for each algorithm implemented in this library.
 |         | bitmask constants RSQM_AMB_SAT, RSQM_SIGNAL_WEAK, RSQM_HW_SETTLING.        |
 |         | `AFE4490Data` gains `rsqi`, `diag_code`, `probe_state`. EMA estimators      |
 |         | (α_mean=0.02, α_var=0.004, ready after 750 samples). Probe detection via   |
-|         | `optical_transmittance` with hysteresis (hi=0.20, lo=0.15). RSQM runs       |
-|         | first in `_process_sample()` at 500 Hz. Spec §5.6 added.                   |
+|         | `optical_transmittance` (single threshold 0.30, no hysteresis) + 100-sample  |
+|         | debounce in `_set_probe_state()`. RSQM runs first in `_process_sample()`    |
+|         | at 500 Hz. Spec §5.6 added.                                                 |
 | v0.26   | Decouple STAGE2EN1/STAGE2EN2 from Stage 2 gain. `stg2_gain_code[]` now         |
 |         | contains only D[10:8] gain bits (no enable). `setStage2En1(bool)` and          |
 |         | `setStage2En2(bool)` expose STAGE2EN1 (D14 of TIAGAIN) and STAGE2EN2           |
