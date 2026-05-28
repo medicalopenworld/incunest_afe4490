@@ -581,7 +581,7 @@ optical_transmittance = LED_Sub_ema_mean / (LED_mA × RF_Ω × RG_linear)
 - When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
 - Entry threshold: `ot1 > 0.20` OR `ot2 > 0.20`   *(OR logic: one channel is enough)*
 - Exit threshold:  `ot1 ≤ 0.15` AND `ot2 ≤ 0.15` *(both must drop — hysteresis prevents oscillation)*
-- **Disconnect guard:** if previous state is NOT_APPLIED and `LED1_Sub_mean ≤ 0` OR `LED2_Sub_mean ≤ 0`, the state stays NOT_APPLIED and does NOT transition to APPLIED. A negative EMA indicates the signal is crossing zero during cable disconnection, not a genuine finger contact (real contact always produces a small positive LED_Sub).
+- **OT computed from instantaneous `LED_Sub` values** (not EMA). The EMA (τ≈100ms) produces unreliable OT during fast transitions (cable connect/disconnect), transiently landing in the APPLIED zone. Instantaneous values respond in one sample. False transitions from PPG noise are negligible: APPLIED OT ≈ 0.05 vs NOT_APPLIED OT ≈ 2.8 (factor ×54); 2% PPG modulation → ±0.001 OT variation.
 
 Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.7–2.96 (factor ×54).
 
