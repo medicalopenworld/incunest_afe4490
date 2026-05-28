@@ -1029,8 +1029,13 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
             // Hysteresis: exit NOT_APPLIED only when both channels drop below lo_thr
             const bool prev_not_applied = (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED);
             const float thr = prev_not_applied ? rsqm_ot_lo_thr : rsqm_ot_hi_thr;
-            // OR logic: one saturated channel is enough to flag NOT_APPLIED
-            _rsqm_probe_state = ((ot1 > thr) || (ot2 > thr))
+            // OR logic: one saturated channel is enough to flag NOT_APPLIED.
+            // Guard: from NOT_APPLIED, block transition to APPLIED when EMA has gone negative.
+            // A negative EMA means the signal is crossing zero due to cable disconnection
+            // (not genuine finger contact, which always produces a small positive LED_Sub).
+            const bool ot_not_applied  = (ot1 > thr) || (ot2 > thr);
+            const bool ema_negative    = prev_not_applied && (m1 <= 0.0f || m2 <= 0.0f);
+            _rsqm_probe_state = (ot_not_applied || ema_negative)
                                     ? ProbeState::PROBE_NOT_APPLIED
                                     : ProbeState::PROBE_APPLIED;
         }
