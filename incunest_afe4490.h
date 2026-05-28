@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.25"
+#define INCUNEST_AFE4490_VERSION "0.27"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -52,6 +52,19 @@
 #define INCUNEST_TIMING_STATS 0
 #endif
 
+// ── Probe state ───────────────────────────────────────────────────────────────
+enum class ProbeState {
+    PROBE_DISCONNECTED,  // cable or probe connector not plugged in
+    PROBE_NOT_APPLIED,   // probe connected but not on patient tissue
+    PROBE_APPLIED        // probe on patient, normal measurement
+};
+
+// DiagCode bitmask flags — returned in AFE4490Data::diag_code
+// Multiple bits may be set simultaneously.
+constexpr uint32_t RSQM_AMB_SAT     = 0x00000001UL;  // ambient channel (ALED1 or ALED2) near positive rail
+constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00000002UL;  // differential signal amplitude too low (low perfusion)
+constexpr uint32_t RSQM_HW_SETTLING = 0x00000004UL;  // hardware settling after TIA/LED config change
+
 // ── Public data struct ────────────────────────────────────────────────────────
 struct AFE4490Data {
     // Field order mirrors the $M1/$P1 serial frame: raw signals first, then processed outputs
@@ -74,6 +87,10 @@ struct AFE4490Data {
     float   hr2_sqi;     // HR2 Signal Quality Index [0–1]: normalised autocorrelation at dominant lag; 0=no periodicity, 1=perfect
     float   hr3;         // HR3 (FFT + HPS) in bpm
     float   hr3_sqi;     // HR3 Signal Quality Index [0–1]: HPS peak prominence in search range; 0=diffuse HPS, 1=dominant peak
+    // RSQM outputs
+    uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_AMB_SAT | RSQM_SIGNAL_WEAK | RSQM_HW_SETTLING | ...
+    ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, or PROBE_APPLIED
 };
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
@@ -342,6 +359,26 @@ private:
 
     struct BiquadState { float v1, v2; };
 
+    // EMA estimator for one signal channel (mean + variance)
+    struct RsqmEmaChannel {
+        float    ema_mean;
+        float    ema_var;
+        uint32_t count;
+    };
+
+    // ── RSQM constants ─────────────────────────────────────────────────────────
+    static constexpr float    rsqm_alpha_mean       = 0.02f;    // EMA α for mean  (τ ≈ 100 ms @ 500 Hz)
+    static constexpr float    rsqm_alpha_var        = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
+    static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
+    static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |LED_Sub_mean| < this → disconnected candidate
+    static constexpr float    rsqm_disconn_sub_std  = 500.0f;   // LED_Sub_std < this → disconnected candidate
+    static constexpr int32_t  rsqm_disconn_raw_sat  = 2000000;  // LED_raw < this excludes positive-saturation corner case
+    static constexpr float    rsqm_ot_hi_thr        = 0.20f;    // OT > this → enter PROBE_NOT_APPLIED
+    static constexpr float    rsqm_ot_lo_thr        = 0.15f;    // OT < this → exit PROBE_NOT_APPLIED (hysteresis)
+    static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
+    static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
+    static constexpr float    rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
+
     // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
     // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
     // _biquad_step() and _biquad_precharge() operate on state in-place.
@@ -397,6 +434,10 @@ private:
     float _biquad_process(float x, BiquadFilter& filt);  // precharge on first call, then step
     void  _process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                           int32_t led1_aled1, int32_t led2_aled2);
+
+    // RSQM — runs first in _process_sample(); fills rsqi, diag_code, probe_state
+    void _update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
+                      int32_t led1_aled1, int32_t led2_aled2);
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
     void _update_spo2(int32_t ir_corr, int32_t red_corr);
@@ -592,6 +633,12 @@ private:
     uint32_t _hr3_update_interval;
     float    _hr_min_bpm;
     float    _hr_max_bpm;
+
+    // ── RSQM state ────────────────────────────────────────────────────────────
+    RsqmEmaChannel _rsqm_led1_sub;       // EMA estimator for led1_aled1 (IR differential)
+    RsqmEmaChannel _rsqm_led2_sub;       // EMA estimator for led2_aled2 (RED differential)
+    ProbeState     _rsqm_probe_state;    // current probe state (output of state machine)
+    uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
 
     // ── Output snapshot (written by task, pushed to queue) ──
     AFE4490Data _current_data;

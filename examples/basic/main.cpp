@@ -94,6 +94,16 @@ void ReaderTask(void *pvParameters) {
             }
             Serial.print(" (SQI: "); Serial.print(data.hr3_sqi, 2); Serial.print(")");
 
+            // Probe state and raw signal quality
+            Serial.print("  Probe: ");
+            switch (data.probe_state) {
+                case ProbeState::PROBE_APPLIED:        Serial.print("APPLIED");       break;
+                case ProbeState::PROBE_NOT_APPLIED:    Serial.print("NOT_APPLIED");   break;
+                case ProbeState::PROBE_DISCONNECTED:   Serial.print("DISCONNECTED");  break;
+            }
+            Serial.print("  RSQI: "); Serial.print(data.rsqi);
+            if (data.diag_code)  { Serial.print("  DiagCode: 0x"); Serial.print(data.diag_code, HEX); }
+
             Serial.println();
         }
 

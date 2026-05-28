@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.24
+# incunest_afe4490 — Specification v0.27
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -87,6 +87,10 @@ struct AFE4490Data {
     float   hr2_sqi;    // HR2 Signal Quality Index [0–1]: normalised autocorrelation at dominant lag; 0=no periodicity, 1=perfect
     float   hr3;        // HR3 (FFT + HPS) in bpm
     float   hr3_sqi;    // HR3 Signal Quality Index [0–1]: spectral concentration at peak; 0=diffuse spectrum, 1=dominant tone
+    // RSQM outputs (filled every sample by _update_rsqm)
+    uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_AMB_SAT | RSQM_SIGNAL_WEAK | RSQM_HW_SETTLING | ...
+    ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, or PROBE_APPLIED
 };
 ```
 
@@ -357,6 +361,18 @@ enum class AFE4490Stage2Gain {
     GAIN_9_5DB,
     GAIN_12DB
 };
+
+enum class ProbeState {
+    PROBE_DISCONNECTED,  // cable or probe connector not plugged in
+    PROBE_NOT_APPLIED,   // probe connected but not on patient tissue
+    PROBE_APPLIED        // probe on patient, normal measurement
+};
+
+// DiagCode bitmask flags (returned in AFE4490Data::diag_code — uint32_t, 32 bits available)
+constexpr uint32_t RSQM_AMB_SAT     = 0x00000001UL;  // ambient channel (ALED1 or ALED2) near positive rail
+constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00000002UL;  // differential signal amplitude too low (low perfusion)
+constexpr uint32_t RSQM_HW_SETTLING = 0x00000004UL;  // hardware settling after TIA/LED config change
+// bits 3–31 reserved for future use (e.g. runDiagnostics() flags, HGAC conditions, ...)
 ```
 
 ---
@@ -429,9 +445,9 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_ma_max_len` | 64 samples | Max moving average length |
 | `hr1_refractory_s` | 0.2 s | Refractory period between peaks (~300 BPM max) |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
-| `hr_min_bpm` | 25 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
+| `hr_min_bpm` | 40 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
 | `hr_max_bpm` | 300 BPM | Reported valid HR range maximum (neonatal tachycardia) |
-| `hr_search_min_bpm` | 22 BPM | Internal search lower bound (guard band: hr_min − 3) |
+| `hr_search_min_bpm` | 37 BPM | Internal search lower bound (guard band: hr_min − 3) |
 | `hr_search_max_bpm` | 303 BPM | Internal search upper bound (guard band: hr_max + 3) |
 
 > **Guard band design:** all HR algorithms search internally in [22, 303] BPM and force `hr*_sqi = 0.0` when the result falls outside [25, 300] BPM. This prevents boundary-clipping errors where a signal at exactly 25 BPM could be missed due to small algorithmic offsets. The ±3 BPM margin is consistent with the ISO 80601-2-61 measurement tolerance.
@@ -524,6 +540,72 @@ A clean PPG signal → SQI approaches 1. A diffuse or noisy spectrum → SQI ≈
 HR1–HR4 all operate on `led1_aled1` (IR ambient-corrected) and run in parallel. `AFE4490Data` will expose `hr4`/`hr4_valid` when implemented.
 
 > All HR algorithms developed from scratch. Protocentral code is not used as a base.
+
+---
+
+### 5.6 RSQM — Raw Signal Quality Monitor
+
+Runs first in `_process_sample()`, once per sample at 500 Hz. Fills `AFE4490Data::rsqi`, `diag_code`, and `probe_state`.
+
+#### 5.6.1 EMA estimators
+
+Two per-channel EMA estimators track mean and variance of the differential signal (LED_Sub = LED − ALED):
+
+```
+ema_mean += α_mean × (x − ema_mean)          α_mean = 0.02  (τ ≈ 100 ms @ 500 Hz)
+d = x − ema_mean
+ema_var  += α_var  × (d² − ema_var)           α_var  = 0.004 (τ ≈ 500 ms @ 500 Hz)
+```
+
+Estimators are considered **ready** after 750 samples (3 × τ_var = 1500 ms). During warmup, `probe_state = PROBE_DISCONNECTED` and `rsqi = 0`.
+
+> Reset required on hardware config change (RF / RG / AMBDAC): `ema_mean = x_current; ema_var = 0; count = 0`. Implemented as part of HGAC (not yet active in v0.27).
+
+#### 5.6.2 Probe state machine
+
+**Priority order:** PROBE_DISCONNECTED > PROBE_NOT_APPLIED > PROBE_APPLIED.
+
+**PROBE_DISCONNECTED** — detected when ALL of:
+- `|LED1_Sub_mean| < 5000` AND `|LED2_Sub_mean| < 5000`
+- `LED1_Sub_std < 500` AND `LED2_Sub_std < 500`
+- `LED1_raw < 2 000 000` AND `LED2_raw < 2 000 000` *(excludes positive-saturation corner case)*
+
+Physical cause: open-circuit photodiode → TIA input floating → input-offset current × RF produces small negative output.
+
+**PROBE_NOT_APPLIED** — detected via *optical transmittance* when not DISCONNECTED:
+
+```
+optical_transmittance = LED_Sub_ema_mean / (LED_mA × RF_Ω × RG_linear)
+```
+
+- When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
+- Entry threshold: `ot1 > 0.20` OR `ot2 > 0.20`   *(OR logic: one channel is enough)*
+- Exit threshold:  `ot1 ≤ 0.15` AND `ot2 ≤ 0.15` *(both must drop — hysteresis prevents oscillation)*
+
+Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.7–2.96 (factor ×54).
+
+> Valid for clip-type reusable probes only. Disposable adhesive probes not validated.
+
+**RF / RG selection for OT:** when `ENSEPGAIN=0`, chip uses LED2 TIA settings for both channels → `rf1 = rf2`, `rg1 = rg2`.
+
+**PROBE_APPLIED** — neither of the above.
+
+#### 5.6.3 DiagCode
+
+| Bit | Constant | Condition |
+|---|---|---|
+| 0x0001 | `RSQM_AMB_SAT` | `aled1 ≥ 2 096 921` OR `aled2 ≥ 2 096 921` |
+| 0x0002 | `RSQM_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND `LED1_Sub_std < 2000` (needs HW calibration) |
+| 0x0004 | `RSQM_HW_SETTLING` | Countdown > 0 (set externally by HGAC; not yet active in v0.27) |
+
+Multiple bits may be set simultaneously.
+
+#### 5.6.4 RSQI
+
+```
+rsqi = 1  iff  (estimators ready) AND (probe_state == PROBE_APPLIED) AND (diag_code == 0)
+rsqi = 0  otherwise
+```
 
 ---
 
@@ -967,9 +1049,9 @@ Applied by all HR algorithms equally to decide whether an output is reportable a
 
 | Parameter | Constant | Value | Scope |
 |---|---|---|---|
-| Reported valid HR lower bound | `hr_min_bpm` | 25 BPM | HR1, HR2, HR3 — ISO 80601-2-61; neonatal |
+| Reported valid HR lower bound | `hr_min_bpm` | 40 BPM | HR1, HR2, HR3 — ISO 80601-2-61; neonatal |
 | Reported valid HR upper bound | `hr_max_bpm` | 300 BPM | HR1, HR2, HR3 — neonatal tachycardia |
-| Internal search lower bound | `hr_search_min_bpm` | 22 BPM | Guard band: hr_min − 3 |
+| Internal search lower bound | `hr_search_min_bpm` | 37 BPM | Guard band: hr_min − 3 |
 | Internal search upper bound | `hr_search_max_bpm` | 303 BPM | Guard band: hr_max + 3 |
 | SpO2 reported valid lower bound | `spo2_min` | 70 % | SpO2 |
 | SpO2 reported valid upper bound | `spo2_max` | 100 % | SpO2 |
@@ -1146,16 +1228,13 @@ Three distinct hardware states are distinguishable from the raw ADC channel patt
 
 | State | `led1` | `led2` | `aled1` | `aled2` | Physical cause |
 |---|---|---|---|---|---|
-| **CABLE_DISCONNECTED** | ≈ −5000 | ≈ −5000 | ≈ −5000 | ≈ −5000 | Photodiode open-circuit; TIA input floating → input offset current × RF produces small negative output |
-| **NO_TISSUE** | saturated | saturated | low–mid | low–mid | No tissue attenuation; LEDs illuminate photodiode directly. ALED channels depend on ambient light level |
-| **PROBE_ON_PATIENT** | PPG signal | PPG signal | low | low | Normal operation; tissue attenuates LED light; ambient channels remain low |
+| **PROBE_DISCONNECTED** | ≈ −5000 | ≈ −5000 | ≈ −5000 | ≈ −5000 | Photodiode open-circuit; TIA input floating → input offset current × RF produces small negative output |
+| **PROBE_NOT_APPLIED** | saturated | saturated | low–mid | low–mid | No tissue attenuation; LEDs illuminate photodiode directly. ALED channels depend on ambient light level |
+| **PROBE_APPLIED** | PPG signal | PPG signal | low | low | Normal operation; tissue attenuates LED light; ambient channels remain low |
 
-**Detection thresholds (indicative, validated on hardware):**
-- `CABLE_DISCONNECTED`: all four channels satisfy `|value| < 10 000`
-- `NO_TISSUE`: `led1 > SAT_THRESHOLD` or `led2 > SAT_THRESHOLD` (SAT_THRESHOLD ≈ 95% of 2 097 151 ≈ 1 992 294)
-- `PROBE_ON_PATIENT`: neither of the above
+**Detection method:** EMA-based (see §5.6). Not instantaneous thresholds — uses 750-sample warmup and optical transmittance with hysteresis.
 
-> These states are inputs to RSQM DiagCode and gate HGAC operation: HGAC must not act in `CABLE_DISCONNECTED` or `NO_TISSUE` states.
+> These states are computed by RSQM (_update_rsqm) and gate HGAC operation: HGAC must not act in `PROBE_DISCONNECTED` or `PROBE_NOT_APPLIED` states.
 
 ---
 
@@ -1210,6 +1289,13 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.27   | RSQM (Raw Signal Quality Monitor). `ProbeState` enum                        |
+|         | (PROBE_DISCONNECTED / PROBE_NOT_APPLIED / PROBE_APPLIED). `DiagCode`        |
+|         | bitmask constants RSQM_AMB_SAT, RSQM_SIGNAL_WEAK, RSQM_HW_SETTLING.        |
+|         | `AFE4490Data` gains `rsqi`, `diag_code`, `probe_state`. EMA estimators      |
+|         | (α_mean=0.02, α_var=0.004, ready after 750 samples). Probe detection via   |
+|         | `optical_transmittance` with hysteresis (hi=0.20, lo=0.15). RSQM runs       |
+|         | first in `_process_sample()` at 500 Hz. Spec §5.6 added.                   |
 | v0.26   | Decouple STAGE2EN1/STAGE2EN2 from Stage 2 gain. `stg2_gain_code[]` now         |
 |         | contains only D[10:8] gain bits (no enable). `setStage2En1(bool)` and          |
 |         | `setStage2En2(bool)` expose STAGE2EN1 (D14 of TIAGAIN) and STAGE2EN2           |
@@ -1230,6 +1316,10 @@ Key references for each algorithm implemented in this library.
 |         | of range/256 mA) instead of the requested float. `setLEDRange()` re-        |
 |         | quantises both currents to the new grid. `getConfig()` thus returns the      |
 |         | real programmed current. New private helper `_quantize_led_mA()`.           |
+| v0.25   | HR valid lower bound raised: `hr_min_bpm` 30→**40 BPM**.                  |
+|         | `hr_search_min_bpm` 27→37 BPM (guard band: hr_min − 3). Python:           |
+|         | `FW_HR_MIN_BPM` (HR1/HR2/HR3TestCalc) and `HR_MIN_HZ` (HRFFTCalc)         |
+|         | updated accordingly.                                                       |
 | v0.24   | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
 |         | via 13 new setters (setSpO2WarmupS, setSpO2DcIirTauS, setSpO2AcEmaTauS,   |
 |         | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
