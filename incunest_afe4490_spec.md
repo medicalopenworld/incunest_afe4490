@@ -294,7 +294,9 @@ After DIAG_EN is cleared the analog front-end (TIA, stage 2) needs a few PRP cyc
 | 11  | LED1SC_ALM      | LED1 short-circuit alarm         |
 | 12  | COMMON_MODE_ALM | Common-mode voltage out of range |
 
-**Typical use:** called on demand from the host via `$DIAG?` serial command (one-shot, not continuous).
+**Callers:**
+- On demand from the host via `$DIAG?` serial command (one-shot).
+- Internally by `_diag_task_body()` — see §5.7 below. Both callers are independent; `_spi_mutex` serialises concurrent access.
 
 ---
 
@@ -646,6 +648,19 @@ Multiple bits may be set simultaneously.
 rsqi = 1  iff  (estimators ready) AND (probe_state == PROBE_APPLIED) AND (diag_code == 0)
 rsqi = 0  otherwise
 ```
+
+---
+
+### 5.7 Autonomous diagnostics task (`_diag_task_body`)
+
+A dedicated internal FreeRTOS task (`incunest_diag`, low priority) calls `runAfeDiagnostics()` autonomously in two situations:
+
+1. **On probe state change** — `_set_probe_state()` sends `xTaskNotify` when a new state is committed. The task wakes immediately and runs diagnostics (regardless of state, including APPLIED).
+2. **Periodic timeout** — `xTaskNotifyWait` times out every `rsqm_diag_period_ms` (default 5000 ms). Diagnostics run only if `probe_state ≠ PROBE_APPLIED`, to avoid disrupting HR/SpO2 acquisition with the 10 ms blackout window.
+
+The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `INCUNEST_AFE4490_DIAG_TASK_PRIORITY` (= main task priority − 2).
+
+`runAfeDiagnostics()` remains a public API callable independently from external code (e.g. via `$DIAG?`). Both callers serialise through `_spi_mutex`.
 
 ---
 

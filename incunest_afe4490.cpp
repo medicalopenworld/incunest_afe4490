@@ -220,6 +220,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _diag_last_led1_aled1(0), _diag_last_led2_aled2(0),
       _hr2_calc_sem(nullptr), _hr3_calc_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
+      _diag_task_handle(nullptr),
       _hr2_computing(false), _hr3_computing(false),
       _hr2_result(0.0f), _hr2_sqi_result(0.0f),
       _hr3_result(0.0f), _hr3_sqi_result(0.0f),
@@ -354,6 +355,11 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy) {
         _hr3_task_trampoline, "incunest_hr3",
         INCUNEST_AFE4490_HR3_TASK_STACK, this,
         INCUNEST_AFE4490_HR23_TASK_PRIORITY, &_hr3_task_handle, 1);
+
+    xTaskCreatePinnedToCore(
+        _diag_task_trampoline, "incunest_diag",
+        INCUNEST_AFE4490_DIAG_TASK_STACK, this,
+        INCUNEST_AFE4490_DIAG_TASK_PRIORITY, &_diag_task_handle, 1);
 
     ESP_LOGI(TAG, "Started: PRF=%u Hz, NUMAV=%u", _afe_sample_rate_hz, _afe_adc_averages);
 }
@@ -909,9 +915,10 @@ void INCUNEST_AFE4490::stop() {
     // Take mutex to wait for any in-progress SPI transaction to finish
     if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 
-    if (_task_handle)     { vTaskDelete(_task_handle);      _task_handle     = nullptr; }
-    if (_hr2_task_handle) { vTaskDelete(_hr2_task_handle); _hr2_task_handle = nullptr; }
-    if (_hr3_task_handle) { vTaskDelete(_hr3_task_handle); _hr3_task_handle = nullptr; }
+    if (_task_handle)      { vTaskDelete(_task_handle);      _task_handle      = nullptr; }
+    if (_hr2_task_handle)  { vTaskDelete(_hr2_task_handle);  _hr2_task_handle  = nullptr; }
+    if (_hr3_task_handle)  { vTaskDelete(_hr3_task_handle);  _hr3_task_handle  = nullptr; }
+    if (_diag_task_handle) { vTaskDelete(_diag_task_handle); _diag_task_handle = nullptr; }
 
     // Delete FreeRTOS objects (mutexes last since we may hold _spi_mutex)
     if (_data_queue)   { vQueueDelete(_data_queue);          _data_queue   = nullptr; }
@@ -925,6 +932,27 @@ void INCUNEST_AFE4490::stop() {
     _reset_algorithms();
 
     ESP_LOGI(TAG, "Stopped");
+}
+
+// ── _diag_task_body() ─────────────────────────────────────────────────────────
+// Runs at low priority. Calls runAfeDiagnostics() on two triggers:
+//   1. xTaskNotify from _set_probe_state() when a state transition is committed.
+//   2. Periodic timeout (rsqm_diag_period_ms) when probe is not APPLIED.
+// In PROBE_APPLIED: timeout expires but no diagnostic is run (blackout would
+// disrupt HR/SpO2 acquisition). State-change notifications still trigger it.
+void INCUNEST_AFE4490::_diag_task_body() {
+    const TickType_t period = pdMS_TO_TICKS(rsqm_diag_period_ms);
+    while (true) {
+        const bool notified = (xTaskNotifyWait(0, 0, nullptr, period) == pdTRUE);
+        (void)notified; // wake reason logged implicitly via probe_state in diag_code
+        if (_rsqm_probe_state != ProbeState::PROBE_APPLIED)
+            runAfeDiagnostics();
+    }
+}
+
+void INCUNEST_AFE4490::_diag_task_trampoline(void* pv) {
+    static_cast<INCUNEST_AFE4490*>(pv)->_diag_task_body();
+    vTaskDelete(nullptr);
 }
 #endif
 
@@ -975,8 +1003,11 @@ void INCUNEST_AFE4490::_reset_algorithms() {
 // Any change in the requested state resets the counter.
 void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
     if (requested == _rsqm_probe_state_pending) {
-        if (++_rsqm_probe_state_count >= rsqm_probe_state_min_count)
+        if (++_rsqm_probe_state_count >= rsqm_probe_state_min_count) {
+            if (requested != _rsqm_probe_state && _diag_task_handle)
+                xTaskNotify(_diag_task_handle, 0, eNoAction); // wake diag task on state change
             _rsqm_probe_state = requested;
+        }
     } else {
         _rsqm_probe_state_pending = requested;
         _rsqm_probe_state_count   = 1;

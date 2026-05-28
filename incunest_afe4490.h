@@ -48,6 +48,14 @@
 #define INCUNEST_AFE4490_HR23_TASK_PRIORITY  (INCUNEST_AFE4490_TASK_PRIORITY - 1)
 #endif
 
+#ifndef INCUNEST_AFE4490_DIAG_TASK_STACK
+#define INCUNEST_AFE4490_DIAG_TASK_STACK  2048
+#endif
+
+#ifndef INCUNEST_AFE4490_DIAG_TASK_PRIORITY
+#define INCUNEST_AFE4490_DIAG_TASK_PRIORITY  (INCUNEST_AFE4490_TASK_PRIORITY - 2)
+#endif
+
 #ifndef INCUNEST_TIMING_STATS
 #define INCUNEST_TIMING_STATS 0
 #endif
@@ -394,7 +402,8 @@ private:
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
     static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
     static constexpr float    rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
-    static constexpr uint8_t  rsqm_probe_state_min_count = 50; // consecutive samples required to change probe state (100 ms @ 500 Hz)
+    static constexpr uint8_t  rsqm_probe_state_min_count = 50;   // consecutive samples required to change probe state (100 ms @ 500 Hz)
+    static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED
 
     // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
     // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
@@ -444,6 +453,8 @@ private:
     // FreeRTOS task
 #ifndef INCUNEST_OFFLINE
     static void _task_trampoline(void* pv);
+    static void _diag_task_trampoline(void* pv);
+    void        _diag_task_body();
     void _task_body();
 #endif
 
@@ -511,6 +522,7 @@ private:
     SemaphoreHandle_t _hr3_calc_sem;    // given by Task A, taken by Task C
     TaskHandle_t      _hr2_task_handle;
     TaskHandle_t      _hr3_task_handle;
+    TaskHandle_t      _diag_task_handle;
     volatile bool     _hr2_computing;   // true while Task B holds _hr2_seg; prevents Task A from overwriting
     volatile bool     _hr3_computing;   // true while Task C uses _hr3_fft; prevents Task A from overwriting
     float             _hr2_result;      // written by Task B, copied to _current_data under _state_mutex
