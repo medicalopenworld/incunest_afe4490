@@ -373,6 +373,7 @@ private:
     static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |LED_Sub_mean| < this → disconnected candidate
     static constexpr float    rsqm_disconn_sub_std  = 500.0f;   // LED_Sub_std < this → disconnected candidate
     static constexpr int32_t  rsqm_disconn_raw_sat  = 2000000;  // LED_raw < this excludes positive-saturation corner case
+    static constexpr int32_t  rsqm_disconn_raw_mean = 8000;     // LED_raw < this → instant disconnected (noise floor ~500; min APPLIED ≥ 12622 per afe_sweep_test.csv)
     static constexpr float    rsqm_ot_hi_thr        = 0.20f;    // OT > this → enter PROBE_NOT_APPLIED
     static constexpr float    rsqm_ot_lo_thr        = 0.15f;    // OT < this → exit PROBE_NOT_APPLIED (hysteresis)
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated

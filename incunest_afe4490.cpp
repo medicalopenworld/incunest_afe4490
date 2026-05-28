@@ -999,11 +999,24 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         const float st1 = sqrtf(_rsqm_led1_sub.ema_var);
         const float st2 = sqrtf(_rsqm_led2_sub.ema_var);
 
-        // PROBE_DISCONNECTED: sub-signal EMA near zero + low variance, raw not near positive rail
-        const bool disconnected =
+        // PROBE_DISCONNECTED: two criteria combined with OR.
+        //
+        // Fast path (instant): raw LED channels both below noise-floor threshold.
+        // When disconnected the photodiode circuit is open → no photocurrent → LED1/LED2
+        // stay at TIA input-offset noise (~500 counts).  Responds in ONE sample.
+        // rsqm_disconn_raw_mean (8000) is safely above noise (~500) and below the
+        // minimum APPLIED raw LED value seen in hardware (12622 at RF=10K, per afe_sweep_test.csv).
+        const bool instant_disconnected =
+            led1 < rsqm_disconn_raw_mean && led2 < rsqm_disconn_raw_mean;
+        //
+        // Slow path (EMA settled): sub-signal mean and variance both near zero.
+        // Provides a stable DISCONNECTED confirmation once the EMA has converged.
+        const bool stable_disconnected =
             fabsf(m1) < rsqm_disconn_sub_mean && fabsf(m2) < rsqm_disconn_sub_mean &&
             st1 < rsqm_disconn_sub_std && st2 < rsqm_disconn_sub_std &&
             led1 < rsqm_disconn_raw_sat && led2 < rsqm_disconn_raw_sat;
+        //
+        const bool disconnected = instant_disconnected || stable_disconnected;
 
         if (disconnected) {
             _rsqm_probe_state = ProbeState::PROBE_DISCONNECTED;
