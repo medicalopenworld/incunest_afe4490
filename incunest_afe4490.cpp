@@ -1004,12 +1004,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     } else {
         // Optical transmittance — uses instantaneous LED_Sub values (s1/s2).
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
-        // Accounts for ENSEPGAIN mode: when ENSEPGAIN=0, chip uses LED2 TIA for both channels.
-        const AFE4490TIAGain    gain1_enum = _afe_ensepgain ? _afe_tia_gain_led1   : _afe_tia_gain_led2;
-        const AFE4490Stage2Gain rg1_enum   = _afe_ensepgain ? _afe_stage2_gain_led1 : _afe_stage2_gain_led2;
-        const bool              en1        = _afe_ensepgain ? _afe_stage2_en1       : _afe_stage2_en2;
-        const float rf1 = tia_rf_ohm[(int)gain1_enum];
-        const float rg1 = en1 ? stg2_rg_linear[(int)rg1_enum] : 1.0f;
+        const float rf1 = tia_rf_ohm[(int)_afe_tia_gain_led1];
+        const float rg1 = _afe_stage2_en1 ? stg2_rg_linear[(int)_afe_stage2_gain_led1] : 1.0f;
         const float rf2 = tia_rf_ohm[(int)_afe_tia_gain_led2];
         const float rg2 = _afe_stage2_en2 ? stg2_rg_linear[(int)_afe_stage2_gain_led2] : 1.0f;
 
@@ -1037,9 +1033,11 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     if (aled1 >= rsqm_adc_positive_sat || aled2 >= rsqm_adc_positive_sat)
         diag |= RSQM_AMB_SAT;
 
-    // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude is too low
+    // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
+    // Both channels required: SpO2 needs IR and RED simultaneously
     if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
-        sqrtf(_rsqm_led1_sub.ema_var) < rsqm_signal_weak_std)
+        (sqrtf(_rsqm_led1_sub.ema_var) < rsqm_signal_weak_std ||
+         sqrtf(_rsqm_led2_sub.ema_var) < rsqm_signal_weak_std))
         diag |= RSQM_SIGNAL_WEAK;
 
     // RSQM_HW_SETTLING: set externally by HGAC or config change; counts down to 0

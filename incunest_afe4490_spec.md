@@ -588,8 +588,6 @@ Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED 
 
 > Valid for clip-type reusable probes only. Disposable adhesive probes not validated.
 
-**RF / RG selection for OT:** when `ENSEPGAIN=0`, chip uses LED2 TIA settings for both channels → `rf1 = rf2`, `rg1 = rg2`.
-
 **PROBE_APPLIED** — neither of the above.
 
 #### 5.6.3 DiagCode
@@ -597,7 +595,7 @@ Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED 
 | Bit | Constant | Condition |
 |---|---|---|
 | 0x0001 | `RSQM_AMB_SAT` | `aled1 ≥ 2 096 921` OR `aled2 ≥ 2 096 921` |
-| 0x0002 | `RSQM_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND `LED1_Sub_std < 2000` (needs HW calibration) |
+| 0x0002 | `RSQM_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
 | 0x0004 | `RSQM_HW_SETTLING` | Countdown > 0 (set externally by HGAC; not yet active in v0.27) |
 
 Multiple bits may be set simultaneously.
