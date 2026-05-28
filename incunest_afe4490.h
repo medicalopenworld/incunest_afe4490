@@ -376,6 +376,7 @@ private:
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
     static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
     static constexpr float    rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
+    static constexpr uint8_t  rsqm_probe_state_min_count = 50; // consecutive samples required to change probe state (100 ms @ 500 Hz)
 
     // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
     // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
@@ -436,6 +437,7 @@ private:
     // RSQM — runs first in _process_sample(); fills rsqi, diag_code, probe_state
     void _update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                       int32_t led1_aled1, int32_t led2_aled2);
+    void _set_probe_state(ProbeState requested); // debounce gate: commits state only after rsqm_probe_state_min_count consecutive requests
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
     void _update_spo2(int32_t ir_corr, int32_t red_corr);
@@ -635,7 +637,9 @@ private:
     // ── RSQM state ────────────────────────────────────────────────────────────
     RsqmEmaChannel _rsqm_led1_sub;       // EMA estimator for led1_aled1 (IR differential)
     RsqmEmaChannel _rsqm_led2_sub;       // EMA estimator for led2_aled2 (RED differential)
-    ProbeState     _rsqm_probe_state;    // current probe state (output of state machine)
+    ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
+    ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
+    uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
     uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
 
     // ── Output snapshot (written by task, pushed to queue) ──

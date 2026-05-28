@@ -590,6 +590,8 @@ Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED 
 
 **PROBE_APPLIED** — neither of the above.
 
+**State transition debounce (`_set_probe_state`):** any state change requires 50 consecutive samples (~100 ms @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events.
+
 #### 5.6.3 DiagCode
 
 | Bit | Constant | Condition |

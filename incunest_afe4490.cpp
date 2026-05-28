@@ -968,6 +968,21 @@ void INCUNEST_AFE4490::_reset_algorithms() {
 }
 
 // ── RSQM ──────────────────────────────────────────────────────────────────────
+
+// _set_probe_state — debounce gate for probe state transitions.
+// Commits the requested state to _rsqm_probe_state only after
+// rsqm_probe_state_min_count consecutive calls with the same value.
+// Any change in the requested state resets the counter.
+void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
+    if (requested == _rsqm_probe_state_pending) {
+        if (++_rsqm_probe_state_count >= rsqm_probe_state_min_count)
+            _rsqm_probe_state = requested;
+    } else {
+        _rsqm_probe_state_pending = requested;
+        _rsqm_probe_state_count   = 1;
+    }
+}
+
 // Raw Signal Quality Monitor — runs once per sample at 500 Hz.
 // Updates EMA estimators, classifies ProbeState, computes DiagCode and RSQI.
 // Called at the top of _process_sample() before all other algorithms.
@@ -1000,7 +1015,7 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         fabsf(s2) < rsqm_disconn_sub_mean;
 
     if (disconnected) {
-        _rsqm_probe_state = ProbeState::PROBE_DISCONNECTED;
+        _set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
         // Optical transmittance — uses instantaneous LED_Sub values (s1/s2).
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
@@ -1009,21 +1024,28 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         const float rf2 = tia_rf_ohm[(int)_afe_tia_gain_led2];
         const float rg2 = _afe_stage2_en2 ? stg2_rg_linear[(int)_afe_stage2_gain_led2] : 1.0f;
 
-        // Saturated raw → use sentinel (NaN would silently pass the > threshold test false in IEEE 754)
-        const float ot1 = (led1 >= rsqm_adc_positive_sat)
-                            ? rsqm_ot_saturated
-                            : s1 / (_afe_led1_current_mA * rf1 * rg1);
-        const float ot2 = (led2 >= rsqm_adc_positive_sat)
-                            ? rsqm_ot_saturated
-                            : s2 / (_afe_led2_current_mA * rf2 * rg2);
+        // Optical transmittance for each channel (dimensionless):
+        //   ot = LED_Sub / (LED_mA × RF_Ω × RG_linear)
+        // Physically: ratio of transmitted light to the maximum possible signal at current gain.
+        // APPLIED (finger present): ot ≈ 0.05  (tissue absorbs ~95% of light)
+        // NOT_APPLIED (no finger):  ot ≈ 2.8   (full light reaches photodiode, amplifier near saturation)
+        // When LED_raw ≥ rsqm_adc_positive_sat: ADC is clipped → ot set to sentinel 100.0
+        // (NaN avoided: IEEE 754 NaN fails > comparisons silently, sentinel always passes)
+        const float optical_transmittance_led1 = (led1 >= rsqm_adc_positive_sat)
+                                                    ? rsqm_ot_saturated
+                                                    : s1 / (_afe_led1_current_mA * rf1 * rg1);
+        const float optical_transmittance_led2 = (led2 >= rsqm_adc_positive_sat)
+                                                    ? rsqm_ot_saturated
+                                                    : s2 / (_afe_led2_current_mA * rf2 * rg2);
 
-        // Hysteresis: exit NOT_APPLIED only when both channels drop below lo_thr
+        // Hysteresis: exit NOT_APPLIED only when both channels drop below lo_thr.
+        // Uses committed _rsqm_probe_state (not pending) — correct reference for hysteresis.
         const bool prev_not_applied = (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED);
         const float thr = prev_not_applied ? rsqm_ot_lo_thr : rsqm_ot_hi_thr;
         // OR logic: one saturated channel is enough to flag NOT_APPLIED
-        _rsqm_probe_state = ((ot1 > thr) || (ot2 > thr))
-                                ? ProbeState::PROBE_NOT_APPLIED
-                                : ProbeState::PROBE_APPLIED;
+        _set_probe_state(((optical_transmittance_led1 > thr) || (optical_transmittance_led2 > thr))
+                             ? ProbeState::PROBE_NOT_APPLIED
+                             : ProbeState::PROBE_APPLIED);
     }
 
     // ── DiagCode ───────────────────────────────────────────────────────────────
