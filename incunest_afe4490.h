@@ -59,11 +59,29 @@ enum class ProbeState {
     PROBE_APPLIED        // probe on patient, normal measurement
 };
 
-// DiagCode bitmask flags — returned in AFE4490Data::diag_code
+// DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
 // Multiple bits may be set simultaneously.
-constexpr uint32_t RSQM_AMB_SAT     = 0x00000001UL;  // ambient channel (ALED1 or ALED2) near positive rail
-constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00000002UL;  // differential signal amplitude too low (low perfusion)
-constexpr uint32_t RSQM_HW_SETTLING = 0x00000004UL;  // hardware settling after TIA/LED config change
+//
+// Bits 0–12: AFE4490 hardware DIAG register (REG_DIAG 0x30) — set by runAfeDiagnostics()
+constexpr uint32_t AFE_DIAG_PD_ALM          = 0x00000001UL;  // bit  0 — photodiode out of range
+constexpr uint32_t AFE_DIAG_LED_ALM         = 0x00000002UL;  // bit  1 — LED out of range
+constexpr uint32_t AFE_DIAG_OUT             = 0x00000004UL;  // bit  2 — general diagnostic fault
+constexpr uint32_t AFE_DIAG_LED2_ALM        = 0x00000008UL;  // bit  3 — LED2 driver fault
+constexpr uint32_t AFE_DIAG_LED3_ALM        = 0x00000010UL;  // bit  4 — LED3 driver fault (if used)
+constexpr uint32_t AFE_DIAG_LED1_ALM        = 0x00000020UL;  // bit  5 — LED1 driver fault
+constexpr uint32_t AFE_DIAG_PDOC_ALM        = 0x00000040UL;  // bit  6 — photodiode open-circuit
+constexpr uint32_t AFE_DIAG_PDSC_ALM        = 0x00000080UL;  // bit  7 — photodiode short-circuit
+constexpr uint32_t AFE_DIAG_LED2OC_ALM      = 0x00000100UL;  // bit  8 — LED2 open-circuit
+constexpr uint32_t AFE_DIAG_LED2SC_ALM      = 0x00000200UL;  // bit  9 — LED2 short-circuit
+constexpr uint32_t AFE_DIAG_LED1OC_ALM      = 0x00000400UL;  // bit 10 — LED1 open-circuit
+constexpr uint32_t AFE_DIAG_LED1SC_ALM      = 0x00000800UL;  // bit 11 — LED1 short-circuit
+constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — common-mode voltage out of range
+constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
+//
+// Bits 13+: RSQM software checks — set continuously by _update_rsqm() at 500 Hz
+constexpr uint32_t RSQM_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
+constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
+constexpr uint32_t RSQM_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 
 // ── Public data struct ────────────────────────────────────────────────────────
 struct AFE4490Data {
@@ -346,7 +364,7 @@ public:
     // absorb gracefully. Set to 0 to observe the raw diagnostic artefacts.
     // Default: 10 ms (~5 samples at 500 Hz), covers worst-case TIA settling (RF_1M + CF_155P: 5τ ≈ 775 µs).
 #ifndef INCUNEST_OFFLINE
-    uint32_t runDiagnostics(uint32_t diag_holdoff_ms = 10);
+    uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = 10);
 #endif
 
     // ISR entry point (must be public for static trampoline)
@@ -478,7 +496,8 @@ private:
     QueueHandle_t     _data_queue;
     TaskHandle_t      _task_handle;
     bool              _initialized;
-    volatile bool     _diag_active;          // true while runDiagnostics() holds DIAG_EN; _task_body() skips reads
+    uint32_t          _diag_code         { 0 };  // combined diag state: bits 0-12 = AFE DIAG reg, bits 13+ = RSQM flags
+    volatile bool     _diag_active;          // true while runAfeDiagnostics() holds DIAG_EN; _task_body() skips reads
     volatile uint32_t _diag_holdoff_samples; // countdown after diagnostics end; _task_body() feeds frozen raw input
     int32_t _diag_last_led1, _diag_last_led2;          // last valid raw ADC values, saved on every normal cycle
     int32_t _diag_last_aled1, _diag_last_aled2;

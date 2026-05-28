@@ -1068,10 +1068,14 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         --_rsqm_settling_countdown;
     }
 
+    // ── Merge RSQM flags into _diag_code (bits 13+), preserving AFE DIAG bits (0-12) ──
+    // diag holds only the RSQM bits computed above; shift them to their assigned positions.
+    _diag_code = (_diag_code & AFE_DIAG_MASK) | diag;
+
     // ── RSQI ───────────────────────────────────────────────────────────────────
-    // 1 only when: probe applied, estimators ready, and no active diagnostic flags
-    _current_data.rsqi        = (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED && diag == 0) ? 1 : 0;
-    _current_data.diag_code   = diag;
+    // 1 only when: probe applied, estimators ready, and no active diagnostic flags (any bit)
+    _current_data.rsqi        = (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED && _diag_code == 0) ? 1 : 0;
+    _current_data.diag_code   = _diag_code;
     _current_data.probe_state = _rsqm_probe_state;
 }
 
@@ -1108,7 +1112,7 @@ uint32_t INCUNEST_AFE4490::_read_reg(uint8_t addr) {
     return val;
 }
 
-uint32_t INCUNEST_AFE4490::runDiagnostics(uint32_t diag_holdoff_ms) {
+uint32_t INCUNEST_AFE4490::runAfeDiagnostics(uint32_t diag_holdoff_ms) {
     if (!_initialized || !_spi_mutex) return 0;
     // Signal _task_body to skip reads during the diagnostic window.
     // Mutex is held only for brief SPI transactions, not for the full 10 ms sleep.
@@ -1126,6 +1130,8 @@ uint32_t INCUNEST_AFE4490::runDiagnostics(uint32_t diag_holdoff_ms) {
     // with a real SPI read between the two assignments.
     _diag_holdoff_samples = (uint32_t)((uint64_t)diag_holdoff_ms * _afe_sample_rate_hz / 1000);
     _diag_active = false;                       // resume; holdoff takes over if diag_holdoff_ms > 0
+    // Merge AFE DIAG bits (0-12) into _diag_code, preserving RSQM bits (13+)
+    _diag_code = (_diag_code & ~AFE_DIAG_MASK) | (result & AFE_DIAG_MASK);
     return result;
 }
 #endif

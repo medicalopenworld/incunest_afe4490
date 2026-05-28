@@ -256,7 +256,7 @@ The internal queue holds up to 10 samples (`INCUNEST_AFE4490_QUEUE_SIZE`). When 
 
 ### 2.6b Hardware diagnostics
 ```cpp
-uint32_t runDiagnostics(uint32_t diag_holdoff_ms = 100);
+uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = 100);
 ```
 Runs the AFE4490 hardware self-test sequence (datasheet section 8.4.3.3, Table 3).
 
@@ -368,11 +368,29 @@ enum class ProbeState {
     PROBE_APPLIED        // probe on patient, normal measurement
 };
 
-// DiagCode bitmask flags (returned in AFE4490Data::diag_code — uint32_t, 32 bits available)
-constexpr uint32_t RSQM_AMB_SAT     = 0x00000001UL;  // ambient channel (ALED1 or ALED2) near positive rail
-constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00000002UL;  // differential signal amplitude too low (low perfusion)
-constexpr uint32_t RSQM_HW_SETTLING = 0x00000004UL;  // hardware settling after TIA/LED config change
-// bits 3–31 reserved for future use (e.g. runDiagnostics() flags, HGAC conditions, ...)
+// DiagCode bitmask flags (returned in AFE4490Data::diag_code — uint32_t, 32 bits)
+//
+// Bits 0–12: AFE4490 hardware DIAG register — set by runAfeDiagnostics()
+constexpr uint32_t AFE_DIAG_PD_ALM          = 0x00000001UL;  // bit  0 — photodiode out of range
+constexpr uint32_t AFE_DIAG_LED_ALM         = 0x00000002UL;  // bit  1 — LED out of range
+constexpr uint32_t AFE_DIAG_OUT             = 0x00000004UL;  // bit  2 — general diagnostic fault
+constexpr uint32_t AFE_DIAG_LED2_ALM        = 0x00000008UL;  // bit  3 — LED2 driver fault
+constexpr uint32_t AFE_DIAG_LED3_ALM        = 0x00000010UL;  // bit  4 — LED3 driver fault
+constexpr uint32_t AFE_DIAG_LED1_ALM        = 0x00000020UL;  // bit  5 — LED1 driver fault
+constexpr uint32_t AFE_DIAG_PDOC_ALM        = 0x00000040UL;  // bit  6 — photodiode open-circuit
+constexpr uint32_t AFE_DIAG_PDSC_ALM        = 0x00000080UL;  // bit  7 — photodiode short-circuit
+constexpr uint32_t AFE_DIAG_LED2OC_ALM      = 0x00000100UL;  // bit  8 — LED2 open-circuit
+constexpr uint32_t AFE_DIAG_LED2SC_ALM      = 0x00000200UL;  // bit  9 — LED2 short-circuit
+constexpr uint32_t AFE_DIAG_LED1OC_ALM      = 0x00000400UL;  // bit 10 — LED1 open-circuit
+constexpr uint32_t AFE_DIAG_LED1SC_ALM      = 0x00000800UL;  // bit 11 — LED1 short-circuit
+constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — common-mode voltage out of range
+constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
+//
+// Bits 13+: RSQM software checks — updated continuously at 500 Hz by _update_rsqm()
+constexpr uint32_t RSQM_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
+constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
+constexpr uint32_t RSQM_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
+// bits 16–31 reserved
 ```
 
 ---
@@ -594,11 +612,31 @@ Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED 
 
 #### 5.6.3 DiagCode
 
+**Bits 0–12 — AFE hardware (set by `runAfeDiagnostics()`, persist until next call):**
+
 | Bit | Constant | Condition |
 |---|---|---|
-| 0x0001 | `RSQM_AMB_SAT` | `aled1 ≥ 2 096 921` OR `aled2 ≥ 2 096 921` |
-| 0x0002 | `RSQM_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
-| 0x0004 | `RSQM_HW_SETTLING` | Countdown > 0 (set externally by HGAC; not yet active in v0.27) |
+| 0x0001 | `AFE_DIAG_PD_ALM` | Photodiode out of range |
+| 0x0002 | `AFE_DIAG_LED_ALM` | LED out of range |
+| 0x0004 | `AFE_DIAG_OUT` | General diagnostic fault |
+| 0x0008 | `AFE_DIAG_LED2_ALM` | LED2 driver fault |
+| 0x0010 | `AFE_DIAG_LED3_ALM` | LED3 driver fault |
+| 0x0020 | `AFE_DIAG_LED1_ALM` | LED1 driver fault |
+| 0x0040 | `AFE_DIAG_PDOC_ALM` | Photodiode open-circuit |
+| 0x0080 | `AFE_DIAG_PDSC_ALM` | Photodiode short-circuit |
+| 0x0100 | `AFE_DIAG_LED2OC_ALM` | LED2 open-circuit |
+| 0x0200 | `AFE_DIAG_LED2SC_ALM` | LED2 short-circuit |
+| 0x0400 | `AFE_DIAG_LED1OC_ALM` | LED1 open-circuit |
+| 0x0800 | `AFE_DIAG_LED1SC_ALM` | LED1 short-circuit |
+| 0x1000 | `AFE_DIAG_COMMON_MODE_ALM` | Common-mode voltage out of range |
+
+**Bits 13+ — RSQM software (updated continuously at 500 Hz by `_update_rsqm()`):**
+
+| Bit | Constant | Condition |
+|---|---|---|
+| 0x2000 | `RSQM_AMB_SAT` | `aled1 ≥ 2 096 921` OR `aled2 ≥ 2 096 921` |
+| 0x4000 | `RSQM_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
+| 0x8000 | `RSQM_HW_SETTLING` | Countdown > 0 (set externally by HGAC; not yet active in v0.27) |
 
 Multiple bits may be set simultaneously.
 
@@ -1328,13 +1366,13 @@ Key references for each algorithm implemented in this library.
 |         | setHR1MaCutoffHz, setHR1SqiCvMax, setHR2MinCorr, setHR2UpdateInterval,    |
 |         | setHR3UpdateInterval, setHRValidRange). hr_search_{min,max}_bpm now        |
 |         | derived from hr_{min,max}_bpm ± 3 BPM guard band.                         |
-| v0.23   | `runDiagnostics(diag_holdoff_ms = 10)`: post-diagnostic holdoff window.     |
+| v0.23   | `runAfeDiagnostics(diag_holdoff_ms = 10)`: post-diagnostic holdoff window.     |
 |         | After DIAG_EN is cleared, `_task_body()` feeds frozen last-valid raw ADC   |
 |         | values into `_process_sample()` for `diag_holdoff_ms` ms, replacing analog |
 |         | re-settling artefacts with neutral constant input that filters absorb       |
 |         | gracefully. Default 10 ms covers worst-case TIA settling (RF_1M+CF_155P:   |
 |         | 5τ ≈ 775 µs). Set to 0 to observe raw artefacts. Spec §2.5b updated.       |
-| v0.22   | `runDiagnostics()` redesigned: `_diag_active` flag replaces long mutex hold. |
+| v0.22   | `runAfeDiagnostics()` redesigned: `_diag_active` flag replaces long mutex hold. |
 |         | `_spi_mutex` held only for brief SPI transactions, eliminating priority       |
 |         | inversion. During the ~10 ms diagnostic window, `_task_body()` repeats the   |
 |         | last valid sample into the queue (under `_state_mutex`) on each DRDY instead  |
