@@ -990,68 +990,44 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     const bool ready = (_rsqm_led1_sub.count >= rsqm_ready_count);
 
     // ── Probe state detection ──────────────────────────────────────────────────
-    if (!ready) {
-        // Hold DISCONNECTED during warmup — safe default; algorithms inhibited upstream
+    // PROBE_DISCONNECTED: instantaneous criterion — all four raw ADC channels negative AND
+    // |LED_Sub| near zero on both channels.  When cable is disconnected, TIA input is floating;
+    // input-offset current drives LED1≈ALED1≈LED2≈ALED2 to the same large negative value, so
+    // LED_Sub = LED − ALED ≈ 0.  Responds in one sample; no EMA warmup required.
+    const bool disconnected =
+        led1 < 0 && aled1 < 0 && led2 < 0 && aled2 < 0 &&
+        fabsf(s1) < rsqm_disconn_sub_mean &&
+        fabsf(s2) < rsqm_disconn_sub_mean;
+
+    if (disconnected) {
         _rsqm_probe_state = ProbeState::PROBE_DISCONNECTED;
     } else {
-        const float m1  = _rsqm_led1_sub.ema_mean;
-        const float m2  = _rsqm_led2_sub.ema_mean;
-        const float st1 = sqrtf(_rsqm_led1_sub.ema_var);
-        const float st2 = sqrtf(_rsqm_led2_sub.ema_var);
+        // Optical transmittance — uses instantaneous LED_Sub values (s1/s2).
+        // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
+        // Accounts for ENSEPGAIN mode: when ENSEPGAIN=0, chip uses LED2 TIA for both channels.
+        const AFE4490TIAGain    gain1_enum = _afe_ensepgain ? _afe_tia_gain_led1   : _afe_tia_gain_led2;
+        const AFE4490Stage2Gain rg1_enum   = _afe_ensepgain ? _afe_stage2_gain_led1 : _afe_stage2_gain_led2;
+        const bool              en1        = _afe_ensepgain ? _afe_stage2_en1       : _afe_stage2_en2;
+        const float rf1 = tia_rf_ohm[(int)gain1_enum];
+        const float rg1 = en1 ? stg2_rg_linear[(int)rg1_enum] : 1.0f;
+        const float rf2 = tia_rf_ohm[(int)_afe_tia_gain_led2];
+        const float rg2 = _afe_stage2_en2 ? stg2_rg_linear[(int)_afe_stage2_gain_led2] : 1.0f;
 
-        // PROBE_DISCONNECTED: two criteria combined with OR.
-        //
-        // Fast path (instant): raw LED channels both below noise-floor threshold.
-        // When disconnected the photodiode circuit is open → no photocurrent → LED1/LED2
-        // stay at TIA input-offset noise (~500 counts).  Responds in ONE sample.
-        // rsqm_disconn_raw_mean (8000) is safely above noise (~500) and below the
-        // minimum APPLIED raw LED value seen in hardware (12622 at RF=10K, per afe_sweep_test.csv).
-        const bool instant_disconnected =
-            led1 < rsqm_disconn_raw_mean && led2 < rsqm_disconn_raw_mean;
-        //
-        // Slow path (EMA settled): sub-signal mean and variance both near zero.
-        // Provides a stable DISCONNECTED confirmation once the EMA has converged.
-        const bool stable_disconnected =
-            fabsf(m1) < rsqm_disconn_sub_mean && fabsf(m2) < rsqm_disconn_sub_mean &&
-            st1 < rsqm_disconn_sub_std && st2 < rsqm_disconn_sub_std &&
-            led1 < rsqm_disconn_raw_sat && led2 < rsqm_disconn_raw_sat;
-        //
-        const bool disconnected = instant_disconnected || stable_disconnected;
+        // Saturated raw → use sentinel (NaN would silently pass the > threshold test false in IEEE 754)
+        const float ot1 = (led1 >= rsqm_adc_positive_sat)
+                            ? rsqm_ot_saturated
+                            : s1 / (_afe_led1_current_mA * rf1 * rg1);
+        const float ot2 = (led2 >= rsqm_adc_positive_sat)
+                            ? rsqm_ot_saturated
+                            : s2 / (_afe_led2_current_mA * rf2 * rg2);
 
-        if (disconnected) {
-            _rsqm_probe_state = ProbeState::PROBE_DISCONNECTED;
-        } else {
-            // Optical transmittance — uses instantaneous LED_Sub values (s1/s2), NOT the EMA.
-            // Rationale: during fast transitions (cable connect/disconnect) the EMA (τ≈100ms)
-            // takes ~300 ms to settle and produces OT values in the APPLIED zone transiently,
-            // causing false PROBE_APPLIED states. The instantaneous values respond in one sample.
-            // False transitions from PPG noise are negligible: APPLIED OT ≈ 0.05 vs
-            // NOT_APPLIED OT ≈ 2.8 (factor ×54); 2% PPG modulation → ±0.001 OT variation.
-            // Accounts for ENSEPGAIN mode: when ENSEPGAIN=0, chip uses LED2 TIA for both channels.
-            const AFE4490TIAGain    gain1_enum = _afe_ensepgain ? _afe_tia_gain_led1   : _afe_tia_gain_led2;
-            const AFE4490Stage2Gain rg1_enum   = _afe_ensepgain ? _afe_stage2_gain_led1 : _afe_stage2_gain_led2;
-            const bool              en1        = _afe_ensepgain ? _afe_stage2_en1       : _afe_stage2_en2;
-            const float rf1 = tia_rf_ohm[(int)gain1_enum];
-            const float rg1 = en1 ? stg2_rg_linear[(int)rg1_enum] : 1.0f;
-            const float rf2 = tia_rf_ohm[(int)_afe_tia_gain_led2];
-            const float rg2 = _afe_stage2_en2 ? stg2_rg_linear[(int)_afe_stage2_gain_led2] : 1.0f;
-
-            // Saturated raw → use sentinel (NaN would silently pass the > threshold test false in IEEE 754)
-            const float ot1 = (led1 >= rsqm_adc_positive_sat)
-                                ? rsqm_ot_saturated
-                                : s1 / (_afe_led1_current_mA * rf1 * rg1);
-            const float ot2 = (led2 >= rsqm_adc_positive_sat)
-                                ? rsqm_ot_saturated
-                                : s2 / (_afe_led2_current_mA * rf2 * rg2);
-
-            // Hysteresis: exit NOT_APPLIED only when both channels drop below lo_thr
-            const bool prev_not_applied = (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED);
-            const float thr = prev_not_applied ? rsqm_ot_lo_thr : rsqm_ot_hi_thr;
-            // OR logic: one saturated channel is enough to flag NOT_APPLIED
-            _rsqm_probe_state = ((ot1 > thr) || (ot2 > thr))
-                                    ? ProbeState::PROBE_NOT_APPLIED
-                                    : ProbeState::PROBE_APPLIED;
-        }
+        // Hysteresis: exit NOT_APPLIED only when both channels drop below lo_thr
+        const bool prev_not_applied = (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED);
+        const float thr = prev_not_applied ? rsqm_ot_lo_thr : rsqm_ot_hi_thr;
+        // OR logic: one saturated channel is enough to flag NOT_APPLIED
+        _rsqm_probe_state = ((ot1 > thr) || (ot2 > thr))
+                                ? ProbeState::PROBE_NOT_APPLIED
+                                : ProbeState::PROBE_APPLIED;
     }
 
     // ── DiagCode ───────────────────────────────────────────────────────────────

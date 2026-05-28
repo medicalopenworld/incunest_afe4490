@@ -565,23 +565,24 @@ Estimators are considered **ready** after 750 samples (3 × τ_var = 1500 ms). D
 
 **Priority order:** PROBE_DISCONNECTED > PROBE_NOT_APPLIED > PROBE_APPLIED.
 
-**PROBE_DISCONNECTED** — detected when ALL of:
-- `|LED1_Sub_mean| < 5000` AND `|LED2_Sub_mean| < 5000`
-- `LED1_Sub_std < 500` AND `LED2_Sub_std < 500`
-- `LED1_raw < 2 000 000` AND `LED2_raw < 2 000 000` *(excludes positive-saturation corner case)*
+**PROBE_DISCONNECTED** — instantaneous criterion, ALL of:
+- `LED1_raw < 0` AND `ALED1_raw < 0` AND `LED2_raw < 0` AND `ALED2_raw < 0`
+- `|LED1_Sub| < 5000` AND `|LED2_Sub| < 5000`
 
-Physical cause: open-circuit photodiode → TIA input floating → input-offset current × RF produces small negative output.
+Physical cause: when cable is disconnected, TIA input is floating; input-offset current drives all four channels (LED1, ALED1, LED2, ALED2) to the same large negative value, so `LED_Sub = LED − ALED ≈ 0`. No EMA warmup required; responds in one sample.
+
+Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_Sub_mean ≈ −592 (range −3117..+65).
 
 **PROBE_NOT_APPLIED** — detected via *optical transmittance* when not DISCONNECTED:
 
 ```
-optical_transmittance = LED_Sub_ema_mean / (LED_mA × RF_Ω × RG_linear)
+optical_transmittance = LED_Sub / (LED_mA × RF_Ω × RG_linear)
 ```
 
+- **OT computed from instantaneous `LED_Sub` values** (not EMA). Responds in one sample; margin of ×54 makes PPG noise (2% modulation → ±0.001 OT) negligible.
 - When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
 - Entry threshold: `ot1 > 0.20` OR `ot2 > 0.20`   *(OR logic: one channel is enough)*
 - Exit threshold:  `ot1 ≤ 0.15` AND `ot2 ≤ 0.15` *(both must drop — hysteresis prevents oscillation)*
-- **OT computed from instantaneous `LED_Sub` values** (not EMA). The EMA (τ≈100ms) produces unreliable OT during fast transitions (cable connect/disconnect), transiently landing in the APPLIED zone. Instantaneous values respond in one sample. False transitions from PPG noise are negligible: APPLIED OT ≈ 0.05 vs NOT_APPLIED OT ≈ 2.8 (factor ×54); 2% PPG modulation → ±0.001 OT variation.
 
 Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.7–2.96 (factor ×54).
 
