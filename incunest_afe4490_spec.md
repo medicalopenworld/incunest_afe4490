@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.27
+# incunest_afe4490 — Specification v0.31
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -533,42 +533,31 @@ Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_ale
 
 **Stack note:** `_hr3_fft[1024]` (4096 bytes complex buffer) is stored as a class member (heap). `INCUNEST_AFE4490_TASK_STACK` default increased to 8192 to accommodate `cosf`/`sinf` stack usage during butterfly stages.
 
-`hr3_sqi` is a continuous [0–1] quality metric combining two complementary measures:
+**True-peak validation** — `peak_bin` must be the strict maximum in a window of ±`hr3_peak_valid_w` bins (`hr3_peak_valid_w = 5`, i.e. ±0.49 Hz). Bins outside `[1, nyquist)` are skipped; bins outside the search range are **included** intentionally. If any bin in the window has HPS ≥ `peak_hps`, the candidate is rejected as a boundary maximum caused by an out-of-range energy hump (e.g. low-frequency movement artifact leaking into the search range) — HR and SQI are both forced to 0 and the function returns early.
 
-**Global SQI** — fraction of total HPS energy concentrated at the interpolated peak:
-
-```
-HPS_interp  = parabolic interpolation of HPS at (peak_bin-1, peak_bin, peak_bin+1)
-fraction    = HPS_interp / Σ HPS[k]   (k across search range, ~38 bins)
-baseline    = 1 / N_bins               (flat-HPS reference)
-SQI_global  = clamp((fraction − baseline) / (1 − baseline), 0, 1)
-```
-
-`baseline` is the fraction a single bin would hold if HPS were uniformly distributed. Using the HPS domain avoids harmonic inflation of the denominator: since HPS = P[k]·P[2k]·P[3k], only the true fundamental accumulates power from all three harmonics simultaneously.
-
-**Local SQI** — peak prominence above the immediate spectral neighborhood:
+`hr3_sqi` is a continuous [0–1] metric based on the **two-bin HPS fraction** in a local window. This design is bin-position-independent: a signal at a non-integer bin spreads HPS energy across two adjacent bins (b1 = `peak_bin`, b2 = `b_other`), and the ratio of those two bins to their local context is the same regardless of fractional offset.
 
 ```
-local_floor = mean(HPS[k] for k in [peak_bin−W, peak_bin+W], k ≠ peak_bin)
-              W = hr3_sqi_local_w = 5 bins (±0.49 Hz)
-ratio       = HPS_interp / local_floor
-SQI_local   = clamp((ratio − 1) / (hr3_sqi_local_ratio − 1), 0, 1)
-              hr3_sqi_local_ratio = 10.0  (ratio that maps to SQI_local = 1)
+b_other   = peak_bin + sign(delta)          clipped to [1, nyquist/3]
+hps_num   = hps_at(peak_bin) + hps_at(b_other)
+b_lo      = min(peak_bin, b_other) − hr3_sqi_local_w
+b_hi      = max(peak_bin, b_other) + hr3_sqi_local_w
+hps_win   = Σ hps_at(k) for k in [b_lo, b_hi] ∩ [1, nyquist/3]
+n_win     = number of bins summed
+fraction  = hps_num / hps_win
+baseline  = 2 / n_win               (uniform-noise reference: 2 signal bins out of n_win)
+SQI       = clamp((fraction − baseline) / (1 − baseline), 0, 1)
 ```
 
-Detects broad movement-artifact humps that appear globally dominant but lack the sharp spectral peak of a true physiological HR signal. A physiological HR peak after Hann windowing is ~2–4 bins wide; movement artifacts typically produce humps of 8–15 bins.
+Parameters: `hr3_sqi_local_w = 5` bins (window extends ±5 bins beyond the two peak bins, ~±0.49 Hz). If `hps_win = 0` or `n_win ≤ 2`, SQI = 0 (conservative).
 
-**Combined SQI** — geometric mean:
+**Bin-independence:** P[k] and HPS metrics based on a single bin suffer from a half-bin misalignment effect (energy splits across two bins → denominator changes but numerator is halved). By summing two adjacent bins in both numerator and denominator, the effect cancels and SQI is approximately constant regardless of bin alignment.
 
-```
-SQI = √(SQI_global × SQI_local)
-```
+**Why HPS and not P[k]:** HPS suppresses harmonics of the fundamental's subharmonics (movement artifacts at 0.5×, 0.33× the PPG frequency). A true PPG signal concentrates HPS at the fundamental; a noisy signal spreads it. The cubic amplification of HPS is controlled by the local-window denominator (not a peak-vs-mean ratio), so it does not saturate to 1.
 
-Both metrics must be high for a high combined score. A sharp but globally weak peak scores low on SQI_global; a globally dominant but spectrally broad hump scores low on SQI_local.
+**Excluded harmonics:** the denominator sums only a local window around the two peak bins, not the full search range. High-HR signals have their 2nd and 3rd harmonics inside the search range but far from the peak window; these do not inflate the denominator, keeping SQI bin-rate-independent.
 
-**Why parabolic interpolation on HPS (not on P[k]):** when the true fundamental falls between FFT bins (e.g. 85 BPM = bin 14.5), the Hann window splits energy between adjacent bins. Because HPS is a *product* of three power spectra, the split is cubic — a 50 % energy split at each harmonic yields only ~12 % of the ideal single-bin HPS, collapsing SQI to ~0.5 even for a clean signal. Parabolic interpolation on HPS recovers the true peak height at the fractional bin position.
-
-A clean PPG signal → SQI approaches 1. A diffuse or noisy spectrum, or a movement artifact → SQI ≈ 0. If the buffer is not yet full, the HPS peak is outside [40, 260] BPM, or the HPS sum is zero, SQI = 0.
+A clean PPG signal → SQI approaches 1. A weak or noisy signal → intermediate SQI. A movement artifact or absent signal → true-peak validation fails → SQI = 0.
 
 ### 5.5 HR algorithms roadmap
 
@@ -1366,9 +1355,30 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.31   | HR3 SQI: redesigned as two-bin HPS fraction in a local window. Replaces    |
+|         | P[k] local prominence (v0.30), which was limited to SQI ≤ 0.19 due to     |
+|         | the Hann window spreading FFT energy across 3 bins (P[k]/P[k±1] ≈ 4,      |
+|         | not the assumed 10³). New metric: numerator = hps(peak_bin)+hps(b_other)  |
+|         | where b_other is the adjacent bin in the direction of fractional delta;     |
+|         | denominator = Σhps over ±hr3_sqi_local_w bins around both peak bins.       |
+|         | Bin-position-independent: off-bin energy split cancels in the ratio.        |
+|         | Removed `hr3_sqi_local_ratio`. Spec §5.4 updated. Header bumped to v0.31. |
+| v0.30   | HR3 SQI: switched from HPS to P[k] for local prominence computation.       |
+|         | HPS product (cubic amplification) saturated SQI to 1 for any real signal.  |
+|         | P[k] has linear dynamic range; `hr3_sqi_local_ratio` raised 10→100.        |
+|         | `p_interp` reuses yp/y0/yn already computed for frequency interpolation.   |
+|         | Spec §5.4 updated. `incunest_afe4490_spec.md` header bumped to v0.30.      |
+| v0.29   | HR3 true-peak validation widened: `hr3_peak_valid_w=5` — peak_bin must be  |
+|         | strict maximum in ±5 bins (including outside search range). Replaces ±1     |
+|         | neighbor check. Detects slope maxima and boundary humps more robustly.      |
+|         | HR3 SQI simplified: global SQI and geometric mean removed; only local       |
+|         | prominence (±hr3_sqi_local_w) remains. Eliminates false-high SQI when       |
+|         | sqi_local stayed near 1.0 while the signal was absent. Spec §5.4.          |
 | v0.28   | HR3 SQI redesigned: combined global fraction + local prominence (geometric  |
 |         | mean). `hr3_sqi_local_w=5` (±0.49 Hz window), `hr3_sqi_local_ratio=10.0`.  |
 |         | Detects movement-artifact humps that fool the global metric. Spec §5.4.    |
+|         | True-peak validation: reject boundary maxima by checking HPS neighbors      |
+|         | outside search range — fixes false HR/SQI from low-freq movement artifacts. |
 | v0.27   | RSQM (Raw Signal Quality Monitor). `ProbeState` enum                        |
 |         | (PROBE_DISCONNECTED / PROBE_NOT_APPLIED / PROBE_APPLIED). `DiagCode`        |
 |         | bitmask constants RSQM_AMB_SAT, RSQM_SIGNAL_WEAK, RSQM_HW_SETTLING.        |

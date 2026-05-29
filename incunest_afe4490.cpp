@@ -58,8 +58,8 @@ namespace {
 
     // ── HR3 ───────────────────────────────────────────────────────────────────
     constexpr int      hr3_decim_factor    = 10;       // 500 Hz → 50 Hz effective sample rate
-    constexpr int      hr3_sqi_local_w     = 5;        // local prominence window half-width [bins] (~±0.49 Hz)
-    constexpr float    hr3_sqi_local_ratio = 10.0f;    // peak/floor ratio mapping to SQI_local = 1
+    constexpr int      hr3_sqi_local_w     = 5;        // SQI window half-width [bins] beyond each of the two peak bins (~±0.49 Hz)
+    constexpr int      hr3_peak_valid_w    = 5;        // true-peak validation half-width [bins]: peak_bin must be max in ±W
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
@@ -1934,21 +1934,31 @@ void INCUNEST_AFE4490::_compute_hr3() {
     // _hr3_fft is stored interleaved: [re0, im0, re1, im1, ...], so bin k occupies
     // indices 2k (real) and 2k+1 (imaginary). P[k] = re[k]^2 + im[k]^2 is the power
     // of a single spectral bin — not two bins.
-    int   peak_bin  = -1;
-    float peak_hps  = 0.0f;
-    float hps_sum   = 0.0f;  // sum of HPS values across search range (used for SQI)
-    for (int k = search_min; k <= search_max; k++) {
+    auto hps_at = [&](int k) -> float {
         float p1 = _hr3_fft[2*k]   * _hr3_fft[2*k]   + _hr3_fft[2*k+1]   * _hr3_fft[2*k+1];  // P[k]  = |FFT[k]|²
         float p2 = _hr3_fft[4*k]   * _hr3_fft[4*k]   + _hr3_fft[4*k+1]   * _hr3_fft[4*k+1];  // P[2k] = |FFT[2k]|²
         float p3 = _hr3_fft[6*k]   * _hr3_fft[6*k]   + _hr3_fft[6*k+1]   * _hr3_fft[6*k+1];  // P[3k] = |FFT[3k]|²
-        float hps = p1 * p2 * p3;
-        hps_sum += hps;
+        return p1 * p2 * p3;
+    };
+
+    int   peak_bin  = -1;
+    float peak_hps  = 0.0f;
+    for (int k = search_min; k <= search_max; k++) {
+        float hps = hps_at(k);
         if (hps > peak_hps) { peak_hps = hps; peak_bin = k; }
     }
 
-    if (peak_bin < 1 || peak_bin >= nyquist - 1 || peak_hps <= 0.0f) {
-        _hr3_sqi_result = 0.0f;
-        return;
+    // ── True-peak validation: peak_bin must be the maximum in ±hr3_peak_valid_w ──
+    // Checks neighbors outside the search range too: a boundary maximum caused by
+    // a low-frequency hump (movement artifact, no finger) will fail this test
+    // because a bin just outside the search range will be >= peak_hps.
+    {
+        bool valid = true;
+        for (int j = peak_bin - hr3_peak_valid_w; j <= peak_bin + hr3_peak_valid_w && valid; j++) {
+            if (j == peak_bin || j < 1 || j >= nyquist) continue;
+            if (hps_at(j) >= peak_hps) valid = false;
+        }
+        if (!valid) { _hr3_sqi_result = 0.0f; return; }
     }
 
     // ── Parabolic interpolation on original spectrum around HPS peak ──
@@ -1964,60 +1974,47 @@ void INCUNEST_AFE4490::_compute_hr3() {
     float hr3 = 60.0f * peak_freq;
     if (hr3 >= _hr_min_bpm && hr3 <= _hr_max_bpm) {
         _hr3_result = hr3;
-        // SQI: HPS peak prominence — fraction of total HPS energy at the interpolated peak.
-        //
-        // Problem with integer-bin HPS: when the true fundamental falls between bins k and k+1
-        // (e.g. 85 BPM = bin 14.5), the Hann window splits energy across both bins. Since
-        // HPS = P[k]*P[2k]*P[3k] is a *product*, the loss is cubic — a 50% split at each
-        // harmonic yields only ~12% of the ideal HPS peak, making the peak appear non-dominant
-        // and collapsing SQI to ~0.5 even for a clean signal.
-        //
-        // Fix: parabolic interpolation on the HPS values themselves, consistent with how delta
-        // is already used to interpolate the frequency. This recovers the true HPS peak height
-        // at the fractional bin position.
-        auto hps_at = [&](int k) -> float {
-            float p1 = _hr3_fft[2*k]   * _hr3_fft[2*k]   + _hr3_fft[2*k+1]   * _hr3_fft[2*k+1];
-            float p2 = _hr3_fft[4*k]   * _hr3_fft[4*k]   + _hr3_fft[4*k+1]   * _hr3_fft[4*k+1];
-            float p3 = _hr3_fft[6*k]   * _hr3_fft[6*k]   + _hr3_fft[6*k+1]   * _hr3_fft[6*k+1];
-            return p1 * p2 * p3;
-        };
-        float hps_p = hps_at(peak_bin - 1);
-        float hps_n = hps_at(peak_bin + 1);
-        float hps_denom = hps_p - 2.0f * peak_hps + hps_n;
-        // Parabolic peak value: h(delta) = h0 - (hp-hn)^2 / (8*(hp-2*h0+hn))
-        float hps_interp = (hps_denom < 0.0f)
-            ? peak_hps - 0.125f * (hps_p - hps_n) * (hps_p - hps_n) / hps_denom
-            : peak_hps;
 
-        // ── Global SQI: HPS peak fraction vs. total HPS energy in search range ──
-        int   n_bins    = search_max - search_min + 1;
-        float baseline  = (n_bins > 1) ? 1.0f / (float)n_bins : 0.0f;
-        float fraction  = (hps_sum > 0.0f) ? hps_interp / hps_sum : 0.0f;
-        float sqi_global = fmaxf(0.0f, fminf(1.0f,
-            (n_bins > 1) ? (fraction - baseline) / (1.0f - baseline) : 0.0f));
-
-        // ── Local SQI: peak prominence above local HPS floor (±hr3_sqi_local_w bins) ──
-        // Detects broad movement-artifact humps that appear dominant globally but lack
-        // the sharp spectral peak of a true physiological HR signal.
-        float local_sum   = 0.0f;
-        int   local_count = 0;
-        for (int j = peak_bin - hr3_sqi_local_w; j <= peak_bin + hr3_sqi_local_w; j++) {
-            if (j == peak_bin || j < search_min || j > search_max) continue;
-            local_sum += hps_at(j);
-            local_count++;
+        // ── SQI: two-bin HPS fraction in a local window ─────────────────────────
+        // Due to the Hann window, a real signal at a non-integer bin splits its
+        // energy across two adjacent HPS bins (b1=floor, b2=ceil of the fractional
+        // peak). A metric based on a single bin is therefore bin-position-dependent.
+        //
+        // Fix: use (hps(peak_bin) + hps(b_other)) as numerator, where b_other is the
+        // adjacent bin in the direction of the fractional offset (delta). Both bins
+        // scale identically with bin alignment, making the ratio bin-independent.
+        //
+        // Denominator: sum of HPS over a local window [b_lo, b_hi] of width
+        // 2·hr3_sqi_local_w + 2 bins centred on the two peak bins. This excludes
+        // distant harmonics that would inflate the denominator for high HR signals.
+        //
+        // Normalised against a uniform-noise baseline (2 / n_window) so that:
+        //   SQI = 0  when hps_num / hps_win == baseline (noise floor)
+        //   SQI = 1  when all HPS energy sits in the two peak bins
+        int   b_other = peak_bin + (delta >= 0.0f ? 1 : -1);
+        if (b_other < 1)            b_other = 1;
+        if (b_other > nyquist / 3)  b_other = nyquist / 3;
+        float hps_b_other = hps_at(b_other);
+        float hps_num     = peak_hps + hps_b_other;
+        int   b_lo = (peak_bin < b_other ? peak_bin : b_other) - hr3_sqi_local_w;
+        int   b_hi = (peak_bin > b_other ? peak_bin : b_other) + hr3_sqi_local_w;
+        float hps_win = 0.0f;
+        int   n_win   = 0;
+        for (int k = b_lo; k <= b_hi; k++) {
+            if (k < 1 || k > nyquist / 3) continue;
+            float h = (k == peak_bin) ? peak_hps :
+                      (k == b_other)  ? hps_b_other : hps_at(k);
+            hps_win += h;
+            n_win++;
         }
-        float local_floor = (local_count > 0) ? local_sum / (float)local_count : 0.0f;
-        float sqi_local;
-        if (local_floor > 0.0f) {
-            float ratio = hps_interp / local_floor;
-            sqi_local = fmaxf(0.0f, fminf(1.0f,
-                (ratio - 1.0f) / (hr3_sqi_local_ratio - 1.0f)));
+        if (hps_win > 0.0f && n_win > 2) {
+            float fraction = hps_num / hps_win;
+            float baseline = 2.0f / (float)n_win;
+            _hr3_sqi_result = fmaxf(0.0f, fminf(1.0f,
+                (fraction - baseline) / (1.0f - baseline)));
         } else {
-            sqi_local = 1.0f;  // no local neighbors → peak is isolated, accept
+            _hr3_sqi_result = 0.0f;  // insufficient window → conservative
         }
-
-        // ── Combined SQI: geometric mean — both metrics must be high ──
-        _hr3_sqi_result = sqrtf(sqi_global * sqi_local);
     } else {
         _hr3_sqi_result = 0.0f;
     }
