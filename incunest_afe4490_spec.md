@@ -535,13 +535,14 @@ Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_ale
 
 **True-peak validation** — `peak_bin` must be the strict maximum in a window of ±`hr3_peak_valid_w` bins (`hr3_peak_valid_w = 5`, i.e. ±0.49 Hz). Bins outside `[1, nyquist)` are skipped; bins outside the search range are **included** intentionally. If any bin in the window has HPS ≥ `peak_hps`, the candidate is rejected as a boundary maximum caused by an out-of-range energy hump (e.g. low-frequency movement artifact leaking into the search range) — HR and SQI are both forced to 0 and the function returns early.
 
-`hr3_sqi` is a continuous [0–1] metric based on the **two-bin HPS fraction** in a local window. This design is bin-position-independent: a signal at a non-integer bin spreads HPS energy across two adjacent bins (b1 = `peak_bin`, b2 = `b_other`), and the ratio of those two bins to their local context is the same regardless of fractional offset.
+`hr3_sqi` is a continuous [0–1] metric based on the **two-bin HPS fraction** in a local window. This design is bin-position-independent: a signal at a non-integer bin position (`peak_bin + delta`) splits its HPS energy across b1 = floor(`peak_bin + delta`) and b2 = b1 + 1. Because b1 < b2 always, the window [b1−W, b2+W] is unambiguously defined.
 
 ```
-b_other   = peak_bin + sign(delta)          clipped to [1, nyquist/3]
-hps_num   = hps_at(peak_bin) + hps_at(b_other)
-b_lo      = min(peak_bin, b_other) − hr3_sqi_local_w
-b_hi      = max(peak_bin, b_other) + hr3_sqi_local_w
+b1        = floor(peak_bin + delta)         lower bin; b1 ≥ 1
+b2        = b1 + 1                          upper bin; b2 ≤ nyquist/3
+hps_num   = hps_at(b1) + hps_at(b2)
+b_lo      = b1 − hr3_sqi_local_w
+b_hi      = b2 + hr3_sqi_local_w
 hps_win   = Σ hps_at(k) for k in [b_lo, b_hi] ∩ [1, nyquist/3]
 n_win     = number of bins summed
 fraction  = hps_num / hps_win
@@ -549,7 +550,9 @@ baseline  = 2 / n_win               (uniform-noise reference: 2 signal bins out 
 SQI       = clamp((fraction − baseline) / (1 − baseline), 0, 1)
 ```
 
-Parameters: `hr3_sqi_local_w = 5` bins (window extends ±5 bins beyond the two peak bins, ~±0.49 Hz). If `hps_win = 0` or `n_win ≤ 2`, SQI = 0 (conservative).
+Note: `peak_bin` (the HPS search maximum) coincides with either b1 or b2; `hps_at(b1/b2)` reuses `peak_hps` in that case to avoid a redundant computation.
+
+Parameters: `hr3_sqi_local_w = 5` bins (window extends ±5 bins beyond b1 and b2, ~±0.49 Hz). If `hps_win = 0` or `n_win ≤ 2`, SQI = 0 (conservative).
 
 **Bin-independence:** P[k] and HPS metrics based on a single bin suffer from a half-bin misalignment effect (energy splits across two bins → denominator changes but numerator is halved). By summing two adjacent bins in both numerator and denominator, the effect cancels and SQI is approximately constant regardless of bin alignment.
 
