@@ -58,6 +58,8 @@ namespace {
 
     // ── HR3 ───────────────────────────────────────────────────────────────────
     constexpr int      hr3_decim_factor    = 10;       // 500 Hz → 50 Hz effective sample rate
+    constexpr int      hr3_sqi_local_w     = 5;        // local prominence window half-width [bins] (~±0.49 Hz)
+    constexpr float    hr3_sqi_local_ratio = 10.0f;    // peak/floor ratio mapping to SQI_local = 1
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
@@ -1929,13 +1931,16 @@ void INCUNEST_AFE4490::_compute_hr3() {
     if (search_min >= search_max) { _hr3_sqi_result = 0.0f; return; }
 
     // HPS = P[k] * P[2k] * P[3k]  where P[k] = re[k]^2 + im[k]^2
+    // _hr3_fft is stored interleaved: [re0, im0, re1, im1, ...], so bin k occupies
+    // indices 2k (real) and 2k+1 (imaginary). P[k] = re[k]^2 + im[k]^2 is the power
+    // of a single spectral bin — not two bins.
     int   peak_bin  = -1;
     float peak_hps  = 0.0f;
     float hps_sum   = 0.0f;  // sum of HPS values across search range (used for SQI)
     for (int k = search_min; k <= search_max; k++) {
-        float p1 = _hr3_fft[2*k]   * _hr3_fft[2*k]   + _hr3_fft[2*k+1]   * _hr3_fft[2*k+1];
-        float p2 = _hr3_fft[4*k]   * _hr3_fft[4*k]   + _hr3_fft[4*k+1]   * _hr3_fft[4*k+1];
-        float p3 = _hr3_fft[6*k]   * _hr3_fft[6*k]   + _hr3_fft[6*k+1]   * _hr3_fft[6*k+1];
+        float p1 = _hr3_fft[2*k]   * _hr3_fft[2*k]   + _hr3_fft[2*k+1]   * _hr3_fft[2*k+1];  // P[k]  = |FFT[k]|²
+        float p2 = _hr3_fft[4*k]   * _hr3_fft[4*k]   + _hr3_fft[4*k+1]   * _hr3_fft[4*k+1];  // P[2k] = |FFT[2k]|²
+        float p3 = _hr3_fft[6*k]   * _hr3_fft[6*k]   + _hr3_fft[6*k+1]   * _hr3_fft[6*k+1];  // P[3k] = |FFT[3k]|²
         float hps = p1 * p2 * p3;
         hps_sum += hps;
         if (hps > peak_hps) { peak_hps = hps; peak_bin = k; }
@@ -1984,11 +1989,35 @@ void INCUNEST_AFE4490::_compute_hr3() {
             ? peak_hps - 0.125f * (hps_p - hps_n) * (hps_p - hps_n) / hps_denom
             : peak_hps;
 
-        int   n_bins   = search_max - search_min + 1;
-        float baseline = (n_bins > 1) ? 1.0f / (float)n_bins : 0.0f;
-        float fraction = (hps_sum > 0.0f) ? hps_interp / hps_sum : 0.0f;
-        float sqi      = (n_bins > 1) ? (fraction - baseline) / (1.0f - baseline) : 0.0f;
-        _hr3_sqi_result = fmaxf(0.0f, fminf(1.0f, sqi));
+        // ── Global SQI: HPS peak fraction vs. total HPS energy in search range ──
+        int   n_bins    = search_max - search_min + 1;
+        float baseline  = (n_bins > 1) ? 1.0f / (float)n_bins : 0.0f;
+        float fraction  = (hps_sum > 0.0f) ? hps_interp / hps_sum : 0.0f;
+        float sqi_global = fmaxf(0.0f, fminf(1.0f,
+            (n_bins > 1) ? (fraction - baseline) / (1.0f - baseline) : 0.0f));
+
+        // ── Local SQI: peak prominence above local HPS floor (±hr3_sqi_local_w bins) ──
+        // Detects broad movement-artifact humps that appear dominant globally but lack
+        // the sharp spectral peak of a true physiological HR signal.
+        float local_sum   = 0.0f;
+        int   local_count = 0;
+        for (int j = peak_bin - hr3_sqi_local_w; j <= peak_bin + hr3_sqi_local_w; j++) {
+            if (j == peak_bin || j < search_min || j > search_max) continue;
+            local_sum += hps_at(j);
+            local_count++;
+        }
+        float local_floor = (local_count > 0) ? local_sum / (float)local_count : 0.0f;
+        float sqi_local;
+        if (local_floor > 0.0f) {
+            float ratio = hps_interp / local_floor;
+            sqi_local = fmaxf(0.0f, fminf(1.0f,
+                (ratio - 1.0f) / (hr3_sqi_local_ratio - 1.0f)));
+        } else {
+            sqi_local = 1.0f;  // no local neighbors → peak is isolated, accept
+        }
+
+        // ── Combined SQI: geometric mean — both metrics must be high ──
+        _hr3_sqi_result = sqrtf(sqi_global * sqi_local);
     } else {
         _hr3_sqi_result = 0.0f;
     }

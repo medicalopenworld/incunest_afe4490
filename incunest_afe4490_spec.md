@@ -533,20 +533,42 @@ Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_ale
 
 **Stack note:** `_hr3_fft[1024]` (4096 bytes complex buffer) is stored as a class member (heap). `INCUNEST_AFE4490_TASK_STACK` default increased to 8192 to accommodate `cosf`/`sinf` stack usage during butterfly stages.
 
-`hr3_sqi` is a continuous [0–1] quality metric based on HPS peak prominence: the fraction of total HPS energy at the interpolated peak, relative to the sum of all HPS values across the search range:
+`hr3_sqi` is a continuous [0–1] quality metric combining two complementary measures:
+
+**Global SQI** — fraction of total HPS energy concentrated at the interpolated peak:
 
 ```
-HPS_interp = parabolic interpolation of HPS at (peak_bin-1, peak_bin, peak_bin+1)
-fraction   = HPS_interp / Σ HPS[k]   (k across search range)
-baseline   = 1 / N_bins               (flat-HPS reference)
-SQI        = clamp((fraction − baseline) / (1 − baseline), 0, 1)
+HPS_interp  = parabolic interpolation of HPS at (peak_bin-1, peak_bin, peak_bin+1)
+fraction    = HPS_interp / Σ HPS[k]   (k across search range, ~38 bins)
+baseline    = 1 / N_bins               (flat-HPS reference)
+SQI_global  = clamp((fraction − baseline) / (1 − baseline), 0, 1)
 ```
 
-`baseline` is the fraction a single bin would hold if HPS were uniformly distributed across the `N_bins` bins of the search range (~48 bins). Using the HPS domain instead of the linear spectrum avoids harmonic inflation of the denominator: since HPS = P[k]·P[2k]·P[3k], only the true fundamental accumulates power from all three harmonics simultaneously, so the peak bin naturally dominates the HPS sum when the signal is periodic.
+`baseline` is the fraction a single bin would hold if HPS were uniformly distributed. Using the HPS domain avoids harmonic inflation of the denominator: since HPS = P[k]·P[2k]·P[3k], only the true fundamental accumulates power from all three harmonics simultaneously.
 
-**Why parabolic interpolation on HPS (not on P[k]):** when the true fundamental falls between FFT bins (e.g. 85 BPM = bin 14.5), the Hann window splits energy between adjacent bins. Because HPS is a *product* of three power spectra, the split is cubic — a 50 % energy split at each harmonic yields only ~12 % of the ideal single-bin HPS, collapsing SQI to ~0.5 even for a clean signal. Applying parabolic interpolation directly to the HPS values recovers the true peak height at the fractional bin position, consistent with how `delta` is already used to interpolate the frequency estimate.
+**Local SQI** — peak prominence above the immediate spectral neighborhood:
 
-A clean PPG signal → SQI approaches 1. A diffuse or noisy spectrum → SQI ≈ 0. If the buffer is not yet full, the HPS peak is outside [25, 300] BPM, or the HPS sum is zero, SQI = 0.
+```
+local_floor = mean(HPS[k] for k in [peak_bin−W, peak_bin+W], k ≠ peak_bin)
+              W = hr3_sqi_local_w = 5 bins (±0.49 Hz)
+ratio       = HPS_interp / local_floor
+SQI_local   = clamp((ratio − 1) / (hr3_sqi_local_ratio − 1), 0, 1)
+              hr3_sqi_local_ratio = 10.0  (ratio that maps to SQI_local = 1)
+```
+
+Detects broad movement-artifact humps that appear globally dominant but lack the sharp spectral peak of a true physiological HR signal. A physiological HR peak after Hann windowing is ~2–4 bins wide; movement artifacts typically produce humps of 8–15 bins.
+
+**Combined SQI** — geometric mean:
+
+```
+SQI = √(SQI_global × SQI_local)
+```
+
+Both metrics must be high for a high combined score. A sharp but globally weak peak scores low on SQI_global; a globally dominant but spectrally broad hump scores low on SQI_local.
+
+**Why parabolic interpolation on HPS (not on P[k]):** when the true fundamental falls between FFT bins (e.g. 85 BPM = bin 14.5), the Hann window splits energy between adjacent bins. Because HPS is a *product* of three power spectra, the split is cubic — a 50 % energy split at each harmonic yields only ~12 % of the ideal single-bin HPS, collapsing SQI to ~0.5 even for a clean signal. Parabolic interpolation on HPS recovers the true peak height at the fractional bin position.
+
+A clean PPG signal → SQI approaches 1. A diffuse or noisy spectrum, or a movement artifact → SQI ≈ 0. If the buffer is not yet full, the HPS peak is outside [40, 260] BPM, or the HPS sum is zero, SQI = 0.
 
 ### 5.5 HR algorithms roadmap
 
@@ -1344,6 +1366,9 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.28   | HR3 SQI redesigned: combined global fraction + local prominence (geometric  |
+|         | mean). `hr3_sqi_local_w=5` (±0.49 Hz window), `hr3_sqi_local_ratio=10.0`.  |
+|         | Detects movement-artifact humps that fool the global metric. Spec §5.4.    |
 | v0.27   | RSQM (Raw Signal Quality Monitor). `ProbeState` enum                        |
 |         | (PROBE_DISCONNECTED / PROBE_NOT_APPLIED / PROBE_APPLIED). `DiagCode`        |
 |         | bitmask constants RSQM_AMB_SAT, RSQM_SIGNAL_WEAK, RSQM_HW_SETTLING.        |
