@@ -1977,33 +1977,36 @@ void INCUNEST_AFE4490::_compute_hr3() {
 
         // ── SQI: two-bin HPS fraction in a local window ─────────────────────────
         // Due to the Hann window, a real signal at a non-integer bin splits its
-        // energy across two adjacent HPS bins (b1=floor, b2=ceil of the fractional
-        // peak). A metric based on a single bin is therefore bin-position-dependent.
+        // energy across two adjacent HPS bins (b1=peak_bin, b2=adjacent in delta
+        // direction). A metric based on a single bin is therefore bin-position-dependent.
         //
-        // Fix: use (hps(peak_bin) + hps(b_other)) as numerator, where b_other is the
-        // adjacent bin in the direction of the fractional offset (delta). Both bins
-        // scale identically with bin alignment, making the ratio bin-independent.
+        // Fix: use (hps(b1) + hps(b2)) as numerator, where b1=floor and b2=ceil
+        // of the fractional peak bin (peak_bin + delta). b1 ≤ b2 always, so the
+        // window [b1-W, b2+W] is always well-defined. Both bins scale identically
+        // with bin alignment, making the ratio bin-independent.
         //
-        // Denominator: sum of HPS over a local window [b_lo, b_hi] of width
-        // 2·hr3_sqi_local_w + 2 bins centred on the two peak bins. This excludes
-        // distant harmonics that would inflate the denominator for high HR signals.
+        // Denominator: sum of HPS over a local window [b1-W, b2+W] of width
+        // W+2+W = 2·hr3_sqi_local_w+2 bins. This excludes distant harmonics that
+        // would inflate the denominator for high HR signals.
         //
         // Normalised against a uniform-noise baseline (2 / n_window) so that:
         //   SQI = 0  when hps_num / hps_win == baseline (noise floor)
-        //   SQI = 1  when all HPS energy sits in the two peak bins
-        int   b_other = peak_bin + (delta >= 0.0f ? 1 : -1);
-        if (b_other < 1)            b_other = 1;
-        if (b_other > nyquist / 3)  b_other = nyquist / 3;
-        float hps_b_other = hps_at(b_other);
-        float hps_num     = peak_hps + hps_b_other;
-        int   b_lo = (peak_bin < b_other ? peak_bin : b_other) - hr3_sqi_local_w;
-        int   b_hi = (peak_bin > b_other ? peak_bin : b_other) + hr3_sqi_local_w;
+        //   SQI = 1  when all HPS energy sits in b1 and b2
+        int   b1 = (int)floorf((float)peak_bin + delta);   // floor of fractional bin
+        int   b2 = b1 + 1;                                 // ceil  of fractional bin
+        if (b1 < 1)            b1 = 1;
+        if (b2 > nyquist / 3)  b2 = nyquist / 3;
+        float hps_b1  = (b1 == peak_bin) ? peak_hps : hps_at(b1);
+        float hps_b2  = (b2 == peak_bin) ? peak_hps : hps_at(b2);
+        float hps_num = hps_b1 + hps_b2;
+        int   b_lo = b1 - hr3_sqi_local_w;
+        int   b_hi = b2 + hr3_sqi_local_w;
         float hps_win = 0.0f;
         int   n_win   = 0;
         for (int k = b_lo; k <= b_hi; k++) {
             if (k < 1 || k > nyquist / 3) continue;
-            float h = (k == peak_bin) ? peak_hps :
-                      (k == b_other)  ? hps_b_other : hps_at(k);
+            float h = (k == b1) ? hps_b1 :
+                      (k == b2) ? hps_b2 : hps_at(k);
             hps_win += h;
             n_win++;
         }
