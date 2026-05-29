@@ -1976,9 +1976,9 @@ void INCUNEST_AFE4490::_compute_hr3() {
         _hr3_result = hr3;
 
         // ── SQI: two-bin HPS fraction in a local window ─────────────────────────
-        // Due to the Hann window, a real signal at a non-integer bin splits its
-        // energy across two adjacent HPS bins (b1=peak_bin, b2=adjacent in delta
-        // direction). A metric based on a single bin is therefore bin-position-dependent.
+        // Due to the Hann window, a real signal at a non-integer bin position
+        // (peak_bin + delta) splits its energy across b1=floor(peak_bin+delta) and
+        // b2=b1+1. A metric based on a single bin is therefore bin-position-dependent.
         //
         // Fix: use (hps(b1) + hps(b2)) as numerator, where b1=floor and b2=ceil
         // of the fractional peak bin (peak_bin + delta). b1 ≤ b2 always, so the
