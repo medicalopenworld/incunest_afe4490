@@ -1,5 +1,5 @@
 // incunest_afe4490 — Basic Example
-// Library version: v0.18 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.31 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
