@@ -76,7 +76,8 @@ struct AFE4490Data {
     int32_t led2_aled2; // LED2-ALED2 — RED ambient-corrected (frame: RED_Sub)
     int32_t led1_aled1; // LED1-ALED1 — IR ambient-corrected  (frame: IR_Sub)
     // Processed outputs
-    int32_t ppg;        // filtered PPG of selected channel
+    int32_t ppg;        // filtered PPG of selected channel (IR, for HR1 peak detection)
+    float   ppg_disp;   // PPG for display only: normalized [0..1], PI-weighted (low PI → range < 1). Never use for SpO2 or HR calculations.
     float   spo2;       // SpO2 in %
     float   spo2_sqi;   // SpO2 Signal Quality Index [0–1]: PI-based; 0=no finger, 1=PI ≥ 2%
     float   spo2_r;     // R ratio: (AC_red/DC_red)/(AC_ir/DC_ir) — for calibration
@@ -436,7 +437,7 @@ PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2
 1. **DC removal:** IIR low-pass filter (τ = 1.6 s) estimates DC; subtracted from raw signal. Signal is negated for conventional PPG polarity (peaks up).
 2. **Low-pass filter:** moving average with cutoff ~5 Hz (`len = fs / (2 × 5)`; at 500 Hz → 50 samples). Capped at 64 samples max.
 3. **Running maximum:** exponential decay tracker (`× 0.9999` per sample) keeps amplitude reference current.
-4. **Threshold crossing:** rising edge detected when signal crosses `0.6 × running_max`. A refractory period (0.2 s, ~300 BPM max) prevents double-detection.
+4. **Threshold crossing:** rising edge detected when signal crosses `0.6 × running_max`. A refractory period (0.185 s, ~324 BPM practical limit) prevents double-detection.
 5. **RR interval buffer:** last 5 consecutive intervals stored. HR1 computed as average:
 
 ```
@@ -450,7 +451,7 @@ CV  = std(RR[0..4]) / mean(RR[0..4])
 SQI = clamp(1 − CV / 0.15, 0, 1)
 ```
 
-CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythmia, artefact, or loss of signal). The 15 % threshold is the standard clinical criterion for rhythm regularity. If fewer than 5 intervals have been detected, or if HR1 is outside [25, 300] BPM, SQI is forced to 0. The refractory period of 200 ms naturally supports detection up to ~300 BPM, providing a guard band above the 250 BPM limit at no cost.
+CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythmia, artefact, or loss of signal). The 15 % threshold is the standard clinical criterion for rhythm regularity. If fewer than 5 intervals have been detected, or if HR1 is outside [40, 260] BPM, SQI is forced to 0. The refractory period of 185 ms naturally supports detection up to ~324 BPM, providing a guard band above the 260 BPM limit at no cost.
 
 > **Implementation note:** peak location is currently approximated by the rising threshold crossing (first sample above `0.6 × running_max`). This introduces a timing error that depends on signal slope and amplitude — if either changes (low perfusion, motion), the detected instant shifts relative to the true peak, introducing jitter in the RR interval. Planned improvement: apply derivative to the filtered signal and detect the rising edge as the maximum of the derivative (steepest ascending slope), which gives a more stable and precise timing reference independent of signal amplitude.
 
@@ -463,14 +464,14 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_dc_tau_s` | 1.6 s | IIR DC removal time constant |
 | `hr1_ma_cutoff_hz` | 5 Hz | Moving average low-pass cutoff |
 | `hr1_ma_max_len` | 64 samples | Max moving average length |
-| `hr1_refractory_s` | 0.2 s | Refractory period between peaks (~300 BPM max) |
+| `hr1_refractory_s` | 0.185 s | Refractory period between peaks (~324 BPM practical limit) |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
 | `hr_min_bpm` | 40 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
-| `hr_max_bpm` | 300 BPM | Reported valid HR range maximum (neonatal tachycardia) |
+| `hr_max_bpm` | 260 BPM | Reported valid HR range maximum (neonatal tachycardia) |
 | `hr_search_min_bpm` | 37 BPM | Internal search lower bound (guard band: hr_min − 3) |
-| `hr_search_max_bpm` | 303 BPM | Internal search upper bound (guard band: hr_max + 3) |
+| `hr_search_max_bpm` | 263 BPM | Internal search upper bound (guard band: hr_max + 3) |
 
-> **Guard band design:** all HR algorithms search internally in [22, 303] BPM and force `hr*_sqi = 0.0` when the result falls outside [25, 300] BPM. This prevents boundary-clipping errors where a signal at exactly 25 BPM could be missed due to small algorithmic offsets. The ±3 BPM margin is consistent with the ISO 80601-2-61 measurement tolerance.
+> **Guard band design:** all HR algorithms search internally in [37, 263] BPM and force `hr*_sqi = 0.0` when the result falls outside [40, 260] BPM. This prevents boundary-clipping errors where a signal at exactly 40 BPM could be missed due to small algorithmic offsets. The ±3 BPM margin is consistent with the ISO 80601-2-61 measurement tolerance.
 
 ### 5.3 HR2 — Autocorrelation
 Independent second HR algorithm running in parallel with HR1 on the same `led1_aled1` signal.
@@ -1074,7 +1075,7 @@ See §5.2 for algorithm description.
 | Low-pass MA cutoff | `hr1_ma_cutoff_hz` | 5 Hz | Noise smoothing before peak detection; affects peak sharpness |
 | Max MA length | `hr1_ma_max_len` | 64 samples | Prevents excessively long moving average at low heart rates |
 | Peak threshold fraction | 0.6 | 0.6 × running_max | Trade-off: higher → misses low-amplitude peaks; lower → false detections on noise |
-| Refractory period | `hr1_refractory_s` | 0.2 s | Minimum interval between detected peaks; sets practical upper HR limit (~300 BPM) |
+| Refractory period | `hr1_refractory_s` | 0.185 s | Minimum interval between detected peaks; practical upper HR limit ~324 BPM |
 | RR interval buffer length | 5 intervals | 5 | Number of consecutive intervals averaged for HR1 output |
 | SQI CV threshold | `hr1_sqi_cv_max` | 0.15 (15 %) | CV above this → SQI = 0 (arrhythmia / motion artefact) |
 
@@ -1119,9 +1120,9 @@ Applied by all HR algorithms equally to decide whether an output is reportable a
 | Parameter | Constant | Value | Scope |
 |---|---|---|---|
 | Reported valid HR lower bound | `hr_min_bpm` | 40 BPM | HR1, HR2, HR3 — ISO 80601-2-61; neonatal |
-| Reported valid HR upper bound | `hr_max_bpm` | 300 BPM | HR1, HR2, HR3 — neonatal tachycardia |
+| Reported valid HR upper bound | `hr_max_bpm` | 260 BPM | HR1, HR2, HR3 — neonatal tachycardia |
 | Internal search lower bound | `hr_search_min_bpm` | 37 BPM | Guard band: hr_min − 3 |
-| Internal search upper bound | `hr_search_max_bpm` | 303 BPM | Guard band: hr_max + 3 |
+| Internal search upper bound | `hr_search_max_bpm` | 263 BPM | Guard band: hr_max + 3 |
 | SpO2 reported valid lower bound | `spo2_min` | 70 % | SpO2 |
 | SpO2 reported valid upper bound | `spo2_max` | 100 % | SpO2 |
 | SpO2 clamp margin | `spo2_clamp_margin` | 3 % | Values within margin are clamped, not rejected |
@@ -1347,7 +1348,7 @@ Key references for each algorithm implemented in this library.
   Clear clinical review of the operating principle and limitations.
 
 - **ISO 80601-2-61.** *Medical electrical equipment — Part 2-61: Particular requirements for basic safety and essential performance of pulse oximeter equipment.*
-  Normative standard defining valid measurement ranges, tolerances, and test conditions. Source of the [70–100 %] SpO2 and [25–300 BPM] HR bounds used in this library.
+  Normative standard defining valid measurement ranges, tolerances, and test conditions. Source of the [70–100 %] SpO2 range; HR bounds [40–260 BPM] are derived from ISO neonatal criteria.
 
 - **Severinghaus, J.W. & Astrup, P.B. (1986).** "History of blood gas analysis." *Journal of Clinical Monitoring*, 2(4), 270–288.
   Historical context for non-invasive oxygen saturation measurement.
