@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.31 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.32 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.31"
+#define INCUNEST_AFE4490_VERSION "0.32"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -396,7 +396,7 @@ private:
     static constexpr float    rsqm_alpha_mean       = 0.02f;    // EMA α for mean  (τ ≈ 100 ms @ 500 Hz)
     static constexpr float    rsqm_alpha_var        = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
     static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
-    static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |LED_Sub| < this on both ch → disconnected (cable floating → LED_Sub≈0)
+    static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
     static constexpr float    rsqm_ot_thr           = 0.30f;    // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
     static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
@@ -665,8 +665,8 @@ private:
     float    _hr_max_bpm;
 
     // ── RSQM state ────────────────────────────────────────────────────────────
-    RsqmEmaChannel _rsqm_led1_sub;       // EMA estimator for led1_aled1 (IR differential)
-    RsqmEmaChannel _rsqm_led2_sub;       // EMA estimator for led2_aled2 (RED differential)
+    RsqmEmaChannel _rsqm_led1_aled1;     // EMA estimator for led1_aled1 (IR differential)
+    RsqmEmaChannel _rsqm_led2_aled2;     // EMA estimator for led2_aled2 (RED differential)
     ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state

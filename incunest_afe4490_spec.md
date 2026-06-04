@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.31
+# incunest_afe4490 — Specification v0.32
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -106,11 +106,11 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 | Parameter      | Default value                  |
 |----------------|-------------------------------|
 | Sample rate    | 500 Hz                        |
-| LED1 current   | 11.7 mA                       |
-| LED2 current   | 11.7 mA                       |
+| LED1 current   | ~19.9 mA (code 34/256 × 150 mA) |
+| LED2 current   | ~19.9 mA (code 34/256 × 150 mA) |
 | LED range      | 150 mA (TX_REF = 0.75V)       |
-| TIA gain (RF)  | 500 kΩ                        |
-| TIA CF         | auto (see §7.2): 20 pF @ 500 Hz / RF_500K |
+| TIA gain (RF)  | 100 kΩ                        |
+| TIA CF         | auto (see §7.2): 55 pF @ 500 Hz / RF_100K |
 | Stage 2 gain   | disabled                      |
 | ENSEPGAIN      | 0 (single gain)               |
 | NUMAV          | 7 (8 averages, max 9 at 500Hz)|
@@ -341,9 +341,9 @@ enum class AFE4490TIAGain {
     RF_10K,
     RF_25K,
     RF_50K,
-    RF_100K,
+    RF_100K,   // default
     RF_250K,
-    RF_500K,   // default
+    RF_500K,
     RF_1M
 };
 
@@ -994,8 +994,8 @@ Parameters written to chip registers during initialisation. Changing them requir
 
 | Parameter | API | Default | Range | Effect on output |
 |---|---|---|---|---|
-| IR LED current (LED1) | `setLED1Current()` | 11.7 mA | 0 – LED range max | PPG amplitude on IR channel; drives DC level and AC/DC ratio |
-| RED LED current (LED2) | `setLED2Current()` | 11.7 mA | 0 – LED range max | PPG amplitude on RED channel; directly affects SpO2 R-ratio |
+| IR LED current (LED1) | `setLED1Current()` | ~19.9 mA | 0 – LED range max | PPG amplitude on IR channel; drives DC level and AC/DC ratio |
+| RED LED current (LED2) | `setLED2Current()` | ~19.9 mA | 0 – LED range max | PPG amplitude on RED channel; directly affects SpO2 R-ratio |
 | LED full-scale range | `setLEDRange()` | 150 mA | 75 or 150 mA (TX_REF=0.75 V) | Scales the 8-bit DAC resolution; affects achievable current values |
 
 > LED currents set the signal amplitude at the photodiode. Too low → low PI, SpO2 SQI=0. Too high → TIA saturation (clipping). The optimal point maximises PI while keeping the ADC output below full-scale.
@@ -1004,7 +1004,7 @@ Parameters written to chip registers during initialisation. Changing them requir
 
 | Parameter | API | Default | Options | Effect on output |
 |---|---|---|---|---|
-| Feedback resistance R_F | `setTIAGain()` | RF_500K (500 kΩ) | 10k, 25k, 50k, 100k, 250k, 500k, 1MΩ | Transimpedance gain: larger R_F = higher voltage output, higher noise floor. Full-scale input current = 1 V / R_F |
+| Feedback resistance R_F | `setTIAGain()` | RF_100K (100 kΩ) | 10k, 25k, 50k, 100k, 250k, 500k, 1MΩ | Transimpedance gain: larger R_F = higher voltage output, higher noise floor. Full-scale input current = 1 V / R_F |
 | Feedback capacitance C_F | `setTIACF()` (or auto) | auto (see §7.2) | 5, 10, 20, 30, 55, 155 pF | TIA RC pole: must settle before ADC samples. Auto-selected by library from R_F and PRF |
 
 > R_F and C_F together determine the front-end gain and noise. The library enforces `R_F × C_F ≤ Rx_sample_time / 10` via auto-CF (§7.2).
@@ -1211,19 +1211,19 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | **TIAGAIN** | 0x00C006 | — | 0x000000 | **0x000000** | Minimal config: RF=500kΩ, CF=5pF, Stage2 off, ENSEPGAIN=0 |
 | → ENSEPGAIN | 1 | — | 0 | **0** | With 0, both channels use TIAGAIN for the TIA. Simplifies configuration. Enable if independent gain per channel is needed |
 | → Stage2 LED1 | EN, 0 dB | — | disabled | **disabled** | RF=500kΩ provides sufficient gain for typical PPG. Stage2 at 0dB adds no useful gain. Configurable via setter |
-| → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Default at 500 Hz / RF_500K: 20 pF |
-| → RF LED1 | 1 MΩ | — | 500 kΩ | **500 kΩ** | Validated by Protocentral on real hardware. EVM's 1MΩ risks saturation. Configurable via setTIAGain() |
+| → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Default at 500 Hz / RF_100K: 55 pF |
+| → RF LED1 | 1 MΩ | — | 500 kΩ | **100 kΩ** | Matched to Medle probe at 20 mA. Lower RF reduces gain but avoids saturation with bright LEDs. Configurable via setTIAGain() |
 | **TIA_AMB_GAIN** | 0x004006 | — | 0x000001 | **0x000000** | With ENSEPGAIN=0, the RF of this register does not affect the main TIA. Relevant for FLTRCNRSEL, AMBDAC and Stage2 |
-| → RF LED2/amb | 1 MΩ | — | 250 kΩ | **500 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
+| → RF LED2/amb | 1 MΩ | — | 250 kΩ | **100 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
 | → CF LED2/amb | 5 pF | — | 5 pF | **auto (§7.2)** | Same as CF LED1 (ENSEPGAIN=0 shares config) |
 | → Stage2 LED2 | EN, 0 dB | — | disabled | **disabled** | Same criterion as Stage2 LED1 |
 | → FLTRCNRSEL | 500 Hz | — | 500 Hz | **500 Hz** | Matches PRF. 1000 Hz option only makes sense if PRF is raised |
 | → AMBDAC | 0 µA | — | 0 µA | **0 µA** | Ambient cancellation handled in hardware (LED1−ALED1VAL, LED2−ALED2VAL). AMBDAC only needed if ambient light saturates TIA before subtraction. Exposable via setter |
-| **LEDCNTRL** | 0x011414 | — | 0x001414 | **0x001414** | RANGE_0 + code 20 + TX_REF=0.75V → 11.7mA per LED |
+| **LEDCNTRL** | 0x011414 | — | 0x001414 | **0x002222** | RANGE_0 + code 34 + TX_REF=0.75V → ~19.9 mA per LED |
 | → LED_RANGE | RANGE_1 | — | RANGE_0 | **RANGE_0** | Consistent with TX_REF=0.75V. FSR=150mA → resolution ~0.6mA/step |
-| → LED1 code | 20 (0x14) | — | 20 (0x14) | **20 (0x14)** | 11.7mA: standard starting point for finger SpO2 validated by Protocentral. Configurable via setLEDCurrent() |
-| → LED2 code | 20 (0x14) | — | 20 (0x14) | **20 (0x14)** | Same as LED1. In practice red and IR may need independent adjustment |
-| → **Resulting current** | **≈3.9 mA** | — | **≈11.7 mA** | **≈11.7 mA** | EVM uses TX_REF=0.5V + RANGE_1 → 3.9mA; insufficient as a general default |
+| → LED1 code | 20 (0x14) | — | 20 (0x14) | **34 (0x22)** | ~19.9 mA: closest DAC code to 20 mA (Medle probe test value). Configurable via setLEDCurrent() |
+| → LED2 code | 20 (0x14) | — | 20 (0x14) | **34 (0x22)** | Same as LED1. In practice red and IR may need independent adjustment |
+| → **Resulting current** | **≈3.9 mA** | — | **≈11.7 mA** | **≈19.9 mA** | EVM uses TX_REF=0.5V + RANGE_1 → 3.9mA; insufficient as a general default |
 | **CONTROL2** | 0x020000 | — | 0x000000 | **0x000000** | All fields at reset value |
 | → TX_REF | 0.5 V | 0.75 V (reset) | 0.75 V | **0.75 V** | Datasheet default. Supports up to 150mA with RANGE_0. EVM uses 0.5V due to its supply constraints |
 | → PDN_AFE/RX/TX | all ON | — | all ON | **all ON** | Normal operating mode. PDN only for low-power use |
@@ -1359,6 +1359,9 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.32   | Default values changed: LED1/LED2 current 11.7 mA → ~19.9 mA (code 34,  |
+|         | range 150 mA), TIA gain RF_500K → RF_100K. Matched to Medle probe at     |
+|         | 20 mA. Spec tables updated (§3, §8 TX/RX params, §9 register decisions). |
 | v0.31   | HR3 SQI: redesigned as two-bin HPS fraction in a local window. Replaces    |
 |         | P[k] local prominence (v0.30), which was limited to SQI ≤ 0.19 due to     |
 |         | the Hann window spreading FFT energy across 3 bins (P[k]/P[k±1] ≈ 4,      |

@@ -227,13 +227,13 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr2_result(0.0f), _hr2_sqi_result(0.0f),
       _hr3_result(0.0f), _hr3_sqi_result(0.0f),
       _afe_sample_rate_hz(500), _afe_adc_averages(8),
-      _afe_led1_current_mA(11.7f), _afe_led2_current_mA(11.7f), _afe_led_range_mA(150),
+      _afe_led1_current_mA(20.0f), _afe_led2_current_mA(20.0f), _afe_led_range_mA(150),
       _afe_ensepgain(true),
-      _afe_tia_gain_led1(AFE4490TIAGain::RF_500K),
+      _afe_tia_gain_led1(AFE4490TIAGain::RF_100K),
       _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
       _afe_stage2_gain_led1(AFE4490Stage2Gain::GAIN_0DB),
       _afe_stage2_en1(true),
-      _afe_tia_gain_led2(AFE4490TIAGain::RF_500K),
+      _afe_tia_gain_led2(AFE4490TIAGain::RF_100K),
       _afe_tia_cf_led2(AFE4490TIACF::CF_5P),
       _afe_stage2_gain_led2(AFE4490Stage2Gain::GAIN_0DB),
       _afe_stage2_en2(true),
@@ -274,8 +274,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_update_interval(25u),
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
-      _rsqm_led1_sub{0.0f, 0.0f, 0},
-      _rsqm_led2_sub{0.0f, 0.0f, 0},
+      _rsqm_led1_aled1{0.0f, 0.0f, 0},
+      _rsqm_led2_aled2{0.0f, 0.0f, 0},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0)
 {
@@ -987,8 +987,8 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_sqi_result = 0.0f;
     _hr3_result = 0.0f; _hr3_sqi_result = 0.0f;
-    _rsqm_led1_sub          = {0.0f, 0.0f, 0};
-    _rsqm_led2_sub          = {0.0f, 0.0f, 0};
+    _rsqm_led1_aled1          = {0.0f, 0.0f, 0};
+    _rsqm_led2_aled2          = {0.0f, 0.0f, 0};
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
     _current_data = AFE4490Data{};
@@ -1022,35 +1022,32 @@ void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
 void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                      int32_t led1_aled1, int32_t led2_aled2) {
     // ── EMA estimators ─────────────────────────────────────────────────────────
-    const float s1 = (float)led1_aled1;
-    const float s2 = (float)led2_aled2;
+    _rsqm_led1_aled1.ema_mean += rsqm_alpha_mean * ((float)led1_aled1 - _rsqm_led1_aled1.ema_mean);
+    {   float d = (float)led1_aled1 - _rsqm_led1_aled1.ema_mean;
+        _rsqm_led1_aled1.ema_var += rsqm_alpha_var * (d * d - _rsqm_led1_aled1.ema_var); }
+    _rsqm_led1_aled1.count++;
 
-    _rsqm_led1_sub.ema_mean += rsqm_alpha_mean * (s1 - _rsqm_led1_sub.ema_mean);
-    {   float d = s1 - _rsqm_led1_sub.ema_mean;
-        _rsqm_led1_sub.ema_var += rsqm_alpha_var * (d * d - _rsqm_led1_sub.ema_var); }
-    _rsqm_led1_sub.count++;
+    _rsqm_led2_aled2.ema_mean += rsqm_alpha_mean * ((float)led2_aled2 - _rsqm_led2_aled2.ema_mean);
+    {   float d = (float)led2_aled2 - _rsqm_led2_aled2.ema_mean;
+        _rsqm_led2_aled2.ema_var += rsqm_alpha_var * (d * d - _rsqm_led2_aled2.ema_var); }
+    _rsqm_led2_aled2.count++;
 
-    _rsqm_led2_sub.ema_mean += rsqm_alpha_mean * (s2 - _rsqm_led2_sub.ema_mean);
-    {   float d = s2 - _rsqm_led2_sub.ema_mean;
-        _rsqm_led2_sub.ema_var += rsqm_alpha_var * (d * d - _rsqm_led2_sub.ema_var); }
-    _rsqm_led2_sub.count++;
-
-    const bool ready = (_rsqm_led1_sub.count >= rsqm_ready_count);
+    const bool ready = (_rsqm_led1_aled1.count >= rsqm_ready_count);
 
     // ── Probe state detection ──────────────────────────────────────────────────
     // PROBE_DISCONNECTED: instantaneous criterion — all four raw ADC channels negative AND
-    // |LED_Sub| near zero on both channels.  When cable is disconnected, TIA input is floating;
-    // input-offset current drives LED1≈ALED1≈LED2≈ALED2 to the same large negative value, so
-    // LED_Sub = LED − ALED ≈ 0.  Responds in one sample; no EMA warmup required.
+    // |led1_aled1|/|led2_aled2| near zero on both channels.  When cable is disconnected,
+    // TIA input is floating; input-offset current drives LED1≈ALED1≈LED2≈ALED2 to the same
+    // large negative value, so led_aled = LED − ALED ≈ 0.  Responds in one sample; no EMA warmup required.
     const bool disconnected =
         led1 < 0 && aled1 < 0 && led2 < 0 && aled2 < 0 &&
-        fabsf(s1) < rsqm_disconn_sub_mean &&
-        fabsf(s2) < rsqm_disconn_sub_mean;
+        fabsf((float)led1_aled1) < rsqm_disconn_sub_mean &&
+        fabsf((float)led2_aled2) < rsqm_disconn_sub_mean;
 
     if (disconnected) {
         _set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
-        // Optical transmittance — uses instantaneous LED_Sub values (s1/s2).
+        // Optical transmittance — uses instantaneous led1_aled1/led2_aled2 values.
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
         const float rf1 = tia_rf_ohm[(int)_afe_tia_gain_led1];
         const float rg1 = _afe_stage2_en1 ? stg2_rg_linear[(int)_afe_stage2_gain_led1] : 1.0f;
@@ -1066,10 +1063,10 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         // (NaN avoided: IEEE 754 NaN fails > comparisons silently, sentinel always passes)
         const float optical_transmittance_led1 = (led1 >= rsqm_adc_positive_sat)
                                                     ? rsqm_ot_saturated
-                                                    : s1 / (_afe_led1_current_mA * rf1 * rg1);
+                                                    : (float)led1_aled1 / (_afe_led1_current_mA * rf1 * rg1);
         const float optical_transmittance_led2 = (led2 >= rsqm_adc_positive_sat)
                                                     ? rsqm_ot_saturated
-                                                    : s2 / (_afe_led2_current_mA * rf2 * rg2);
+                                                    : (float)led2_aled2 / (_afe_led2_current_mA * rf2 * rg2);
 
         // OR logic: one saturated channel is enough to flag NOT_APPLIED.
         // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.
@@ -1088,8 +1085,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
     // Both channels required: SpO2 needs IR and RED simultaneously
     if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
-        (sqrtf(_rsqm_led1_sub.ema_var) < rsqm_signal_weak_std ||
-         sqrtf(_rsqm_led2_sub.ema_var) < rsqm_signal_weak_std))
+        (sqrtf(_rsqm_led1_aled1.ema_var) < rsqm_signal_weak_std ||
+         sqrtf(_rsqm_led2_aled2.ema_var) < rsqm_signal_weak_std))
         diag |= RSQM_SIGNAL_WEAK;
 
     // RSQM_HW_SETTLING: set externally by HGAC or config change; counts down to 0
