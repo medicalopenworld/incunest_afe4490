@@ -197,8 +197,8 @@ namespace {
         0x000400UL    // GAIN_12DB:  STG2=4
     };
     // Physical Stage 2 linear gains indexed by AFE4490Stage2Gain
-    // 0 dB=×1, 3.5 dB≈×1.496, 6 dB=×2, 9.5 dB≈×2.985, 12 dB≈×3.981
-    constexpr float stg2_rg_linear[5] = { 1.0f, 1.496f, 2.0f, 2.985f, 3.981f };
+    // Exact RG/Ri ratios from datasheet Table 1 (Ri=100 kΩ): RG=100/150/200/300/400 kΩ → ×1/1.5/2/3/4
+    constexpr float stg2_rg_linear[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
 }
 
 // ── Static member ─────────────────────────────────────────────────────────────
