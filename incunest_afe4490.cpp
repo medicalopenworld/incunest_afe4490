@@ -70,10 +70,11 @@ namespace {
     // Reference: AFE4490 datasheet Fig. 135 ("AGC Loop"), §9.2.2.
     // TIA differential output range = ±1.0 V; ADC full-scale = ±1.2 V (22-bit).
     // To recover V_TIA_diff from an ADC reading at any Stage 2 gain and AMBDAC setting:
-    //   tia_volt = (adc_value * 1.2f / 2097152.0f) / rg_gain + ambdac_val * 0.2f
+    //   tia_volt = (adc_value * 1.2f / 2097151.0f) / rg_gain + ambdac_val * 0.2f
     // where rg_gain is the linear Stage 2 gain (1/1.5/2/3/4), ambdac_val is AMBDAC[3:0]
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
-    // When STAGE2EN = 0 (Stage 2 bypassed): tia_volt = adc_value * 1.2f / 2097152.0f.
+    // 2097151 = 2^21-1: per datasheet Table 7, positive full-scale code maps to +1.2 V.
+    // When STAGE2EN = 0 (Stage 2 bypassed): tia_volt = adc_value * 1.2f / 2097151.0f.
     static constexpr float hgac_tia_sat_volt   = 1.0f;  // V — TIA diff full scale (hard limit; §9.2.2, Fig. 135)
     static constexpr float hgac_tia_thr_volt   = 0.9f;  // V — TIA threshold: reduce LEDmA/RF before reaching saturation
     static constexpr float hgac_tia_ideal_volt = 0.6f;  // V — Ideal Operating Point (Fig. 135)
