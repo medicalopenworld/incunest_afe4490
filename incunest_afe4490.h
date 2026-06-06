@@ -155,12 +155,132 @@ enum class AFE4490TIACF {
 };
 
 enum class AFE4490Stage2Gain {
-    GAIN_0DB,    // 0 dB (×1, unity gain) — Stage 2 active; disable via setEnStage2GainLED1/2(false)
-    GAIN_3_5DB,
-    GAIN_6DB,
-    GAIN_9_5DB,
-    GAIN_12DB
+    GAIN_0DB,    // 0 dB   — ×1   — RG=100 kΩ  (Ri=100 kΩ fixed, datasheet Table 1)
+    GAIN_3_5DB,  // 3.5 dB — ×1.5 — RG=150 kΩ
+    GAIN_6DB,    // 6 dB   — ×2   — RG=200 kΩ
+    GAIN_9_5DB,  // 9.5 dB — ×3   — RG=300 kΩ
+    GAIN_12DB    // 12 dB  — ×4   — RG=400 kΩ
 };
+
+// ── Physical parameter tables (indexed by enum cast to int) ──────────────────
+// Single source of truth for AFE4490 physical values.
+// Do NOT duplicate these in application code — include this header and index by enum.
+// Usage: float rf_ohm = kAFE_RF_OHM[(int)cfg.afe_tia_gain_led1];
+
+// AFE4490TIAGain → TIA feedback resistance [Ω]
+constexpr float kAFE_RF_OHM[7] = {
+    10e3f,   // RF_10K
+    25e3f,   // RF_25K
+    50e3f,   // RF_50K
+   100e3f,   // RF_100K
+   250e3f,   // RF_250K
+   500e3f,   // RF_500K
+     1e6f    // RF_1M
+};
+
+// AFE4490TIACF → TIA feedback capacitance [pF]
+constexpr float kAFE_CF_PF[6] = {
+     5.0f,   // CF_5P
+    10.0f,   // CF_10P
+    20.0f,   // CF_20P
+    30.0f,   // CF_30P
+    55.0f,   // CF_55P
+   155.0f    // CF_155P
+};
+
+// AFE4490Stage2Gain → Stage 2 feedback resistance RG [Ω]
+constexpr float kAFE_STG2_RG_OHM[5] = {
+   100e3f,   // GAIN_0DB   (×1)
+   150e3f,   // GAIN_3_5DB (×1.5)
+   200e3f,   // GAIN_6DB   (×2)
+   300e3f,   // GAIN_9_5DB (×3)
+   400e3f    // GAIN_12DB  (×4)
+};
+
+// AFE4490Stage2Gain → linear voltage gain [dimensionless] = RG / Ri
+constexpr float kAFE_STG2_LINEAR[5] = {
+    1.0f,    // GAIN_0DB
+    1.5f,    // GAIN_3_5DB
+    2.0f,    // GAIN_6DB
+    3.0f,    // GAIN_9_5DB
+    4.0f     // GAIN_12DB
+};
+
+// Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
+constexpr float kAFE_STG2_RI_OHM = 100e3f;
+
+// ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────
+// These functions convert between the enum values and the abbreviated string labels
+// used in the $CFG serial frame and $SET command protocol.
+// String labels: RF → "10K"/"25K"/"50K"/"100K"/"250K"/"500K"/"1M"
+//                CF → "5p"/"10p"/"20p"/"30p"/"55p"/"155p"
+//                STG2 → "0dB"/"3.5dB"/"6dB"/"9.5dB"/"12dB"
+
+inline const char* afeRFToStr(AFE4490TIAGain g) {
+    switch (g) {
+        case AFE4490TIAGain::RF_10K:  return "10K";
+        case AFE4490TIAGain::RF_25K:  return "25K";
+        case AFE4490TIAGain::RF_50K:  return "50K";
+        case AFE4490TIAGain::RF_100K: return "100K";
+        case AFE4490TIAGain::RF_250K: return "250K";
+        case AFE4490TIAGain::RF_500K: return "500K";
+        case AFE4490TIAGain::RF_1M:   return "1M";
+        default:                      return "?";
+    }
+}
+
+inline bool afeStrToRF(const char* s, AFE4490TIAGain& out) {
+    if      (strcmp(s, "10K")  == 0) { out = AFE4490TIAGain::RF_10K;  return true; }
+    else if (strcmp(s, "25K")  == 0) { out = AFE4490TIAGain::RF_25K;  return true; }
+    else if (strcmp(s, "50K")  == 0) { out = AFE4490TIAGain::RF_50K;  return true; }
+    else if (strcmp(s, "100K") == 0) { out = AFE4490TIAGain::RF_100K; return true; }
+    else if (strcmp(s, "250K") == 0) { out = AFE4490TIAGain::RF_250K; return true; }
+    else if (strcmp(s, "500K") == 0) { out = AFE4490TIAGain::RF_500K; return true; }
+    else if (strcmp(s, "1M")   == 0) { out = AFE4490TIAGain::RF_1M;   return true; }
+    return false;
+}
+
+inline const char* afeCFToStr(AFE4490TIACF cf) {
+    switch (cf) {
+        case AFE4490TIACF::CF_5P:   return "5p";
+        case AFE4490TIACF::CF_10P:  return "10p";
+        case AFE4490TIACF::CF_20P:  return "20p";
+        case AFE4490TIACF::CF_30P:  return "30p";
+        case AFE4490TIACF::CF_55P:  return "55p";
+        case AFE4490TIACF::CF_155P: return "155p";
+        default:                    return "?";
+    }
+}
+
+inline bool afeStrToCF(const char* s, AFE4490TIACF& out) {
+    if      (strcmp(s, "5p")   == 0) { out = AFE4490TIACF::CF_5P;   return true; }
+    else if (strcmp(s, "10p")  == 0) { out = AFE4490TIACF::CF_10P;  return true; }
+    else if (strcmp(s, "20p")  == 0) { out = AFE4490TIACF::CF_20P;  return true; }
+    else if (strcmp(s, "30p")  == 0) { out = AFE4490TIACF::CF_30P;  return true; }
+    else if (strcmp(s, "55p")  == 0) { out = AFE4490TIACF::CF_55P;  return true; }
+    else if (strcmp(s, "155p") == 0) { out = AFE4490TIACF::CF_155P; return true; }
+    return false;
+}
+
+inline const char* afeStg2ToStr(AFE4490Stage2Gain g) {
+    switch (g) {
+        case AFE4490Stage2Gain::GAIN_0DB:   return "0dB";
+        case AFE4490Stage2Gain::GAIN_3_5DB: return "3.5dB";
+        case AFE4490Stage2Gain::GAIN_6DB:   return "6dB";
+        case AFE4490Stage2Gain::GAIN_9_5DB: return "9.5dB";
+        case AFE4490Stage2Gain::GAIN_12DB:  return "12dB";
+        default:                            return "?";
+    }
+}
+
+inline bool afeStrToStg2(const char* s, AFE4490Stage2Gain& out) {
+    if      (strcmp(s, "0dB")   == 0) { out = AFE4490Stage2Gain::GAIN_0DB;   return true; }
+    else if (strcmp(s, "3.5dB") == 0) { out = AFE4490Stage2Gain::GAIN_3_5DB; return true; }
+    else if (strcmp(s, "6dB")   == 0) { out = AFE4490Stage2Gain::GAIN_6DB;   return true; }
+    else if (strcmp(s, "9.5dB") == 0) { out = AFE4490Stage2Gain::GAIN_9_5DB; return true; }
+    else if (strcmp(s, "12dB")  == 0) { out = AFE4490Stage2Gain::GAIN_12DB;  return true; }
+    return false;
+}
 
 // ── Timing registers snapshot ─────────────────────────────────────────────────
 // Returned by getTimingConfig(). Raw register values (counts, AFECLK = 4 MHz → 1 count = 0.25 µs).

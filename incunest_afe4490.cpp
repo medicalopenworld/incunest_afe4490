@@ -173,16 +173,14 @@ namespace {
     constexpr uint32_t afeclk = 4000000UL;  // 4 MHz → 1 count = 0.25 µs
 
     // TIAGAIN / TIA_AMB_GAIN: RF bits [2:0]
-    // enum order: RF_10K=0..RF_1M=6 → register codes
+    // enum order: RF_10K=0..RF_1M=6 → register codes (non-monotonic — see datasheet Table 17)
     constexpr uint32_t rf_code[7] = { 5, 4, 3, 2, 1, 0, 6 };
-    // Physical RF values (Ω) indexed by AFE4490TIAGain
-    constexpr float tia_rf_ohm[7] = { 10e3f, 25e3f, 50e3f, 100e3f, 250e3f, 500e3f, 1e6f };
+    // Physical RF values: use kAFE_RF_OHM[] from header (single source of truth)
 
     // TIAGAIN / TIA_AMB_GAIN: CF bits [7:3] (5 pF base + parallel caps)
     // enum order: CF_5P=0..CF_155P=5 → register bits
     constexpr uint32_t cf_code[6] = { 0x000, 0x008, 0x010, 0x020, 0x040, 0x080 };
-    // Physical CF values (pF) indexed by AFE4490TIACF
-    constexpr float tia_cf_pF[6]  = { 5.0f, 10.0f, 20.0f, 30.0f, 55.0f, 155.0f };
+    // Physical CF values: use kAFE_CF_PF[] from header (single source of truth)
 
     // Auto-CF settling parameters
     constexpr float    tia_settle_fraction = 0.10f;  // 10% of LED-on window reserved for TIA settling
@@ -197,9 +195,7 @@ namespace {
         0x000300UL,   // GAIN_9_5DB: STG2=3
         0x000400UL    // GAIN_12DB:  STG2=4
     };
-    // Physical Stage 2 linear gains indexed by AFE4490Stage2Gain
-    // Exact RG/Ri ratios from datasheet Table 1 (Ri=100 kΩ): RG=100/150/200/300/400 kΩ → ×1/1.5/2/3/4
-    constexpr float stg2_rg_linear[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
+    // Physical Stage 2 gains: use kAFE_STG2_LINEAR[] / kAFE_STG2_RG_OHM[] from header (single source of truth)
 }
 
 // ── Static member ─────────────────────────────────────────────────────────────
@@ -1050,10 +1046,10 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     } else {
         // Optical transmittance — uses instantaneous led1_sub/led2_sub values.
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
-        const float rf1 = tia_rf_ohm[(int)_afe_tia_gain_led1];
-        const float rg1 = _afe_stage2_en1 ? stg2_rg_linear[(int)_afe_stage2_gain_led1] : 1.0f;
-        const float rf2 = tia_rf_ohm[(int)_afe_tia_gain_led2];
-        const float rg2 = _afe_stage2_en2 ? stg2_rg_linear[(int)_afe_stage2_gain_led2] : 1.0f;
+        const float rf1 = kAFE_RF_OHM[(int)_afe_tia_gain_led1];
+        const float rg1 = _afe_stage2_en1 ? kAFE_STG2_LINEAR[(int)_afe_stage2_gain_led1] : 1.0f;
+        const float rf2 = kAFE_RF_OHM[(int)_afe_tia_gain_led2];
+        const float rg2 = _afe_stage2_en2 ? kAFE_STG2_LINEAR[(int)_afe_stage2_gain_led2] : 1.0f;
 
         // Optical transmittance for each channel (dimensionless):
         //   ot = LED_Sub / (LED_mA × RF_Ω × RG_linear)
@@ -1336,10 +1332,10 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led1() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF_LED1)
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
-    float cf_max_pF = (tau_max / tia_rf_ohm[(int)_afe_tia_gain_led1]) * 1e12f;
+    float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_gain_led1]) * 1e12f;
     _afe_tia_cf_led1 = AFE4490TIACF::CF_5P;
     for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
-        if (tia_cf_pF[i] <= cf_max_pF) { _afe_tia_cf_led1 = (AFE4490TIACF)i; break; }
+        if (kAFE_CF_PF[i] <= cf_max_pF) { _afe_tia_cf_led1 = (AFE4490TIACF)i; break; }
     }
 }
 
@@ -1347,10 +1343,10 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF_LED2)
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
-    float cf_max_pF = (tau_max / tia_rf_ohm[(int)_afe_tia_gain_led2]) * 1e12f;
+    float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_gain_led2]) * 1e12f;
     _afe_tia_cf_led2 = AFE4490TIACF::CF_5P;
     for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
-        if (tia_cf_pF[i] <= cf_max_pF) { _afe_tia_cf_led2 = (AFE4490TIACF)i; break; }
+        if (kAFE_CF_PF[i] <= cf_max_pF) { _afe_tia_cf_led2 = (AFE4490TIACF)i; break; }
     }
 }
 
