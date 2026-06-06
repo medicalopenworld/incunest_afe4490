@@ -189,11 +189,11 @@ namespace {
 
     // TIAGAIN: STG2GAIN bits D[10:8] only — STAGE2EN (D14) is set separately via _afe_stg2_en_led1/2
     constexpr uint32_t stg2_gain_code[5] = {
-        0x000000UL,   // GAIN_0DB:   STG2=0
-        0x000100UL,   // GAIN_3_5DB: STG2=1
-        0x000200UL,   // GAIN_6DB:   STG2=2
-        0x000300UL,   // GAIN_9_5DB: STG2=3
-        0x000400UL    // GAIN_12DB:  STG2=4
+        0x000000UL,   // RG_100K:   STG2=0
+        0x000100UL,   // RG_150K: STG2=1
+        0x000200UL,   // RG_200K:   STG2=2
+        0x000300UL,   // RG_300K: STG2=3
+        0x000400UL    // RG_400K:  STG2=4
     };
     // Physical Stage 2 gains: use kAFE_STG2_LINEAR[] / kAFE_STG2_RG_OHM[] from header (single source of truth)
 }
@@ -226,13 +226,13 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_sample_rate_hz(500), _afe_adc_averages(8),
       _afe_led1_current_mA(20.0f), _afe_led2_current_mA(20.0f), _afe_led_range_mA(150),
       _afe_sep_tia_en(true),
-      _afe_tia_rf_led1(AFE4490TIAGain::RF_100K),
+      _afe_tia_rf_led1(AFE4490RF::RF_100K),
       _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
-      _afe_stg2_rg_led1(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_stg2_rg_led1(AFE4490RG::RG_100K),
       _afe_stg2_en_led1(true),
-      _afe_tia_rf_led2(AFE4490TIAGain::RF_100K),
+      _afe_tia_rf_led2(AFE4490RF::RF_100K),
       _afe_tia_cf_led2(AFE4490TIACF::CF_5P),
-      _afe_stg2_rg_led2(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_stg2_rg_led2(AFE4490RG::RG_100K),
       _afe_stg2_en_led2(true),
       _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1_SUB),
@@ -479,7 +479,7 @@ void INCUNEST_AFE4490::setLEDRange(uint8_t mA) {
 }
 
 // Joint setters — apply the same value to both LED1 and LED2 channels
-void INCUNEST_AFE4490::setTIAGain(AFE4490TIAGain gain) {
+void INCUNEST_AFE4490::setTIAGain(AFE4490RF gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
@@ -507,7 +507,7 @@ void INCUNEST_AFE4490::setTIACF(AFE4490TIACF cf) {
 #endif
 }
 
-void INCUNEST_AFE4490::setStage2Gain(AFE4490Stage2Gain gain) {
+void INCUNEST_AFE4490::setStage2Gain(AFE4490RG gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
@@ -535,7 +535,7 @@ void INCUNEST_AFE4490::setEnSepGain(bool enable) {
 }
 
 // Per-channel setters — LED1 (IR)
-void INCUNEST_AFE4490::setTIAGainLED1(AFE4490TIAGain gain) {
+void INCUNEST_AFE4490::setTIAGainLED1(AFE4490RF gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
@@ -562,7 +562,7 @@ void INCUNEST_AFE4490::setTIACFLED1(AFE4490TIACF cf) {
 #endif
 }
 
-void INCUNEST_AFE4490::setStage2GainLED1(AFE4490Stage2Gain gain) {
+void INCUNEST_AFE4490::setStage2GainLED1(AFE4490RG gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
@@ -576,7 +576,7 @@ void INCUNEST_AFE4490::setStage2GainLED1(AFE4490Stage2Gain gain) {
 }
 
 // Per-channel setters — LED2 (RED)
-void INCUNEST_AFE4490::setTIAGainLED2(AFE4490TIAGain gain) {
+void INCUNEST_AFE4490::setTIAGainLED2(AFE4490RF gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
@@ -603,7 +603,7 @@ void INCUNEST_AFE4490::setTIACFLED2(AFE4490TIACF cf) {
 #endif
 }
 
-void INCUNEST_AFE4490::setStage2GainLED2(AFE4490Stage2Gain gain) {
+void INCUNEST_AFE4490::setStage2GainLED2(AFE4490RG gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif

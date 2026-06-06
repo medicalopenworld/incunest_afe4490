@@ -135,7 +135,7 @@ enum class AFE4490Filter {
     BUTTERWORTH  // default: 0.5–20 Hz Butterworth bandpass
 };
 
-enum class AFE4490TIAGain {
+enum class AFE4490RF {
     RF_10K,
     RF_25K,
     RF_50K,
@@ -154,12 +154,12 @@ enum class AFE4490TIACF {
     CF_155P
 };
 
-enum class AFE4490Stage2Gain {
-    GAIN_0DB,    // 0 dB   — ×1   — RG=100 kΩ  (Ri=100 kΩ fixed, datasheet Table 1)
-    GAIN_3_5DB,  // 3.5 dB — ×1.5 — RG=150 kΩ
-    GAIN_6DB,    // 6 dB   — ×2   — RG=200 kΩ
-    GAIN_9_5DB,  // 9.5 dB — ×3   — RG=300 kΩ
-    GAIN_12DB    // 12 dB  — ×4   — RG=400 kΩ
+enum class AFE4490RG {
+    RG_100K,    // 0 dB   — ×1   — RG=100 kΩ  (Ri=100 kΩ fixed, datasheet Table 1)
+    RG_150K,  // 3.5 dB — ×1.5 — RG=150 kΩ
+    RG_200K,    // 6 dB   — ×2   — RG=200 kΩ
+    RG_300K,  // 9.5 dB — ×3   — RG=300 kΩ
+    RG_400K    // 12 dB  — ×4   — RG=400 kΩ
 };
 
 // ── Physical parameter tables (indexed by enum cast to int) ──────────────────
@@ -167,7 +167,7 @@ enum class AFE4490Stage2Gain {
 // Do NOT duplicate these in application code — include this header and index by enum.
 // Usage: float rf_ohm = kAFE_RF_OHM[(int)cfg.afe_tia_rf_led1];
 
-// AFE4490TIAGain → TIA feedback resistance [Ω]
+// AFE4490RF → TIA feedback resistance [Ω]
 constexpr float kAFE_RF_OHM[7] = {
     10e3f,   // RF_10K
     25e3f,   // RF_25K
@@ -188,22 +188,22 @@ constexpr float kAFE_CF_PF[6] = {
    155.0f    // CF_155P
 };
 
-// AFE4490Stage2Gain → Stage 2 feedback resistance RG [Ω]
+// AFE4490RG → Stage 2 feedback resistance RG [Ω]
 constexpr float kAFE_STG2_RG_OHM[5] = {
-   100e3f,   // GAIN_0DB   (×1)
-   150e3f,   // GAIN_3_5DB (×1.5)
-   200e3f,   // GAIN_6DB   (×2)
-   300e3f,   // GAIN_9_5DB (×3)
-   400e3f    // GAIN_12DB  (×4)
+   100e3f,   // RG_100K   (×1)
+   150e3f,   // RG_150K (×1.5)
+   200e3f,   // RG_200K   (×2)
+   300e3f,   // RG_300K (×3)
+   400e3f    // RG_400K  (×4)
 };
 
-// AFE4490Stage2Gain → linear voltage gain [dimensionless] = RG / Ri
+// AFE4490RG → linear voltage gain [dimensionless] = RG / Ri
 constexpr float kAFE_STG2_LINEAR[5] = {
-    1.0f,    // GAIN_0DB
-    1.5f,    // GAIN_3_5DB
-    2.0f,    // GAIN_6DB
-    3.0f,    // GAIN_9_5DB
-    4.0f     // GAIN_12DB
+    1.0f,    // RG_100K
+    1.5f,    // RG_150K
+    2.0f,    // RG_200K
+    3.0f,    // RG_300K
+    4.0f     // RG_400K
 };
 
 // Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
@@ -216,27 +216,27 @@ constexpr float kAFE_STG2_RI_OHM = 100e3f;
 //                CF → "5p"/"10p"/"20p"/"30p"/"55p"/"155p"
 //                STG2 → "0dB"/"3.5dB"/"6dB"/"9.5dB"/"12dB"
 
-inline const char* afeRFToStr(AFE4490TIAGain g) {
+inline const char* afeRFToStr(AFE4490RF g) {
     switch (g) {
-        case AFE4490TIAGain::RF_10K:  return "10K";
-        case AFE4490TIAGain::RF_25K:  return "25K";
-        case AFE4490TIAGain::RF_50K:  return "50K";
-        case AFE4490TIAGain::RF_100K: return "100K";
-        case AFE4490TIAGain::RF_250K: return "250K";
-        case AFE4490TIAGain::RF_500K: return "500K";
-        case AFE4490TIAGain::RF_1M:   return "1M";
+        case AFE4490RF::RF_10K:  return "10K";
+        case AFE4490RF::RF_25K:  return "25K";
+        case AFE4490RF::RF_50K:  return "50K";
+        case AFE4490RF::RF_100K: return "100K";
+        case AFE4490RF::RF_250K: return "250K";
+        case AFE4490RF::RF_500K: return "500K";
+        case AFE4490RF::RF_1M:   return "1M";
         default:                      return "?";
     }
 }
 
-inline bool afeStrToRF(const char* s, AFE4490TIAGain& out) {
-    if      (strcmp(s, "10K")  == 0) { out = AFE4490TIAGain::RF_10K;  return true; }
-    else if (strcmp(s, "25K")  == 0) { out = AFE4490TIAGain::RF_25K;  return true; }
-    else if (strcmp(s, "50K")  == 0) { out = AFE4490TIAGain::RF_50K;  return true; }
-    else if (strcmp(s, "100K") == 0) { out = AFE4490TIAGain::RF_100K; return true; }
-    else if (strcmp(s, "250K") == 0) { out = AFE4490TIAGain::RF_250K; return true; }
-    else if (strcmp(s, "500K") == 0) { out = AFE4490TIAGain::RF_500K; return true; }
-    else if (strcmp(s, "1M")   == 0) { out = AFE4490TIAGain::RF_1M;   return true; }
+inline bool afeStrToRF(const char* s, AFE4490RF& out) {
+    if      (strcmp(s, "10K")  == 0) { out = AFE4490RF::RF_10K;  return true; }
+    else if (strcmp(s, "25K")  == 0) { out = AFE4490RF::RF_25K;  return true; }
+    else if (strcmp(s, "50K")  == 0) { out = AFE4490RF::RF_50K;  return true; }
+    else if (strcmp(s, "100K") == 0) { out = AFE4490RF::RF_100K; return true; }
+    else if (strcmp(s, "250K") == 0) { out = AFE4490RF::RF_250K; return true; }
+    else if (strcmp(s, "500K") == 0) { out = AFE4490RF::RF_500K; return true; }
+    else if (strcmp(s, "1M")   == 0) { out = AFE4490RF::RF_1M;   return true; }
     return false;
 }
 
@@ -262,23 +262,23 @@ inline bool afeStrToCF(const char* s, AFE4490TIACF& out) {
     return false;
 }
 
-inline const char* afeStg2ToStr(AFE4490Stage2Gain g) {
+inline const char* afeRGToStr(AFE4490RG g) {
     switch (g) {
-        case AFE4490Stage2Gain::GAIN_0DB:   return "0dB";
-        case AFE4490Stage2Gain::GAIN_3_5DB: return "3.5dB";
-        case AFE4490Stage2Gain::GAIN_6DB:   return "6dB";
-        case AFE4490Stage2Gain::GAIN_9_5DB: return "9.5dB";
-        case AFE4490Stage2Gain::GAIN_12DB:  return "12dB";
+        case AFE4490RG::RG_100K:   return "0dB";
+        case AFE4490RG::RG_150K: return "3.5dB";
+        case AFE4490RG::RG_200K:   return "6dB";
+        case AFE4490RG::RG_300K: return "9.5dB";
+        case AFE4490RG::RG_400K:  return "12dB";
         default:                            return "?";
     }
 }
 
-inline bool afeStrToStg2(const char* s, AFE4490Stage2Gain& out) {
-    if      (strcmp(s, "0dB")   == 0) { out = AFE4490Stage2Gain::GAIN_0DB;   return true; }
-    else if (strcmp(s, "3.5dB") == 0) { out = AFE4490Stage2Gain::GAIN_3_5DB; return true; }
-    else if (strcmp(s, "6dB")   == 0) { out = AFE4490Stage2Gain::GAIN_6DB;   return true; }
-    else if (strcmp(s, "9.5dB") == 0) { out = AFE4490Stage2Gain::GAIN_9_5DB; return true; }
-    else if (strcmp(s, "12dB")  == 0) { out = AFE4490Stage2Gain::GAIN_12DB;  return true; }
+inline bool afeStrToRG(const char* s, AFE4490RG& out) {
+    if      (strcmp(s, "0dB")   == 0) { out = AFE4490RG::RG_100K;   return true; }
+    else if (strcmp(s, "3.5dB") == 0) { out = AFE4490RG::RG_150K; return true; }
+    else if (strcmp(s, "6dB")   == 0) { out = AFE4490RG::RG_200K;   return true; }
+    else if (strcmp(s, "9.5dB") == 0) { out = AFE4490RG::RG_300K; return true; }
+    else if (strcmp(s, "12dB")  == 0) { out = AFE4490RG::RG_400K;  return true; }
     return false;
 }
 
@@ -314,13 +314,13 @@ struct AFE4490Config {
     // When afe_sep_tia_en=false: hardware uses LED2 fields for both channels (TIAGAIN LED1 fields ignored by chip)
     // When afe_sep_tia_en=true:  TIAGAIN register controls LED1 (IR); TIA_AMB_GAIN controls LED2 (RED)
     bool              afe_sep_tia_en;         // ENSEPGAIN bit D15 in TIAGAIN register
-    AFE4490TIAGain    afe_tia_rf_led1;     // RF for LED1 (IR)  — active when afe_sep_tia_en=true
+    AFE4490RF    afe_tia_rf_led1;     // RF for LED1 (IR)  — active when afe_sep_tia_en=true
     AFE4490TIACF      afe_tia_cf_led1;       // CF for LED1 (IR)  — active when afe_sep_tia_en=true
-    AFE4490Stage2Gain afe_stg2_rg_led1;  // Stage 2 STG2GAIN1 for LED1 (IR) — gain only, no enable
+    AFE4490RG afe_stg2_rg_led1;  // Stage 2 STG2GAIN1 for LED1 (IR) — gain only, no enable
     bool              afe_stg2_en_led1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit Stage 2 enable for LED1
-    AFE4490TIAGain    afe_tia_rf_led2;     // RF for LED2 (RED) — always active (both channels when ENSEPGAIN=0)
+    AFE4490RF    afe_tia_rf_led2;     // RF for LED2 (RED) — always active (both channels when ENSEPGAIN=0)
     AFE4490TIACF      afe_tia_cf_led2;       // CF for LED2 (RED) — always active
-    AFE4490Stage2Gain afe_stg2_rg_led2;  // Stage 2 STG2GAIN2 for LED2 (RED) — gain only, no enable
+    AFE4490RG afe_stg2_rg_led2;  // Stage 2 STG2GAIN2 for LED2 (RED) — gain only, no enable
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
@@ -377,19 +377,19 @@ public:
     void setLED2Current(float mA);
     void setLEDRange(uint8_t mA);           // 75 or 150 mA
     // Joint setters — apply the same value to both LED1 and LED2 channels; also sets ENSEPGAIN=0
-    void setTIAGain(AFE4490TIAGain gain);   // sets afe_tia_rf_led1 = afe_tia_rf_led2 = gain
+    void setTIAGain(AFE4490RF gain);   // sets afe_tia_rf_led1 = afe_tia_rf_led2 = gain
     void setTIACF(AFE4490TIACF cf);         // sets afe_tia_cf_led1 = afe_tia_cf_led2 = cf
-    void setStage2Gain(AFE4490Stage2Gain gain); // sets afe_stg2_rg_led1 = afe_stg2_rg_led2 = gain
+    void setStage2Gain(AFE4490RG gain); // sets afe_stg2_rg_led1 = afe_stg2_rg_led2 = gain
     // Separate gain mode — enable independent LED1/LED2 TIA settings (ENSEPGAIN bit D15 in TIAGAIN)
     void setEnSepGain(bool enable);
     // Per-channel setters — only meaningful when ENSEPGAIN=1 (setEnSepGain(true))
-    void setTIAGainLED1(AFE4490TIAGain gain);   // RF for LED1 (IR)  — writes TIAGAIN RF_LED1[2:0]
+    void setTIAGainLED1(AFE4490RF gain);   // RF for LED1 (IR)  — writes TIAGAIN RF_LED1[2:0]
     void setTIACFLED1(AFE4490TIACF cf);         // CF for LED1 (IR)  — writes TIAGAIN CF_LED1[4:0]
-    void setStage2GainLED1(AFE4490Stage2Gain gain); // STG2GAIN1[2:0] for LED1 (IR) — gain only, does not touch STAGE2EN1
+    void setStage2GainLED1(AFE4490RG gain); // STG2GAIN1[2:0] for LED1 (IR) — gain only, does not touch STAGE2EN1
     void setStage2En1(bool en);             // STAGE2EN1 (D14 of TIAGAIN) — explicit Stage 2 enable for LED1
-    void setTIAGainLED2(AFE4490TIAGain gain);   // RF for LED2 (RED) — writes TIA_AMB_GAIN RF_LED2[2:0]
+    void setTIAGainLED2(AFE4490RF gain);   // RF for LED2 (RED) — writes TIA_AMB_GAIN RF_LED2[2:0]
     void setTIACFLED2(AFE4490TIACF cf);         // CF for LED2 (RED) — writes TIA_AMB_GAIN CF_LED2[4:0]
-    void setStage2GainLED2(AFE4490Stage2Gain gain); // STG2GAIN2[2:0] for LED2 (RED) — gain only, does not touch STAGE2EN2
+    void setStage2GainLED2(AFE4490RG gain); // STG2GAIN2[2:0] for LED2 (RED) — gain only, does not touch STAGE2EN2
     void setStage2En2(bool en);             // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
 
@@ -678,13 +678,13 @@ private:
     // When false: chip uses LED2 fields for both channels; LED1 fields written but ignored by hardware
     // When true:  TIAGAIN→LED1(IR), TIA_AMB_GAIN→LED2(RED)
     bool              _afe_sep_tia_en;
-    AFE4490TIAGain    _afe_tia_rf_led1;    // RF_LED1 in TIAGAIN
+    AFE4490RF    _afe_tia_rf_led1;    // RF_LED1 in TIAGAIN
     AFE4490TIACF      _afe_tia_cf_led1;      // CF_LED1 in TIAGAIN
-    AFE4490Stage2Gain _afe_stg2_rg_led1; // STG2GAIN1[2:0] in TIAGAIN D[10:8]
+    AFE4490RG _afe_stg2_rg_led1; // STG2GAIN1[2:0] in TIAGAIN D[10:8]
     bool              _afe_stg2_en_led1;       // STAGE2EN1 (D14 of TIAGAIN)
-    AFE4490TIAGain    _afe_tia_rf_led2;    // RF_LED2 in TIA_AMB_GAIN
+    AFE4490RF    _afe_tia_rf_led2;    // RF_LED2 in TIA_AMB_GAIN
     AFE4490TIACF      _afe_tia_cf_led2;      // CF_LED2 in TIA_AMB_GAIN
-    AFE4490Stage2Gain _afe_stg2_rg_led2; // STG2GAIN2[2:0] in TIA_AMB_GAIN D[10:8]
+    AFE4490RG _afe_stg2_rg_led2; // STG2GAIN2[2:0] in TIA_AMB_GAIN D[10:8]
     bool              _afe_stg2_en_led2;       // STAGE2EN2 (D14 of TIA_AMB_GAIN); also forced ON when _afe_ambdac_uA > 0
     uint8_t           _afe_ambdac_uA;        // AMBDAC[3:0] value (0–10), written to TIA_AMB_GAIN D19:D16
 
