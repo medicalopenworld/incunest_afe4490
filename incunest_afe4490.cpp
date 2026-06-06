@@ -1419,14 +1419,21 @@ void INCUNEST_AFE4490::_task_body() {
         uint64_t _t_cycle = esp_timer_get_time();
 #endif
         xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-        // Enable SPI read mode once, burst-read all 6 channels, disable
+        // Enable SPI read mode once, burst-read the 4 raw channels, disable.
+        // REG_LED2_ALED2VAL and REG_LED1_ALED1VAL (hardware-subtracted registers) are
+        // intentionally NOT read: the chip performs the subtraction in 22-bit arithmetic,
+        // which overflows when led and aled values have opposite signs near the rail.
+        // The software subtraction below uses int32_t (32-bit), eliminating the overflow.
+        // Removed reads (kept for reference):
+        //   int32_t led2_diff = _sign_extend_22(_read_spi_raw(REG_LED2_ALED2VAL));  // 22-bit overflow risk
+        //   int32_t led1_diff = _sign_extend_22(_read_spi_raw(REG_LED1_ALED1VAL));  // 22-bit overflow risk
         _write_reg(REG_CONTROL0, ctrl0_spi_read);
         int32_t led2      = _sign_extend_22(_read_spi_raw(REG_LED2VAL));
         int32_t aled2     = _sign_extend_22(_read_spi_raw(REG_ALED2VAL));
         int32_t led1      = _sign_extend_22(_read_spi_raw(REG_LED1VAL));
         int32_t aled1     = _sign_extend_22(_read_spi_raw(REG_ALED1VAL));
-        int32_t led2_diff = _sign_extend_22(_read_spi_raw(REG_LED2_ALED2VAL));
-        int32_t led1_diff = _sign_extend_22(_read_spi_raw(REG_LED1_ALED1VAL));
+        int32_t led2_diff = led2 - aled2;  // SW subtraction in int32_t — no overflow
+        int32_t led1_diff = led1 - aled1;  // SW subtraction in int32_t — no overflow
         _write_reg(REG_CONTROL0, 0x000000UL);
         xSemaphoreGive(_spi_mutex);
 

@@ -893,7 +893,7 @@ $TIMING,hr1_mean,hr1_max,hr2_mean,hr2_max,hr3_mean,hr3_max,
 | `hr2_mean/max` | `_update_hr2()` execution time (biquad + autocorr combined) |
 | `hr3_mean/max` | `_update_hr3()` execution time (LP filter + FFT + HPS combined) |
 | `spo2_mean/max` | `_update_spo2()` execution time |
-| `cycle_mean/max` | Full sample cycle: SPI burst-read (6 channels) + `_process_sample()` |
+| `cycle_mean/max` | Full sample cycle: SPI burst-read (4 channels) + SW subtraction + `_process_sample()` |
 
 **Budget:** cycle budget = 2000 µs (1 sample period at 500 Hz).
 - `cycle_max < 1800 µs` → green (safe, 10% margin)
@@ -1328,16 +1328,18 @@ Reference table for HGAC and RSQM algorithm design. Maps AFE4490 datasheet signa
 
 ### 12.2 ADC data registers
 
-| Datasheet name | Register address | `AFE4490Sample` field | Semantic channel |
-|---|---|---|---|
-| **LED2VAL** | `0x2A` | `led2` | RED raw |
-| **ALED2VAL** | `0x2B` | `aled2` | Ambient after LED2 (RED amb) |
-| **LED1VAL** | `0x2C` | `led1` | IR raw |
-| **ALED1VAL** | `0x2D` | `aled1` | Ambient after LED1 (IR amb) |
-| **LED2−ALED2VAL** | `0x2E` | `led2_aled2` | RED ambient-corrected |
-| **LED1−ALED1VAL** | `0x2F` | `led1_aled1` | IR ambient-corrected *(primary PPG/SpO2 signal)* |
+| Datasheet name | Register address | `AFE4490Sample` field | Semantic channel | Read? |
+|---|---|---|---|---|
+| **LED2VAL** | `0x2A` | `led2` | RED raw | Yes |
+| **ALED2VAL** | `0x2B` | `aled2` | Ambient after LED2 (RED amb) | Yes |
+| **LED1VAL** | `0x2C` | `led1` | IR raw | Yes |
+| **ALED1VAL** | `0x2D` | `aled1` | Ambient after LED1 (IR amb) | Yes |
+| **LED2−ALED2VAL** | `0x2E` | — | *(not read — see note below)* | **No** |
+| **LED1−ALED1VAL** | `0x2F` | — | *(not read — see note below)* | **No** |
 
-All 6 values are sign-extended from 22-bit two's complement by `_sign_extend_22()`. Valid range: [−2 097 152, +2 097 151]. Saturation (TIA railing) produces a near-maximum constant value (~2 096 921) across all channels.
+The 4 raw values are sign-extended from 22-bit two's complement by `_sign_extend_22()`. Valid range: [−2 097 152, +2 097 151]. Saturation (TIA railing) produces a near-maximum constant value (~2 096 921) across all channels.
+
+`led2_sub` and `led1_sub` (stored in `AFE4490Data`) are computed in software as `led2 − aled2` and `led1 − aled1` using int32_t arithmetic. The hardware subtraction registers (`0x2E`, `0x2F`) perform the same subtraction internally but in 22-bit arithmetic, which overflows when the operands have opposite signs near the rail (e.g. led1 ≈ +2 097 151, aled1 ≈ −2 097 152 → correct result ≈ +4 194 303 but chip wraps to −1). The software computation is exact for all physically achievable input combinations (max |led − aled| ≈ 4 194 303, well within int32_t range). The hardware registers are therefore permanently unused.
 
 ### 12.3 Hardware probe states
 
