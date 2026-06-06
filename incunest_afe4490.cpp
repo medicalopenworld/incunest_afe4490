@@ -1013,16 +1013,15 @@ void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
     }
 }
 
-// Analog state reconstruction — converts raw ADC codes to physical quantities.
+// Analog state reconstruction — converts raw ADC codes to physical signal-chain quantities.
 // Datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 // Inverted:
 //   V_ADC = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR
-//   V_TIA = (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri   [= I_PD × RF]
-//   I_PD  = V_TIA / RF_ohm
-//   OT    = (I_PD_LED − I_PD_ALED) / I_LED_A
-// When STAGE2EN=0: RG_ohm = kAFE_RI_OHM (unity gain, Eq.2 gives RG=Ri).
+//   V_TIA = (V_ADC / (2 × RG) + I_CANCEL_A) × Ri   [= I_PD × RF]
+//   I_PD  = V_TIA / RF
+// When STAGE2EN=0: RG = Ri = kAFE_RI_OHM (unity gain).
 // ALED channels share the RF and RG of the corresponding LED channel.
-// Saturated sentinel: OT = rsqm_ot_saturated when LED_raw ≥ rsqm_adc_positive_sat.
+// OT is not computed here — it is a RSQM concept, computed in _update_rsqm() from i_pd fields.
 AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     int32_t led1, int32_t led2, int32_t aled1, int32_t aled2) const {
 
@@ -1068,20 +1067,6 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     as.i_pd_aled1 = as.v_tia_aled1 / rf1;
     as.i_pd_aled2 = as.v_tia_aled2 / rf2;
 
-    // ── OT = (I_PD_LED − I_PD_ALED) / I_LED ────────────────────────────────
-    // Optical transmittance: fraction of LED current reaching the photodiode through tissue.
-    // Ambient-subtracted (LED − ALED) isolates the modulated component driven by the LED.
-    // I_LED from LED current register (LEDCNTRL, datasheet p.28): 8-bit DAC, 0–_afe_led_range_mA.
-    // Sentinel rsqm_ot_saturated (100.0) when LED_raw ≥ rsqm_adc_positive_sat: ADC clipped, OT undefined.
-    const float i_led1_A = _afe_led1_current_mA * 1e-3f;
-    const float i_led2_A = _afe_led2_current_mA * 1e-3f;
-    as.ot_led1 = (led1 >= rsqm_adc_positive_sat)
-                     ? rsqm_ot_saturated
-                     : (as.i_pd_led1 - as.i_pd_aled1) / i_led1_A;
-    as.ot_led2 = (led2 >= rsqm_adc_positive_sat)
-                     ? rsqm_ot_saturated
-                     : (as.i_pd_led2 - as.i_pd_aled2) / i_led2_A;
-
     return as;
 }
 
@@ -1116,14 +1101,21 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     if (disconnected) {
         _set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
-        // Optical transmittance — from AFE4490AnalogState (computed by _compute_analog_state()).
+        // Optical transmittance — computed here from i_pd fields (RSQM-specific concept).
         // Physical formula (Eq.2 inversion): OT = (I_PD_LED − I_PD_ALED) / I_LED [A/A, dimensionless]
+        // Ambient-subtracted: isolates the modulated component driven by the LED.
+        // I_LED from LEDCNTRL register (datasheet p.28): 8-bit DAC, range 0–_afe_led_range_mA.
         // APPLIED (finger present): ot ≈ 1.4e-5  (tissue absorbs ~95% of light)
         // NOT_APPLIED (no finger):  ot ≈ 8e-4    (full light reaches photodiode)
-        // When LED_raw ≥ rsqm_adc_positive_sat: sentinel rsqm_ot_saturated (100.0) — always passes threshold.
-        // (NaN avoided: IEEE 754 NaN fails > comparisons silently, sentinel always passes)
-        const float optical_transmittance_led1 = as.ot_led1;
-        const float optical_transmittance_led2 = as.ot_led2;
+        // Sentinel rsqm_ot_saturated (100.0) when LED_raw ≥ rsqm_adc_positive_sat: ADC clipped, OT undefined.
+        const float i_led1_A = _afe_led1_current_mA * 1e-3f;
+        const float i_led2_A = _afe_led2_current_mA * 1e-3f;
+        const float optical_transmittance_led1 = (led1 >= rsqm_adc_positive_sat)
+                                                     ? rsqm_ot_saturated
+                                                     : (as.i_pd_led1 - as.i_pd_aled1) / i_led1_A;
+        const float optical_transmittance_led2 = (led2 >= rsqm_adc_positive_sat)
+                                                     ? rsqm_ot_saturated
+                                                     : (as.i_pd_led2 - as.i_pd_aled2) / i_led2_A;
 
         // OR logic: one saturated channel is enough to flag NOT_APPLIED.
         // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.

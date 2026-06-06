@@ -491,19 +491,16 @@ struct AFE4490AnalogState {
     float v_adc_led1,  v_adc_led2,  v_adc_aled1,  v_adc_aled2;  // V
     float v_tia_led1,  v_tia_led2,  v_tia_aled1,  v_tia_aled2;  // V  (= I_PD × RF)
     float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
-    float ot_led1, ot_led2;  // dimensionless — (I_PD_LED − I_PD_ALED) / I_LED
 };
 ```
 
-### OT sentinel
-
-When `LED_raw ≥ rsqm_adc_positive_sat` (2 096 921): ADC clipped → `ot = rsqm_ot_saturated` (100.0). Sentinel is always above any threshold, preventing false PROBE_APPLIED from a saturated channel.
+OT (optical transmittance) is **not stored in the struct**. It is a RSQM-specific concept — computed inside `_update_rsqm()` from the `i_pd_*` fields (see §5.6.2). Keeping it out of the struct avoids coupling the physical reconstruction layer with RSQM constants (`rsqm_adc_positive_sat`, `rsqm_ot_saturated`).
 
 ### Consumers
 
 | Consumer | Fields used |
 |---|---|
-| `_update_rsqm()` | `ot_led1`, `ot_led2` (probe state detection) |
+| `_update_rsqm()` | `i_pd_*` → computes OT internally (probe state detection) |
 | HGAC *(future)* | `v_tia_*`, `i_pd_*` (saturation zone monitoring) |
 
 ---
@@ -724,7 +721,7 @@ Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_S
 OT = (I_PD_LED − I_PD_ALED) / I_LED     [A/A, dimensionless]
 ```
 
-OT is taken from `AFE4490AnalogState` (computed by `_compute_analog_state()` — see §3c). Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
+OT is computed inside `_update_rsqm()` from the `i_pd_*` fields of `AFE4490AnalogState` (see §3c). Keeping OT here avoids coupling `_compute_analog_state()` to RSQM constants. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
 
 - When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
 - Threshold: `ot1 > 8.5e-5` OR `ot2 > 8.5e-5` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*

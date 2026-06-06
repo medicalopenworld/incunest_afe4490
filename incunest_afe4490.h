@@ -213,21 +213,20 @@ constexpr float kAFE_RI_OHM = 100e3f;
 constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
 constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
 
-/// Analog quantities derived from ADC codes for one sample.
+/// Physical quantities derived from ADC codes for one sample — purely the signal chain.
 /// Computed in _process_sample() before RSQM and HGAC; not stored in AFE4490Data.
 /// Datasheet Eq.2 (p.30):  V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 /// Inversions:
 ///   V_ADC = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR          [V]
 ///   V_TIA = (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri          [V]  (= I_PD × RF)
 ///   I_PD  = V_TIA / RF_ohm                                      [A]
-///   OT    = (I_PD_LED − I_PD_ALED) / I_LED_A                   [dimensionless]
 /// ALED channels use the same RF and RG as the corresponding LED channel.
 /// When STAGE2EN=0: RG_ohm = kAFE_RI_OHM (unity gain).
+/// OT is not stored here — computed by _update_rsqm() from i_pd fields (RSQM-specific concept).
 struct AFE4490AnalogState {
     float v_adc_led1,  v_adc_led2,  v_adc_aled1,  v_adc_aled2;  // V
     float v_tia_led1,  v_tia_led2,  v_tia_aled1,  v_tia_aled2;  // V  (= I_PD × RF)
     float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
-    float ot_led1, ot_led2;  // dimensionless — (I_PD_LED − I_PD_ALED) / I_LED
 };
 
 // ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────
