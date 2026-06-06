@@ -48,7 +48,11 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 
 ### 1.3 Processing chain
 ```
-6 raw signals
+4 raw ADC codes (led1, led2, aled1, aled2)  +  2 SW-subtracted (led1_sub, led2_sub)
+    │
+    ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA, I_PD, OT)  — see §3c
+    │       ├─→ _update_rsqm()      (probe state, DiagCode, RSQI)
+    │       └─→ HGAC (future)       (saturation zone control — v_tia, i_pd)
     │
     ├─→ selected channel (setPPGChannel)
     │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
@@ -421,6 +425,10 @@ constexpr float kAFE_RG_GAIN[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
 
 // Stage 2 input resistor Ri — fixed by chip design (datasheet p.28)
 constexpr float kAFE_RI_OHM = 100e3f;
+
+// ADC full-scale constants — used for code-to-voltage reconstruction (datasheet p.26)
+constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale, 22-bit signed ADC)
+constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
 ```
 
 Register-code arrays (`rf_code[]`, `cf_code[]`, `stg2_gain_code[]`) remain in an anonymous namespace in `incunest_afe4490.cpp` — internal only, never exposed.
@@ -442,6 +450,61 @@ inline bool        afeStrToCF(const char* s, AFE4490TIACF& out);
 inline const char* afeRGToStr(AFE4490RG g);      // → "0dB"/"3.5dB"/"6dB"/"9.5dB"/"12dB"
 inline bool        afeStrToRG(const char* s, AFE4490RG& out);
 ```
+
+---
+
+## 3c. AFE4490AnalogState — analog reconstruction struct
+
+Declared `public` in `incunest_afe4490.h`. Computed once per sample by `_compute_analog_state()` at the top of `_process_sample()`, before RSQM and HGAC. **Not stored in `AFE4490Data`** — ephemeral, passed by `const&`.
+
+### Formulas (datasheet Eq.2, p.30)
+
+Datasheet forward equation: `V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG`
+
+Inverted step by step:
+
+```
+V_ADC  = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR          [V]   (datasheet p.26: 22-bit, ±1.2 V)
+V_TIA  = (V_ADC / (2 × RG) + I_CANCEL) × Ri                [V]   (= I_PD × RF, TIA output voltage)
+I_PD   = V_TIA / RF                                          [A]   (photodiode current)
+OT     = (I_PD_LED − I_PD_ALED) / I_LED                    [—]   (optical transmittance)
+```
+
+### Circuit parameters per channel
+
+| Symbol | Source | Notes |
+|---|---|---|
+| `RF` | `kAFE_RF_OHM[(int)_afe_tia_rf_led*]` | TIA feedback resistor (TIAGAIN reg, datasheet p.27) |
+| `RG` | `kAFE_RG_OHM[(int)_afe_stg2_rg_led*]` | Stage 2 feedback resistor (TIAGAIN reg, datasheet p.30) |
+| `Ri` | `kAFE_RI_OHM` = 100 kΩ | Fixed by chip design (datasheet p.28) |
+| `I_CANCEL` | `_afe_ambdac_uA × 1e-6` | Ambient DAC (TIA_AMB_GAIN bits[19:16], 1 µA/LSB, datasheet p.27) |
+| `I_LED` | `_afe_led*_current_mA × 1e-3` | LED drive current (LEDCNTRL reg, datasheet p.28) |
+
+When `STAGE2EN = 0` (bits[14] of TIAGAIN / TIA_AMB_GAIN): Stage 2 bypassed → unity gain → `RG = Ri = 100 kΩ`.
+
+ALED1/ALED2 channels share the same RF and RG as LED1/LED2 respectively (same TIA path, only timing differs).
+
+### Struct definition
+
+```cpp
+struct AFE4490AnalogState {
+    float v_adc_led1,  v_adc_led2,  v_adc_aled1,  v_adc_aled2;  // V
+    float v_tia_led1,  v_tia_led2,  v_tia_aled1,  v_tia_aled2;  // V  (= I_PD × RF)
+    float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
+    float ot_led1, ot_led2;  // dimensionless — (I_PD_LED − I_PD_ALED) / I_LED
+};
+```
+
+### OT sentinel
+
+When `LED_raw ≥ rsqm_adc_positive_sat` (2 096 921): ADC clipped → `ot = rsqm_ot_saturated` (100.0). Sentinel is always above any threshold, preventing false PROBE_APPLIED from a saturated channel.
+
+### Consumers
+
+| Consumer | Fields used |
+|---|---|
+| `_update_rsqm()` | `ot_led1`, `ot_led2` (probe state detection) |
+| HGAC *(future)* | `v_tia_*`, `i_pd_*` (saturation zone monitoring) |
 
 ---
 
@@ -627,7 +690,7 @@ HR1–HR4 all operate on `led1_aled1` (IR ambient-corrected) and run in parallel
 
 ### 5.6 RSQM — Raw Signal Quality Monitor
 
-Runs first in `_process_sample()`, once per sample at 500 Hz. Fills `AFE4490Data::rsqi`, `diag_code`, and `probe_state`.
+Runs in `_process_sample()` after `_compute_analog_state()`, once per sample at 500 Hz. Fills `AFE4490Data::rsqi`, `diag_code`, and `probe_state`. Receives `AFE4490AnalogState` by `const&` (pre-computed OT values).
 
 #### 5.6.1 EMA estimators
 
@@ -658,15 +721,18 @@ Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_S
 **PROBE_NOT_APPLIED** — detected via *optical transmittance* when not DISCONNECTED:
 
 ```
-optical_transmittance = LED_Sub / (LED_mA × RF_Ω × RG_linear)
+OT = (I_PD_LED − I_PD_ALED) / I_LED     [A/A, dimensionless]
 ```
 
-- **OT computed from instantaneous `LED_Sub` values** (not EMA). Responds in one sample; margin of ×54 makes PPG noise (2% modulation → ±0.001 OT) negligible.
-- When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
-- Threshold: `ot1 > 0.30` OR `ot2 > 0.30` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*
-- Single threshold (no hysteresis) — state oscillation is prevented by the 50-sample debounce in `_set_probe_state()` instead.
+OT is taken from `AFE4490AnalogState` (computed by `_compute_analog_state()` — see §3c). Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
 
-Measured values (afe_sweep_test.csv, clip probe): APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.7–2.96 (factor ×54).
+- When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
+- Threshold: `ot1 > 8.5e-5` OR `ot2 > 8.5e-5` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*
+- Single threshold (no hysteresis) — state oscillation is prevented by the 100-sample debounce in `_set_probe_state()` instead.
+
+Estimated values (physical scale, needs empirical calibration): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54).
+
+> Previous formula was heuristic: `LED_Sub / (LED_mA × RF_Ω × RG_linear)` — dimensionally not A/A, scale ~×3495 larger. Values measured in earlier sessions (APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.8) correspond to the old scale.
 
 > Valid for clip-type reusable probes only. Disposable adhesive probes not validated.
 

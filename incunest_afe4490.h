@@ -209,6 +209,27 @@ constexpr float kAFE_RG_GAIN[5] = {
 // Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
 constexpr float kAFE_RI_OHM = 100e3f;
 
+// ADC full-scale constants — used for code-to-voltage reconstruction (datasheet p.26)
+constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
+constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
+
+/// Analog quantities derived from ADC codes for one sample.
+/// Computed in _process_sample() before RSQM and HGAC; not stored in AFE4490Data.
+/// Datasheet Eq.2 (p.30):  V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
+/// Inversions:
+///   V_ADC = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR          [V]
+///   V_TIA = (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri          [V]  (= I_PD × RF)
+///   I_PD  = V_TIA / RF_ohm                                      [A]
+///   OT    = (I_PD_LED − I_PD_ALED) / I_LED_A                   [dimensionless]
+/// ALED channels use the same RF and RG as the corresponding LED channel.
+/// When STAGE2EN=0: RG_ohm = kAFE_RI_OHM (unity gain).
+struct AFE4490AnalogState {
+    float v_adc_led1,  v_adc_led2,  v_adc_aled1,  v_adc_aled2;  // V
+    float v_tia_led1,  v_tia_led2,  v_tia_aled1,  v_tia_aled2;  // V  (= I_PD × RF)
+    float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
+    float ot_led1, ot_led2;  // dimensionless — (I_PD_LED − I_PD_ALED) / I_LED
+};
+
 // ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────
 // These functions convert between the enum values and the abbreviated string labels
 // used in the $CFG serial frame and $SET command protocol.
@@ -517,7 +538,8 @@ private:
     static constexpr float    rsqm_alpha_var        = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
     static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
     static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
-    static constexpr float    rsqm_ot_thr           = 0.30f;    // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
+    static constexpr float    rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
+                                                                 // Physical scale (A/A): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (needs empirical calibration)
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
     static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
     static constexpr float    rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
@@ -582,9 +604,13 @@ private:
     void  _process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                           int32_t led1_sub, int32_t led2_sub);
 
-    // RSQM — runs first in _process_sample(); fills rsqi, diag_code, probe_state
+    // Analog reconstruction — runs first in _process_sample(); provides V_ADC, V_TIA, I_PD, OT
+    AFE4490AnalogState _compute_analog_state(int32_t led1, int32_t led2,
+                                             int32_t aled1, int32_t aled2) const;
+
+    // RSQM — runs after _compute_analog_state(); fills rsqi, diag_code, probe_state
     void _update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                      int32_t led1_sub, int32_t led2_sub);
+                      int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as);
     void _set_probe_state(ProbeState requested); // debounce gate: commits state only after rsqm_probe_state_min_count consecutive requests
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)

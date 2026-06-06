@@ -1013,11 +1013,83 @@ void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
     }
 }
 
+// Analog state reconstruction — converts raw ADC codes to physical quantities.
+// Datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
+// Inverted:
+//   V_ADC = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR
+//   V_TIA = (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri   [= I_PD × RF]
+//   I_PD  = V_TIA / RF_ohm
+//   OT    = (I_PD_LED − I_PD_ALED) / I_LED_A
+// When STAGE2EN=0: RG_ohm = kAFE_RI_OHM (unity gain, Eq.2 gives RG=Ri).
+// ALED channels share the RF and RG of the corresponding LED channel.
+// Saturated sentinel: OT = rsqm_ot_saturated when LED_raw ≥ rsqm_adc_positive_sat.
+AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
+    int32_t led1, int32_t led2, int32_t aled1, int32_t aled2) const {
+
+    AFE4490AnalogState as;
+
+    // ── ADC code → volts ────────────────────────────────────────────────────
+    // Datasheet p.26: 22-bit signed ADC, differential full-scale range ±1.2 V.
+    // V_ADC = code / (2^21 − 1) × 1.2 V
+    const float scale = kAFE_ADC_FSR / kAFE_ADC_FS_COUNTS;
+    as.v_adc_led1  = (float)led1  * scale;
+    as.v_adc_led2  = (float)led2  * scale;
+    as.v_adc_aled1 = (float)aled1 * scale;
+    as.v_adc_aled2 = (float)aled2 * scale;
+
+    // ── Circuit parameters ──────────────────────────────────────────────────
+    // RF: TIA feedback resistor — TIAGAIN register bits [2:0] / [10:8], datasheet p.27.
+    //     Values: 10K…1M Ω (non-monotonic bit encoding, see rf_code[] in .cpp).
+    // RG: Stage 2 gain resistor — TIAGAIN register bits [10:8] / TIA_AMB_GAIN [10:8], datasheet p.30.
+    //     When STAGE2EN=0 (bits [14]): Stage 2 is bypassed → gain = 1 → RG = Ri (Eq.2 holds with RG=Ri).
+    // Ri: fixed input resistor of Stage 2, 100 kΩ — datasheet p.28.
+    // I_CANCEL: ambient DAC current — TIA_AMB_GAIN register bits [19:16], datasheet p.27.
+    //     1 µA per LSB, range 0–15 µA.
+    const float rf1      = kAFE_RF_OHM[(int)_afe_tia_rf_led1];
+    const float rg1      = _afe_stg2_en_led1 ? kAFE_RG_OHM[(int)_afe_stg2_rg_led1] : kAFE_RI_OHM;
+    const float rf2      = kAFE_RF_OHM[(int)_afe_tia_rf_led2];
+    const float rg2      = _afe_stg2_en_led2 ? kAFE_RG_OHM[(int)_afe_stg2_rg_led2] : kAFE_RI_OHM;
+    const float ri       = kAFE_RI_OHM;
+    const float i_cancel = (float)_afe_ambdac_uA * 1e-6f;  // A
+
+    // ── V_TIA = (V_ADC / (2 × RG) + I_CANCEL) × Ri ─────────────────────────
+    // Inverted from datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
+    // V_TIA is defined here as I_PD × RF (TIA output voltage before Stage 2).
+    // LED1/ALED1 share rf1, rg1; LED2/ALED2 share rf2, rg2 (same TIA path).
+    as.v_tia_led1  = (as.v_adc_led1  / (2.0f * rg1) + i_cancel) * ri;
+    as.v_tia_led2  = (as.v_adc_led2  / (2.0f * rg2) + i_cancel) * ri;
+    as.v_tia_aled1 = (as.v_adc_aled1 / (2.0f * rg1) + i_cancel) * ri;
+    as.v_tia_aled2 = (as.v_adc_aled2 / (2.0f * rg2) + i_cancel) * ri;
+
+    // ── I_PD = V_TIA / RF ───────────────────────────────────────────────────
+    // From V_TIA = I_PD × RF (TIA transimpedance definition).
+    as.i_pd_led1  = as.v_tia_led1  / rf1;
+    as.i_pd_led2  = as.v_tia_led2  / rf2;
+    as.i_pd_aled1 = as.v_tia_aled1 / rf1;
+    as.i_pd_aled2 = as.v_tia_aled2 / rf2;
+
+    // ── OT = (I_PD_LED − I_PD_ALED) / I_LED ────────────────────────────────
+    // Optical transmittance: fraction of LED current reaching the photodiode through tissue.
+    // Ambient-subtracted (LED − ALED) isolates the modulated component driven by the LED.
+    // I_LED from LED current register (LEDCNTRL, datasheet p.28): 8-bit DAC, 0–_afe_led_range_mA.
+    // Sentinel rsqm_ot_saturated (100.0) when LED_raw ≥ rsqm_adc_positive_sat: ADC clipped, OT undefined.
+    const float i_led1_A = _afe_led1_current_mA * 1e-3f;
+    const float i_led2_A = _afe_led2_current_mA * 1e-3f;
+    as.ot_led1 = (led1 >= rsqm_adc_positive_sat)
+                     ? rsqm_ot_saturated
+                     : (as.i_pd_led1 - as.i_pd_aled1) / i_led1_A;
+    as.ot_led2 = (led2 >= rsqm_adc_positive_sat)
+                     ? rsqm_ot_saturated
+                     : (as.i_pd_led2 - as.i_pd_aled2) / i_led2_A;
+
+    return as;
+}
+
 // Raw Signal Quality Monitor — runs once per sample at 500 Hz.
 // Updates EMA estimators, classifies ProbeState, computes DiagCode and RSQI.
-// Called at the top of _process_sample() before all other algorithms.
+// Called at the top of _process_sample() after _compute_analog_state().
 void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                                     int32_t led1_sub, int32_t led2_sub) {
+                                     int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
     // ── EMA estimators ─────────────────────────────────────────────────────────
     _rsqm_led1_sub.ema_mean += rsqm_alpha_mean * ((float)led1_sub - _rsqm_led1_sub.ema_mean);
     {   float d = (float)led1_sub - _rsqm_led1_sub.ema_mean;
@@ -1044,26 +1116,14 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     if (disconnected) {
         _set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
-        // Optical transmittance — uses instantaneous led1_sub/led2_sub values.
-        // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
-        const float rf1 = kAFE_RF_OHM[(int)_afe_tia_rf_led1];
-        const float rg1 = _afe_stg2_en_led1 ? kAFE_RG_GAIN[(int)_afe_stg2_rg_led1] : 1.0f;
-        const float rf2 = kAFE_RF_OHM[(int)_afe_tia_rf_led2];
-        const float rg2 = _afe_stg2_en_led2 ? kAFE_RG_GAIN[(int)_afe_stg2_rg_led2] : 1.0f;
-
-        // Optical transmittance for each channel (dimensionless):
-        //   ot = LED_Sub / (LED_mA × RF_Ω × RG_linear)
-        // Physically: ratio of transmitted light to the maximum possible signal at current gain.
-        // APPLIED (finger present): ot ≈ 0.05  (tissue absorbs ~95% of light)
-        // NOT_APPLIED (no finger):  ot ≈ 2.8   (full light reaches photodiode, amplifier near saturation)
-        // When LED_raw ≥ rsqm_adc_positive_sat: ADC is clipped → ot set to sentinel 100.0
+        // Optical transmittance — from AFE4490AnalogState (computed by _compute_analog_state()).
+        // Physical formula (Eq.2 inversion): OT = (I_PD_LED − I_PD_ALED) / I_LED [A/A, dimensionless]
+        // APPLIED (finger present): ot ≈ 1.4e-5  (tissue absorbs ~95% of light)
+        // NOT_APPLIED (no finger):  ot ≈ 8e-4    (full light reaches photodiode)
+        // When LED_raw ≥ rsqm_adc_positive_sat: sentinel rsqm_ot_saturated (100.0) — always passes threshold.
         // (NaN avoided: IEEE 754 NaN fails > comparisons silently, sentinel always passes)
-        const float optical_transmittance_led1 = (led1 >= rsqm_adc_positive_sat)
-                                                    ? rsqm_ot_saturated
-                                                    : (float)led1_sub / (_afe_led1_current_mA * rf1 * rg1);
-        const float optical_transmittance_led2 = (led2 >= rsqm_adc_positive_sat)
-                                                    ? rsqm_ot_saturated
-                                                    : (float)led2_sub / (_afe_led2_current_mA * rf2 * rg2);
+        const float optical_transmittance_led1 = as.ot_led1;
+        const float optical_transmittance_led2 = as.ot_led2;
 
         // OR logic: one saturated channel is enough to flag NOT_APPLIED.
         // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.
@@ -1501,8 +1561,11 @@ float INCUNEST_AFE4490::_biquad_process(float x, BiquadFilter& filt) {
 
 void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                    int32_t led1_sub, int32_t led2_sub) {
-    // RSQM runs first — computes probe state, DiagCode, RSQI for this sample
-    _update_rsqm(led1, led2, aled1, aled2, led1_sub, led2_sub);
+    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA, I_PD, OT)
+    const AFE4490AnalogState as = _compute_analog_state(led1, led2, aled1, aled2);
+
+    // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
+    _update_rsqm(led1, led2, aled1, aled2, led1_sub, led2_sub, as);
 
     // Select PPG source
     float raw_ppg;
