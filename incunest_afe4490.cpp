@@ -25,7 +25,7 @@ static const char* TAG = "incunest_afe4490";
 
 namespace {
     // ── Math ──────────────────────────────────────────────────────────────────
-    constexpr float    pi                  = 3.14159265358979f;
+    constexpr float    kPi                  = 3.14159265358979f;
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
     constexpr float    spo2_warmup_s       = 5.0f;     // s  — warmup before reporting SpO2
@@ -97,8 +97,8 @@ namespace {
         }
         // Butterfly stages
         for (int len = 2; len <= N; len <<= 1) {
-            float w_re = cosf(-2.0f * pi / (float)len);
-            float w_im = sinf(-2.0f * pi / (float)len);
+            float w_re = cosf(-2.0f * kPi / (float)len);
+            float w_im = sinf(-2.0f * kPi / (float)len);
             for (int i = 0; i < N; i += len) {
                 float c_re = 1.0f, c_im = 0.0f;
                 for (int j = 0; j < len / 2; j++) {
@@ -220,7 +220,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _diag_holdoff_samples(0),
       _diag_last_led1(0), _diag_last_led2(0),
       _diag_last_aled1(0), _diag_last_aled2(0),
-      _diag_last_led1_aled1(0), _diag_last_led2_aled2(0),
+      _diag_last_led1_sub(0), _diag_last_led2_sub(0),
       _hr2_calc_sem(nullptr), _hr3_calc_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _diag_task_handle(nullptr),
@@ -239,7 +239,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_stage2_gain_led2(AFE4490Stage2Gain::GAIN_0DB),
       _afe_stage2_en2(true),
       _afe_ambdac_uA(0),
-      _ppgdisp_channel(AFE4490Channel::LED1_ALED1),
+      _ppgdisp_channel(AFE4490Channel::LED1_SUB),
       _ppgdisp_filter_type(AFE4490Filter::BUTTERWORTH),
       _ppgdisp_bpf({0.5f, 20.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
       _ppgdisp_ma_idx(0), _ppgdisp_ma_sum(0.0f),
@@ -275,8 +275,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_update_interval(25u),
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
-      _rsqm_led1_aled1{0.0f, 0.0f, 0},
-      _rsqm_led2_aled2{0.0f, 0.0f, 0},
+      _rsqm_led1_sub{0.0f, 0.0f, 0},
+      _rsqm_led2_sub{0.0f, 0.0f, 0},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0)
 {
@@ -988,14 +988,14 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_sqi_result = 0.0f;
     _hr3_result = 0.0f; _hr3_sqi_result = 0.0f;
-    _rsqm_led1_aled1          = {0.0f, 0.0f, 0};
-    _rsqm_led2_aled2          = {0.0f, 0.0f, 0};
+    _rsqm_led1_sub          = {0.0f, 0.0f, 0};
+    _rsqm_led2_sub          = {0.0f, 0.0f, 0};
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
     _current_data = AFE4490Data{};
     // Precompute Hann window — needed for HR3 FFT (moved here from begin() to support INCUNEST_OFFLINE)
     for (int i = 0; i < hr3_buf_len; i++)
-        _hr3_hann[i] = 0.5f * (1.0f - cosf(2.0f * pi * (float)i / (float)(hr3_buf_len - 1)));
+        _hr3_hann[i] = 0.5f * (1.0f - cosf(2.0f * kPi * (float)i / (float)(hr3_buf_len - 1)));
 }
 
 // ── RSQM ──────────────────────────────────────────────────────────────────────
@@ -1021,34 +1021,34 @@ void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
 // Updates EMA estimators, classifies ProbeState, computes DiagCode and RSQI.
 // Called at the top of _process_sample() before all other algorithms.
 void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                                     int32_t led1_aled1, int32_t led2_aled2) {
+                                     int32_t led1_sub, int32_t led2_sub) {
     // ── EMA estimators ─────────────────────────────────────────────────────────
-    _rsqm_led1_aled1.ema_mean += rsqm_alpha_mean * ((float)led1_aled1 - _rsqm_led1_aled1.ema_mean);
-    {   float d = (float)led1_aled1 - _rsqm_led1_aled1.ema_mean;
-        _rsqm_led1_aled1.ema_var += rsqm_alpha_var * (d * d - _rsqm_led1_aled1.ema_var); }
-    _rsqm_led1_aled1.count++;
+    _rsqm_led1_sub.ema_mean += rsqm_alpha_mean * ((float)led1_sub - _rsqm_led1_sub.ema_mean);
+    {   float d = (float)led1_sub - _rsqm_led1_sub.ema_mean;
+        _rsqm_led1_sub.ema_var += rsqm_alpha_var * (d * d - _rsqm_led1_sub.ema_var); }
+    _rsqm_led1_sub.count++;
 
-    _rsqm_led2_aled2.ema_mean += rsqm_alpha_mean * ((float)led2_aled2 - _rsqm_led2_aled2.ema_mean);
-    {   float d = (float)led2_aled2 - _rsqm_led2_aled2.ema_mean;
-        _rsqm_led2_aled2.ema_var += rsqm_alpha_var * (d * d - _rsqm_led2_aled2.ema_var); }
-    _rsqm_led2_aled2.count++;
+    _rsqm_led2_sub.ema_mean += rsqm_alpha_mean * ((float)led2_sub - _rsqm_led2_sub.ema_mean);
+    {   float d = (float)led2_sub - _rsqm_led2_sub.ema_mean;
+        _rsqm_led2_sub.ema_var += rsqm_alpha_var * (d * d - _rsqm_led2_sub.ema_var); }
+    _rsqm_led2_sub.count++;
 
-    const bool ready = (_rsqm_led1_aled1.count >= rsqm_ready_count);
+    const bool ready = (_rsqm_led1_sub.count >= rsqm_ready_count);
 
     // ── Probe state detection ──────────────────────────────────────────────────
     // PROBE_DISCONNECTED: instantaneous criterion — all four raw ADC channels negative AND
-    // |led1_aled1|/|led2_aled2| near zero on both channels.  When cable is disconnected,
+    // |led1_sub|/|led2_sub| near zero on both channels.  When cable is disconnected,
     // TIA input is floating; input-offset current drives LED1≈ALED1≈LED2≈ALED2 to the same
     // large negative value, so led_aled = LED − ALED ≈ 0.  Responds in one sample; no EMA warmup required.
     const bool disconnected =
         led1 < 0 && aled1 < 0 && led2 < 0 && aled2 < 0 &&
-        fabsf((float)led1_aled1) < rsqm_disconn_sub_mean &&
-        fabsf((float)led2_aled2) < rsqm_disconn_sub_mean;
+        fabsf((float)led1_sub) < rsqm_disconn_sub_mean &&
+        fabsf((float)led2_sub) < rsqm_disconn_sub_mean;
 
     if (disconnected) {
         _set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
-        // Optical transmittance — uses instantaneous led1_aled1/led2_aled2 values.
+        // Optical transmittance — uses instantaneous led1_sub/led2_sub values.
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
         const float rf1 = tia_rf_ohm[(int)_afe_tia_gain_led1];
         const float rg1 = _afe_stage2_en1 ? stg2_rg_linear[(int)_afe_stage2_gain_led1] : 1.0f;
@@ -1064,10 +1064,10 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         // (NaN avoided: IEEE 754 NaN fails > comparisons silently, sentinel always passes)
         const float optical_transmittance_led1 = (led1 >= rsqm_adc_positive_sat)
                                                     ? rsqm_ot_saturated
-                                                    : (float)led1_aled1 / (_afe_led1_current_mA * rf1 * rg1);
+                                                    : (float)led1_sub / (_afe_led1_current_mA * rf1 * rg1);
         const float optical_transmittance_led2 = (led2 >= rsqm_adc_positive_sat)
                                                     ? rsqm_ot_saturated
-                                                    : (float)led2_aled2 / (_afe_led2_current_mA * rf2 * rg2);
+                                                    : (float)led2_sub / (_afe_led2_current_mA * rf2 * rg2);
 
         // OR logic: one saturated channel is enough to flag NOT_APPLIED.
         // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.
@@ -1086,8 +1086,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
     // Both channels required: SpO2 needs IR and RED simultaneously
     if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
-        (sqrtf(_rsqm_led1_aled1.ema_var) < rsqm_signal_weak_std ||
-         sqrtf(_rsqm_led2_aled2.ema_var) < rsqm_signal_weak_std))
+        (sqrtf(_rsqm_led1_sub.ema_var) < rsqm_signal_weak_std ||
+         sqrtf(_rsqm_led2_sub.ema_var) < rsqm_signal_weak_std))
         diag |= RSQM_SIGNAL_WEAK;
 
     // RSQM_HW_SETTLING: set externally by HGAC or config change; counts down to 0
@@ -1313,7 +1313,7 @@ void INCUNEST_AFE4490::_recalc_biquad_lp(BiquadFilter& filt) {
     // Uses filt.f_high as the -3 dB cutoff frequency.
     // DC gain = 1.0; state unchanged (caller is responsible for resetting if needed).
     float fs   = (float)_afe_sample_rate_hz;
-    float Ohm  = tanf(pi * filt.f_high / fs);  // prewarped cutoff
+    float Ohm  = tanf(kPi * filt.f_high / fs);  // prewarped cutoff
     float Ohm2 = Ohm * Ohm;
     float sqrt2 = 1.41421356f;
     float d    = 1.0f + sqrt2 * Ohm + Ohm2;
@@ -1359,8 +1359,8 @@ void INCUNEST_AFE4490::_recalc_biquad(BiquadFilter& filt) {
     // Analog prototype: H(s) = BW·s / (s² + BW·s + Ω₀²)
     float fs    = (float)_afe_sample_rate_hz;
     float k     = 2.0f * fs;
-    float o_low = k * tanf(pi * filt.f_low  / fs);
-    float o_hi  = k * tanf(pi * filt.f_high / fs);
+    float o_low = k * tanf(kPi * filt.f_low  / fs);
+    float o_hi  = k * tanf(kPi * filt.f_high / fs);
     float o0sq  = o_low * o_hi;
     float bw    = o_hi - o_low;
     float d     = k*k + bw*k + o0sq;
@@ -1413,7 +1413,7 @@ void INCUNEST_AFE4490::_task_body() {
             xSemaphoreTake(_state_mutex, portMAX_DELAY);
             _process_sample(_diag_last_led1, _diag_last_led2,
                             _diag_last_aled1, _diag_last_aled2,
-                            _diag_last_led1_aled1, _diag_last_led2_aled2);
+                            _diag_last_led1_sub, _diag_last_led2_sub);
             xSemaphoreGive(_state_mutex);
             continue;
         }
@@ -1440,8 +1440,8 @@ void INCUNEST_AFE4490::_task_body() {
         _diag_last_led2       = led2;
         _diag_last_aled1      = aled1;
         _diag_last_aled2      = aled2;
-        _diag_last_led1_aled1 = led1_diff;
-        _diag_last_led2_aled2 = led2_diff;
+        _diag_last_led1_sub = led1_diff;
+        _diag_last_led2_sub = led2_diff;
 
         // _state_mutex: protects internal processing state (_ppgdisp_channel, filter
         // buffers, SpO2/HR accumulators) against concurrent config setter calls.
@@ -1497,9 +1497,9 @@ float INCUNEST_AFE4490::_biquad_process(float x, BiquadFilter& filt) {
 }
 
 void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                                   int32_t led1_aled1, int32_t led2_aled2) {
+                                   int32_t led1_sub, int32_t led2_sub) {
     // RSQM runs first — computes probe state, DiagCode, RSQI for this sample
-    _update_rsqm(led1, led2, aled1, aled2, led1_aled1, led2_aled2);
+    _update_rsqm(led1, led2, aled1, aled2, led1_sub, led2_sub);
 
     // Select PPG source
     float raw_ppg;
@@ -1508,8 +1508,8 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
         case AFE4490Channel::LED2:       raw_ppg = (float)led2;       break;
         case AFE4490Channel::ALED1:      raw_ppg = (float)aled1;      break;
         case AFE4490Channel::ALED2:      raw_ppg = (float)aled2;      break;
-        case AFE4490Channel::LED2_ALED2: raw_ppg = (float)led2_aled2; break;
-        default: /* LED1_ALED1 */        raw_ppg = (float)led1_aled1; break;
+        case AFE4490Channel::LED2_SUB: raw_ppg = (float)led2_sub; break;
+        default: /* LED1_SUB */        raw_ppg = (float)led1_sub; break;
     }
 
     // Apply filter
@@ -1531,27 +1531,27 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
             break;
     }
 
-    _current_data.ppg        = -(int32_t)filtered;  // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up)
+    _current_data.ppg_disp        = -(int32_t)filtered;  // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up)
     _current_data.led1       = led1;
     _current_data.led2       = led2;
     _current_data.aled1      = aled1;
     _current_data.aled2      = aled2;
-    _current_data.led1_aled1 = led1_aled1;
-    _current_data.led2_aled2 = led2_aled2;
+    _current_data.led1_sub = led1_sub;
+    _current_data.led2_sub = led2_sub;
 
     // SpO2 uses ambient-corrected channels (unfiltered, spec §1.3)
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
-    { uint64_t _t = esp_timer_get_time(); _update_spo2(led1_aled1, led2_aled2); _ts_spo2.update(esp_timer_get_time() - _t); }
-    { uint64_t _t = esp_timer_get_time(); _update_hr1(led1_aled1);              _ts_hr1.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_spo2(led1_sub, led2_sub); _ts_spo2.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_hr1(led1_sub);              _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
-    _update_spo2(led1_aled1, led2_aled2);
-    _update_hr1(led1_aled1);
+    _update_spo2(led1_sub, led2_sub);
+    _update_hr1(led1_sub);
 #endif
 
     // HR2 fast path: filter + decimate + buffer; trigger Task B when interval fires
-    if (_update_hr2_sample(led1_aled1)) {
+    if (_update_hr2_sample(led1_sub)) {
         if (!_hr2_computing) {
             _linearize_hr2();
             _hr2_computing = true;
@@ -1565,7 +1565,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #endif
 
     // HR3 fast path: LP filter + decimate + buffer; trigger Task C when interval fires
-    if (_update_hr3_sample(led1_aled1)) {
+    if (_update_hr3_sample(led1_sub)) {
         if (!_hr3_computing) {
             _linearize_hr3();
             _hr3_computing = true;
@@ -1652,11 +1652,11 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // ── SpO2 algorithm ────────────────────────────────────────────────────────────
 // R = (AC_rms_RED / DC_RED) / (AC_rms_IR / DC_IR)
 // SpO2 = a - b * R
-// ir_corr  : IR  signal ambient-corrected (led1 - aled1)
-// red_corr : RED signal ambient-corrected (led2 - aled2)
-void INCUNEST_AFE4490::_update_spo2(int32_t ir_corr, int32_t red_corr) {
-    float ir  = (float)ir_corr;
-    float red = (float)red_corr;
+// led1_sub  : IR  signal ambient-corrected (led1 - aled1)
+// led2_sub : RED signal ambient-corrected (led2 - aled2)
+void INCUNEST_AFE4490::_update_spo2(int32_t led1_sub, int32_t led2_sub) {
+    float ir  = (float)led1_sub;
+    float red = (float)led2_sub;
 
     // IIR DC extraction
     _spo2_dc_ir  = _spo2_dc_iir_alpha * _spo2_dc_ir  + (1.0f - _spo2_dc_iir_alpha) * ir;
@@ -1710,11 +1710,11 @@ void INCUNEST_AFE4490::_update_spo2(int32_t ir_corr, int32_t red_corr) {
 // Adaptive-threshold peak detection on filtered PPG.
 // Threshold = 0.6 × running_max; refractory = _hr1_refractory_samples.
 // HR reported from average of 5 consecutive RR intervals.
-void INCUNEST_AFE4490::_update_hr1(int32_t led1_aled1) {
+void INCUNEST_AFE4490::_update_hr1(int32_t led1_sub) {
     _hr1_sample_idx++;
 
     // DC removal: IIR estimator (tau = hr1_dc_tau_s), then negate for conventional PPG polarity (peaks up)
-    float ir = (float)led1_aled1;
+    float ir = (float)led1_sub;
     _hr1_dc = _hr1_dc_alpha * _hr1_dc + (1.0f - _hr1_dc_alpha) * ir;
     // Apply dedicated MA low-pass filter (5 Hz cutoff, independent of PPG display filter)
     float raw = -(ir - _hr1_dc);
@@ -1780,8 +1780,8 @@ void INCUNEST_AFE4490::_update_hr1(int32_t led1_aled1) {
 
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
-bool INCUNEST_AFE4490::_update_hr2_sample(int32_t led1_aled1) {
-    float ir = (float)led1_aled1;
+bool INCUNEST_AFE4490::_update_hr2_sample(int32_t led1_sub) {
+    float ir = (float)led1_sub;
     float filtered = -_biquad_process(ir, _hr2_bpf);
 
     _hr2_decim_counter++;
@@ -1864,8 +1864,8 @@ void INCUNEST_AFE4490::_compute_hr2() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr2(int32_t led1_aled1) {
-    if (!_update_hr2_sample(led1_aled1)) return;
+void INCUNEST_AFE4490::_update_hr2(int32_t led1_sub) {
+    if (!_update_hr2_sample(led1_sub)) return;
     _linearize_hr2();
     _compute_hr2();
     if (_hr2_sqi_result > 0.0f) _current_data.hr2 = _hr2_result;
@@ -1876,8 +1876,8 @@ void INCUNEST_AFE4490::_update_hr2(int32_t led1_aled1) {
 
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
-bool INCUNEST_AFE4490::_update_hr3_sample(int32_t led1_aled1) {
-    float ir = (float)led1_aled1;
+bool INCUNEST_AFE4490::_update_hr3_sample(int32_t led1_sub) {
+    float ir = (float)led1_sub;
     float filtered = -_biquad_process(ir, _hr3_bpf);  // negate: peaks up
 
     _hr3_decim_counter++;
@@ -2022,8 +2022,8 @@ void INCUNEST_AFE4490::_compute_hr3() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr3(int32_t led1_aled1) {
-    if (!_update_hr3_sample(led1_aled1)) return;
+void INCUNEST_AFE4490::_update_hr3(int32_t led1_sub) {
+    if (!_update_hr3_sample(led1_sub)) return;
     _linearize_hr3();
     _compute_hr3();
     if (_hr3_sqi_result > 0.0f) _current_data.hr3 = _hr3_result;

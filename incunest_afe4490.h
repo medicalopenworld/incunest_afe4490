@@ -95,14 +95,14 @@ constexpr uint32_t RSQM_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware sett
 struct AFE4490Data {
     // Field order mirrors the $M1/$P1 serial frame: raw signals first, then processed outputs
     // Raw ADC outputs (6 signals from AFE4490)
-    int32_t led2;        // LED2VAL  — RED raw          (frame: RED)
-    int32_t led1;        // LED1VAL  — IR raw           (frame: IR)
-    int32_t aled2;       // ALED2VAL — ambient after LED2 (frame: RED_Amb)
-    int32_t aled1;       // ALED1VAL — ambient after LED1 (frame: IR_Amb)
-    int32_t led2_aled2;  // LED2-ALED2 — RED ambient-corrected (frame: RED_Sub)
-    int32_t led1_aled1;  // LED1-ALED1 — IR ambient-corrected  (frame: IR_Sub)
+    int32_t led2;        // LED2VAL  — RED raw          (frame: LED2)
+    int32_t led1;        // LED1VAL  — IR raw           (frame: LED1)
+    int32_t aled2;       // ALED2VAL — ambient after LED2 (frame: ALED2)
+    int32_t aled1;       // ALED1VAL — ambient after LED1 (frame: ALED1)
+    int32_t led2_sub;  // LED2-ALED2 — RED ambient-corrected (frame: LED2_SUB)
+    int32_t led1_sub;  // LED1-ALED1 — IR ambient-corrected  (frame: LED1_SUB)
     // Processed outputs
-    int32_t ppg;         // filtered PPG of selected channel
+    int32_t ppg_disp;         // PPG display signal (BPF + negated; display only — not an input to algorithms)
     float   spo2;        // SpO2 in %
     float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based; 0=invalid/no finger, 1=full quality (PI ≥ 2%)
     float   spo2_r;      // R ratio used for SpO2 calculation: (AC_red/DC_red)/(AC_ir/DC_ir)
@@ -125,8 +125,8 @@ enum class AFE4490Channel {
     LED2,       // RED raw
     ALED1,      // ambient after LED1
     ALED2,      // ambient after LED2
-    LED1_ALED1, // IR ambient-corrected (default)
-    LED2_ALED2  // RED ambient-corrected
+    LED1_SUB, // IR ambient-corrected (default)
+    LED2_SUB  // RED ambient-corrected
 };
 
 enum class AFE4490Filter {
@@ -460,28 +460,28 @@ private:
     // Signal processing
     float _biquad_process(float x, BiquadFilter& filt);  // precharge on first call, then step
     void  _process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                          int32_t led1_aled1, int32_t led2_aled2);
+                          int32_t led1_sub, int32_t led2_sub);
 
     // RSQM — runs first in _process_sample(); fills rsqi, diag_code, probe_state
     void _update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                      int32_t led1_aled1, int32_t led2_aled2);
+                      int32_t led1_sub, int32_t led2_sub);
     void _set_probe_state(ProbeState requested); // debounce gate: commits state only after rsqm_probe_state_min_count consecutive requests
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
-    void _update_spo2(int32_t ir_corr, int32_t red_corr);
-    void _update_hr1(int32_t led1_aled1);
+    void _update_spo2(int32_t led1_sub, int32_t led2_sub);
+    void _update_hr1(int32_t led1_sub);
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
-    void _update_hr2(int32_t led1_aled1);
-    void _update_hr3(int32_t led1_aled1);
+    void _update_hr2(int32_t led1_sub);
+    void _update_hr3(int32_t led1_sub);
     void _reset_algorithms();
 
     // HR2 async split: fast per-sample path + linearise + compute
-    bool _update_hr2_sample(int32_t led1_aled1); // filter+decimate+buffer; returns true when interval fires
+    bool _update_hr2_sample(int32_t led1_sub); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr2();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
     void _compute_hr2();                          // autocorr on _hr2_seg → _hr2_result/_hr2_sqi_result
 
     // HR3 async split
-    bool _update_hr3_sample(int32_t led1_aled1); // filter+decimate+buffer; returns true when interval fires
+    bool _update_hr3_sample(int32_t led1_sub); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr3();                        // DC+Hann into _hr3_fft (call under _state_mutex)
     void _compute_hr3();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_sqi_result
 
@@ -511,7 +511,7 @@ private:
     volatile uint32_t _diag_holdoff_samples; // countdown after diagnostics end; _task_body() feeds frozen raw input
     int32_t _diag_last_led1, _diag_last_led2;          // last valid raw ADC values, saved on every normal cycle
     int32_t _diag_last_aled1, _diag_last_aled2;
-    int32_t _diag_last_led1_aled1, _diag_last_led2_aled2;
+    int32_t _diag_last_led1_sub, _diag_last_led2_sub;
 
     // ── HR2/HR3 async computation tasks ──────────────────────────────────────
     // Task A (_task_body) runs the fast per-sample path and signals Task B/C when
@@ -614,7 +614,7 @@ private:
     uint8_t  _hr1_interval_count;
 
     // ── HR2 — autocorrelation-based HR algorithm ──────────────────────────────
-    // Bandpass-filters led1_aled1 (0.5–5 Hz), decimates by hr2_decim_factor,
+    // Bandpass-filters led1_sub (0.5–5 Hz), decimates by hr2_decim_factor,
     // accumulates a circular buffer of hr2_buf_len samples, then periodically
     // computes normalised autocorrelation to find the fundamental RR period.
     static constexpr int hr2_buf_len         = 400;  // 8 s at 50 Hz (fs/hr2_decim_factor)
@@ -630,7 +630,7 @@ private:
     uint32_t _hr2_update_counter;            // decimated samples since last autocorr computation
 
     // ── HR3 — FFT + Harmonic Product Spectrum HR algorithm ───────────────────
-    // Low-pass-filters led1_aled1 (10 Hz anti-aliasing), decimates by hr3_decim_factor,
+    // Low-pass-filters led1_sub (10 Hz anti-aliasing), decimates by hr3_decim_factor,
     // accumulates 512 samples, then every hr3_update_interval decimated samples applies
     // a Hann window, computes the real FFT, and finds the dominant peak via the
     // Harmonic Product Spectrum (fundamental × 2nd harmonic × 3rd harmonic).
@@ -665,8 +665,8 @@ private:
     float    _hr_max_bpm;
 
     // ── RSQM state ────────────────────────────────────────────────────────────
-    RsqmEmaChannel _rsqm_led1_aled1;     // EMA estimator for led1_aled1 (IR differential)
-    RsqmEmaChannel _rsqm_led2_aled2;     // EMA estimator for led2_aled2 (RED differential)
+    RsqmEmaChannel _rsqm_led1_sub;     // EMA estimator for led1_sub (IR differential)
+    RsqmEmaChannel _rsqm_led2_sub;     // EMA estimator for led2_sub (RED differential)
     ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
@@ -701,22 +701,22 @@ public:
     float test_biquad_process(float x, BiquadFilter& f) { return _biquad_process(x, f); }
 
     // HR1
-    void  test_feed_hr1(int32_t led1_aled1) { _update_hr1(led1_aled1); }
+    void  test_feed_hr1(int32_t led1_sub) { _update_hr1(led1_sub); }
     float test_hr1()                        { return _current_data.hr1; }
     float test_hr1_sqi()                    { return _current_data.hr1_sqi; }
 
     // HR2
-    void  test_feed_hr2(int32_t led1_aled1) { _update_hr2(led1_aled1); }
+    void  test_feed_hr2(int32_t led1_sub) { _update_hr2(led1_sub); }
     float test_hr2()                        { return _current_data.hr2; }
     float test_hr2_sqi()                    { return _current_data.hr2_sqi; }
 
     // HR3
-    void  test_feed_hr3(int32_t led1_aled1) { _update_hr3(led1_aled1); }
+    void  test_feed_hr3(int32_t led1_sub) { _update_hr3(led1_sub); }
     float test_hr3()                        { return _current_data.hr3; }
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 
     // SpO2
-    void  test_feed_spo2(int32_t ir_corr, int32_t red_corr) { _update_spo2(ir_corr, red_corr); }
+    void  test_feed_spo2(int32_t led1_sub, int32_t led2_sub) { _update_spo2(led1_sub, led2_sub); }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }
     float test_spo2_sqi()                   { return _current_data.spo2_sqi; }

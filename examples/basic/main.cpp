@@ -52,7 +52,7 @@ void ReaderTask(void *pvParameters) {
         if (afe.getData(data)) {
             // PPG waveform — raw ADC counts, bandpass-filtered
             Serial.print("PPG: ");
-            Serial.print(data.ppg);
+            Serial.print(data.ppg_disp);
 
             // SpO2 — valid flag indicates enough samples have been accumulated
             Serial.print("  SpO2: ");
@@ -134,7 +134,7 @@ void setup() {
     // This configures the chip registers, attaches the DRDY interrupt and
     // launches the internal processing task. Default settings:
     //   - Sample rate : 500 Hz
-    //   - PPG channel : LED1_ALED1 (IR ambient-corrected)
+    //   - PPG channel : LED1_SUB (IR ambient-corrected)
     //   - Filter      : Butterworth bandpass 0.5–20 Hz
     //   - TIA gain    : 500 kΩ
     //   - SpO2 formula: SpO2 = 104 - 17·R  (generic, assumes ~940 nm IR LED)
