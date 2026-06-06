@@ -358,11 +358,11 @@ enum class AFE4490TIACF {
 };
 
 enum class AFE4490Stage2Gain {
-    GAIN_0DB,    // 0 dB (×1, unity gain) — Stage 2 active; disable via setEnStage2GainLED1/2(false)
-    GAIN_3_5DB,
-    GAIN_6DB,
-    GAIN_9_5DB,
-    GAIN_12DB
+    GAIN_0DB,    // 0 dB   — ×1   — RG=100 kΩ  (Ri=100 kΩ fixed, datasheet Table 1)
+    GAIN_3_5DB,  // 3.5 dB — ×1.5 — RG=150 kΩ
+    GAIN_6DB,    // 6 dB   — ×2   — RG=200 kΩ
+    GAIN_9_5DB,  // 9.5 dB — ×3   — RG=300 kΩ
+    GAIN_12DB    // 12 dB  — ×4   — RG=400 kΩ
 };
 
 enum class ProbeState {
@@ -394,6 +394,53 @@ constexpr uint32_t RSQM_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient chann
 constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
 constexpr uint32_t RSQM_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 // bits 16–31 reserved
+```
+
+---
+
+## 3b. Physical LUT arrays and string codecs
+
+Declared `public` in `incunest_afe4490.h`. These are the **single source of truth** for all physical values; neither application code nor external tools should maintain local copies.
+
+### Physical LUT arrays (constexpr)
+
+Indexed by casting the enum to `int`. Example: `float rf = kAFE_RF_OHM[(int)cfg.afe_tia_gain_led1];`
+
+```cpp
+// TIA feedback resistor — indexed by AFE4490TIAGain (0=RF_10K … 6=RF_1M)
+constexpr float kAFE_RF_OHM[7] = { 10e3f, 25e3f, 50e3f, 100e3f, 250e3f, 500e3f, 1e6f };
+
+// TIA feedback capacitor — indexed by AFE4490TIACF (0=CF_5P … 5=CF_155P)
+constexpr float kAFE_CF_PF[6]  = { 5.0f, 10.0f, 20.0f, 30.0f, 55.0f, 155.0f };
+
+// Stage 2 feedback resistor RG — indexed by AFE4490Stage2Gain (0=GAIN_0DB … 4=GAIN_12DB)
+constexpr float kAFE_STG2_RG_OHM[5] = { 100e3f, 150e3f, 200e3f, 300e3f, 400e3f };
+
+// Stage 2 linear gain (= RG/Ri) — same indexing as above
+constexpr float kAFE_STG2_LINEAR[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
+
+// Stage 2 input resistor Ri — fixed by chip design (datasheet p.28)
+constexpr float kAFE_STG2_RI_OHM = 100e3f;
+```
+
+Register-code arrays (`rf_code[]`, `cf_code[]`, `stg2_gain_code[]`) remain in an anonymous namespace in `incunest_afe4490.cpp` — internal only, never exposed.
+
+### String codecs (inline)
+
+Convert between enum values and the label strings used in the `$CFG`/`$SET` protocol.
+
+```cpp
+// TIA feedback resistor RF
+inline const char* afeRFToStr(AFE4490TIAGain g);          // → "10K"/"25K"/"50K"/"100K"/"250K"/"500K"/"1M"
+inline bool        afeStrToRF(const char* s, AFE4490TIAGain& out);  // returns false if unrecognised
+
+// TIA feedback capacitor CF
+inline const char* afeCFToStr(AFE4490TIACF cf);            // → "5p"/"10p"/"20p"/"30p"/"55p"/"155p"
+inline bool        afeStrToCF(const char* s, AFE4490TIACF& out);
+
+// Stage 2 gain
+inline const char* afeStg2ToStr(AFE4490Stage2Gain g);      // → "0dB"/"3.5dB"/"6dB"/"9.5dB"/"12dB"
+inline bool        afeStrToStg2(const char* s, AFE4490Stage2Gain& out);
 ```
 
 ---
