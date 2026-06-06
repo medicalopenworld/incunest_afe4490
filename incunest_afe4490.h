@@ -165,7 +165,7 @@ enum class AFE4490Stage2Gain {
 // ── Physical parameter tables (indexed by enum cast to int) ──────────────────
 // Single source of truth for AFE4490 physical values.
 // Do NOT duplicate these in application code — include this header and index by enum.
-// Usage: float rf_ohm = kAFE_RF_OHM[(int)cfg.afe_tia_gain_led1];
+// Usage: float rf_ohm = kAFE_RF_OHM[(int)cfg.afe_tia_rf_led1];
 
 // AFE4490TIAGain → TIA feedback resistance [Ω]
 constexpr float kAFE_RF_OHM[7] = {
@@ -311,17 +311,17 @@ struct AFE4490Config {
     float             afe_led2_current_mA;   // RED LED drive current [mA]
     uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
     // TIA gain — separate per-channel (ENSEPGAIN=1) or shared (ENSEPGAIN=0)
-    // When afe_ensepgain=false: hardware uses LED2 fields for both channels (TIAGAIN LED1 fields ignored by chip)
-    // When afe_ensepgain=true:  TIAGAIN register controls LED1 (IR); TIA_AMB_GAIN controls LED2 (RED)
-    bool              afe_ensepgain;         // ENSEPGAIN bit D15 in TIAGAIN register
-    AFE4490TIAGain    afe_tia_gain_led1;     // RF for LED1 (IR)  — active when afe_ensepgain=true
-    AFE4490TIACF      afe_tia_cf_led1;       // CF for LED1 (IR)  — active when afe_ensepgain=true
-    AFE4490Stage2Gain afe_stage2_gain_led1;  // Stage 2 STG2GAIN1 for LED1 (IR) — gain only, no enable
-    bool              afe_stage2_en1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit Stage 2 enable for LED1
-    AFE4490TIAGain    afe_tia_gain_led2;     // RF for LED2 (RED) — always active (both channels when ENSEPGAIN=0)
+    // When afe_sep_tia_en=false: hardware uses LED2 fields for both channels (TIAGAIN LED1 fields ignored by chip)
+    // When afe_sep_tia_en=true:  TIAGAIN register controls LED1 (IR); TIA_AMB_GAIN controls LED2 (RED)
+    bool              afe_sep_tia_en;         // ENSEPGAIN bit D15 in TIAGAIN register
+    AFE4490TIAGain    afe_tia_rf_led1;     // RF for LED1 (IR)  — active when afe_sep_tia_en=true
+    AFE4490TIACF      afe_tia_cf_led1;       // CF for LED1 (IR)  — active when afe_sep_tia_en=true
+    AFE4490Stage2Gain afe_stg2_rg_led1;  // Stage 2 STG2GAIN1 for LED1 (IR) — gain only, no enable
+    bool              afe_stg2_en_led1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit Stage 2 enable for LED1
+    AFE4490TIAGain    afe_tia_rf_led2;     // RF for LED2 (RED) — always active (both channels when ENSEPGAIN=0)
     AFE4490TIACF      afe_tia_cf_led2;       // CF for LED2 (RED) — always active
-    AFE4490Stage2Gain afe_stage2_gain_led2;  // Stage 2 STG2GAIN2 for LED2 (RED) — gain only, no enable
-    bool              afe_stage2_en2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
+    AFE4490Stage2Gain afe_stg2_rg_led2;  // Stage 2 STG2GAIN2 for LED2 (RED) — gain only, no enable
+    bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
     AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
@@ -377,9 +377,9 @@ public:
     void setLED2Current(float mA);
     void setLEDRange(uint8_t mA);           // 75 or 150 mA
     // Joint setters — apply the same value to both LED1 and LED2 channels; also sets ENSEPGAIN=0
-    void setTIAGain(AFE4490TIAGain gain);   // sets afe_tia_gain_led1 = afe_tia_gain_led2 = gain
+    void setTIAGain(AFE4490TIAGain gain);   // sets afe_tia_rf_led1 = afe_tia_rf_led2 = gain
     void setTIACF(AFE4490TIACF cf);         // sets afe_tia_cf_led1 = afe_tia_cf_led2 = cf
-    void setStage2Gain(AFE4490Stage2Gain gain); // sets afe_stage2_gain_led1 = afe_stage2_gain_led2 = gain
+    void setStage2Gain(AFE4490Stage2Gain gain); // sets afe_stg2_rg_led1 = afe_stg2_rg_led2 = gain
     // Separate gain mode — enable independent LED1/LED2 TIA settings (ENSEPGAIN bit D15 in TIAGAIN)
     void setEnSepGain(bool enable);
     // Per-channel setters — only meaningful when ENSEPGAIN=1 (setEnSepGain(true))
@@ -554,8 +554,8 @@ private:
     uint32_t _compute_settle_margin() const;
     // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
-    void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_gain_led1
-    void _recalc_afe_tia_cf_led2();   // updates _afe_tia_cf_led2 from _afe_tia_gain_led2
+    void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
+    void _recalc_afe_tia_cf_led2();   // updates _afe_tia_cf_led2 from _afe_tia_rf_led2
     // Returns mA rounded to the nearest DAC step: round(mA/range*256)/256*range
     float _quantize_led_mA(float mA) const;
 
@@ -674,18 +674,18 @@ private:
     float             _afe_led1_current_mA;
     float             _afe_led2_current_mA;
     uint8_t           _afe_led_range_mA;     // 75 or 150
-    // TIA gain — separate per-channel when _afe_ensepgain=true
+    // TIA gain — separate per-channel when _afe_sep_tia_en=true
     // When false: chip uses LED2 fields for both channels; LED1 fields written but ignored by hardware
     // When true:  TIAGAIN→LED1(IR), TIA_AMB_GAIN→LED2(RED)
-    bool              _afe_ensepgain;
-    AFE4490TIAGain    _afe_tia_gain_led1;    // RF_LED1 in TIAGAIN
+    bool              _afe_sep_tia_en;
+    AFE4490TIAGain    _afe_tia_rf_led1;    // RF_LED1 in TIAGAIN
     AFE4490TIACF      _afe_tia_cf_led1;      // CF_LED1 in TIAGAIN
-    AFE4490Stage2Gain _afe_stage2_gain_led1; // STG2GAIN1[2:0] in TIAGAIN D[10:8]
-    bool              _afe_stage2_en1;       // STAGE2EN1 (D14 of TIAGAIN)
-    AFE4490TIAGain    _afe_tia_gain_led2;    // RF_LED2 in TIA_AMB_GAIN
+    AFE4490Stage2Gain _afe_stg2_rg_led1; // STG2GAIN1[2:0] in TIAGAIN D[10:8]
+    bool              _afe_stg2_en_led1;       // STAGE2EN1 (D14 of TIAGAIN)
+    AFE4490TIAGain    _afe_tia_rf_led2;    // RF_LED2 in TIA_AMB_GAIN
     AFE4490TIACF      _afe_tia_cf_led2;      // CF_LED2 in TIA_AMB_GAIN
-    AFE4490Stage2Gain _afe_stage2_gain_led2; // STG2GAIN2[2:0] in TIA_AMB_GAIN D[10:8]
-    bool              _afe_stage2_en2;       // STAGE2EN2 (D14 of TIA_AMB_GAIN); also forced ON when _afe_ambdac_uA > 0
+    AFE4490Stage2Gain _afe_stg2_rg_led2; // STG2GAIN2[2:0] in TIA_AMB_GAIN D[10:8]
+    bool              _afe_stg2_en_led2;       // STAGE2EN2 (D14 of TIA_AMB_GAIN); also forced ON when _afe_ambdac_uA > 0
     uint8_t           _afe_ambdac_uA;        // AMBDAC[3:0] value (0–10), written to TIA_AMB_GAIN D19:D16
 
     // ── Signal processing configuration ──

@@ -187,7 +187,7 @@ namespace {
     constexpr uint32_t tia_settle_min      = 50;     // floor: 12.5 µs @ 4 MHz (covers RF_500K/CF_5P at high Fs)
     constexpr float    tia_n_tau           = 5.0f;   // 5τ → <0.7% settling error
 
-    // TIAGAIN: STG2GAIN bits D[10:8] only — STAGE2EN (D14) is set separately via _afe_stage2_en1/2
+    // TIAGAIN: STG2GAIN bits D[10:8] only — STAGE2EN (D14) is set separately via _afe_stg2_en_led1/2
     constexpr uint32_t stg2_gain_code[5] = {
         0x000000UL,   // GAIN_0DB:   STG2=0
         0x000100UL,   // GAIN_3_5DB: STG2=1
@@ -225,15 +225,15 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_result(0.0f), _hr3_sqi_result(0.0f),
       _afe_sample_rate_hz(500), _afe_adc_averages(8),
       _afe_led1_current_mA(20.0f), _afe_led2_current_mA(20.0f), _afe_led_range_mA(150),
-      _afe_ensepgain(true),
-      _afe_tia_gain_led1(AFE4490TIAGain::RF_100K),
+      _afe_sep_tia_en(true),
+      _afe_tia_rf_led1(AFE4490TIAGain::RF_100K),
       _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
-      _afe_stage2_gain_led1(AFE4490Stage2Gain::GAIN_0DB),
-      _afe_stage2_en1(true),
-      _afe_tia_gain_led2(AFE4490TIAGain::RF_100K),
+      _afe_stg2_rg_led1(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_stg2_en_led1(true),
+      _afe_tia_rf_led2(AFE4490TIAGain::RF_100K),
       _afe_tia_cf_led2(AFE4490TIACF::CF_5P),
-      _afe_stage2_gain_led2(AFE4490Stage2Gain::GAIN_0DB),
-      _afe_stage2_en2(true),
+      _afe_stg2_rg_led2(AFE4490Stage2Gain::GAIN_0DB),
+      _afe_stg2_en_led2(true),
       _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1_SUB),
       _ppgdisp_filter_type(AFE4490Filter::BUTTERWORTH),
@@ -483,7 +483,7 @@ void INCUNEST_AFE4490::setTIAGain(AFE4490TIAGain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_tia_gain_led1 = _afe_tia_gain_led2 = gain;
+    _afe_tia_rf_led1 = _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
 #ifndef INCUNEST_OFFLINE
@@ -511,7 +511,7 @@ void INCUNEST_AFE4490::setStage2Gain(AFE4490Stage2Gain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_stage2_gain_led1 = _afe_stage2_gain_led2 = gain;
+    _afe_stg2_rg_led1 = _afe_stg2_rg_led2 = gain;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -525,7 +525,7 @@ void INCUNEST_AFE4490::setEnSepGain(bool enable) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_ensepgain = enable;
+    _afe_sep_tia_en = enable;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -539,7 +539,7 @@ void INCUNEST_AFE4490::setTIAGainLED1(AFE4490TIAGain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_tia_gain_led1 = gain;
+    _afe_tia_rf_led1 = gain;
     _recalc_afe_tia_cf_led1();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
@@ -566,7 +566,7 @@ void INCUNEST_AFE4490::setStage2GainLED1(AFE4490Stage2Gain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_stage2_gain_led1 = gain;
+    _afe_stg2_rg_led1 = gain;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -580,7 +580,7 @@ void INCUNEST_AFE4490::setTIAGainLED2(AFE4490TIAGain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_tia_gain_led2 = gain;
+    _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led2();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
@@ -607,7 +607,7 @@ void INCUNEST_AFE4490::setStage2GainLED2(AFE4490Stage2Gain gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_stage2_gain_led2 = gain;
+    _afe_stg2_rg_led2 = gain;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -620,7 +620,7 @@ void INCUNEST_AFE4490::setStage2En1(bool en) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_stage2_en1 = en;
+    _afe_stg2_en_led1 = en;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -633,7 +633,7 @@ void INCUNEST_AFE4490::setStage2En2(bool en) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_stage2_en2 = en;
+    _afe_stg2_en_led2 = en;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -808,15 +808,15 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.afe_led1_current_mA = _afe_led1_current_mA;
     cfg.afe_led2_current_mA = _afe_led2_current_mA;
     cfg.afe_led_range_mA    = _afe_led_range_mA;
-    cfg.afe_ensepgain        = _afe_ensepgain;
-    cfg.afe_tia_gain_led1    = _afe_tia_gain_led1;
+    cfg.afe_sep_tia_en        = _afe_sep_tia_en;
+    cfg.afe_tia_rf_led1    = _afe_tia_rf_led1;
     cfg.afe_tia_cf_led1      = _afe_tia_cf_led1;
-    cfg.afe_stage2_gain_led1 = _afe_stage2_gain_led1;
-    cfg.afe_stage2_en1       = _afe_stage2_en1;
-    cfg.afe_tia_gain_led2    = _afe_tia_gain_led2;
+    cfg.afe_stg2_rg_led1 = _afe_stg2_rg_led1;
+    cfg.afe_stg2_en_led1       = _afe_stg2_en_led1;
+    cfg.afe_tia_rf_led2    = _afe_tia_rf_led2;
     cfg.afe_tia_cf_led2      = _afe_tia_cf_led2;
-    cfg.afe_stage2_gain_led2 = _afe_stage2_gain_led2;
-    cfg.afe_stage2_en2       = _afe_stage2_en2;
+    cfg.afe_stg2_rg_led2 = _afe_stg2_rg_led2;
+    cfg.afe_stg2_en_led2       = _afe_stg2_en_led2;
     cfg.afe_ambdac_uA        = _afe_ambdac_uA;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_spi_mutex);
@@ -1046,10 +1046,10 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     } else {
         // Optical transmittance — uses instantaneous led1_sub/led2_sub values.
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
-        const float rf1 = kAFE_RF_OHM[(int)_afe_tia_gain_led1];
-        const float rg1 = _afe_stage2_en1 ? kAFE_STG2_LINEAR[(int)_afe_stage2_gain_led1] : 1.0f;
-        const float rf2 = kAFE_RF_OHM[(int)_afe_tia_gain_led2];
-        const float rg2 = _afe_stage2_en2 ? kAFE_STG2_LINEAR[(int)_afe_stage2_gain_led2] : 1.0f;
+        const float rf1 = kAFE_RF_OHM[(int)_afe_tia_rf_led1];
+        const float rg1 = _afe_stg2_en_led1 ? kAFE_STG2_LINEAR[(int)_afe_stg2_rg_led1] : 1.0f;
+        const float rf2 = kAFE_RF_OHM[(int)_afe_tia_rf_led2];
+        const float rg2 = _afe_stg2_en_led2 ? kAFE_STG2_LINEAR[(int)_afe_stg2_rg_led2] : 1.0f;
 
         // Optical transmittance for each channel (dimensionless):
         //   ot = LED_Sub / (LED_mA × RF_Ω × RG_linear)
@@ -1238,24 +1238,24 @@ void INCUNEST_AFE4490::_apply_timing_regs() {
 
 uint32_t INCUNEST_AFE4490::_build_tiagain_led1() {
     // TIAGAIN register (0x20): RF_LED1[2:0] | CF_LED1[4:0] | STG2GAIN1[2:0] | STAGE2EN1 | ENSEPGAIN
-    uint32_t reg = rf_code[(int)_afe_tia_gain_led1];           // bits D[2:0]
+    uint32_t reg = rf_code[(int)_afe_tia_rf_led1];           // bits D[2:0]
     reg         |= cf_code[(int)_afe_tia_cf_led1];             // bits D[7:3]
-    reg         |= stg2_gain_code[(int)_afe_stage2_gain_led1]; // bits D[10:8]: gain only
-    if (_afe_stage2_en1)  reg |= 0x004000UL;                   // D14: STAGE2EN1 (explicit)
-    if (_afe_ensepgain)   reg |= 0x008000UL;                   // D15: ENSEPGAIN
+    reg         |= stg2_gain_code[(int)_afe_stg2_rg_led1]; // bits D[10:8]: gain only
+    if (_afe_stg2_en_led1)  reg |= 0x004000UL;                   // D14: STAGE2EN1 (explicit)
+    if (_afe_sep_tia_en)   reg |= 0x008000UL;                   // D15: ENSEPGAIN
     return reg;
 }
 
 uint32_t INCUNEST_AFE4490::_build_tia_amb_gain_led2() {
     // TIA_AMB_GAIN register (0x21): RF_LED2[2:0] | CF_LED2[4:0] | STG2GAIN2[2:0] | STAGE2EN2 | AMBDAC[3:0]
     // RF/CF/Stage2 fields control LED2 (RED) when ENSEPGAIN=1, or both channels when ENSEPGAIN=0.
-    uint32_t reg = rf_code[(int)_afe_tia_gain_led2];           // bits D[2:0]
+    uint32_t reg = rf_code[(int)_afe_tia_rf_led2];           // bits D[2:0]
     reg         |= cf_code[(int)_afe_tia_cf_led2];             // bits D[7:3]
-    reg         |= stg2_gain_code[(int)_afe_stage2_gain_led2]; // bits D[10:8]: gain only
+    reg         |= stg2_gain_code[(int)_afe_stg2_rg_led2]; // bits D[10:8]: gain only
     reg         |= ((uint32_t)_afe_ambdac_uA << 16);           // bits D[19:16]: AMBDAC[3:0]
     // STAGE2EN2 (D14): set when explicitly enabled OR when AMBDAC > 0.
     // When AMBDAC > 0, Stage 2 must be active — the cancellation current has no effect without it.
-    if (_afe_stage2_en2 || _afe_ambdac_uA > 0) reg |= 0x004000UL;
+    if (_afe_stg2_en_led2 || _afe_ambdac_uA > 0) reg |= 0x004000UL;
     return reg;
 }
 
@@ -1332,7 +1332,7 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led1() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF_LED1)
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
-    float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_gain_led1]) * 1e12f;
+    float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_rf_led1]) * 1e12f;
     _afe_tia_cf_led1 = AFE4490TIACF::CF_5P;
     for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
         if (kAFE_CF_PF[i] <= cf_max_pF) { _afe_tia_cf_led1 = (AFE4490TIACF)i; break; }
@@ -1343,7 +1343,7 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF_LED2)
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
-    float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_gain_led2]) * 1e12f;
+    float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_rf_led2]) * 1e12f;
     _afe_tia_cf_led2 = AFE4490TIACF::CF_5P;
     for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
         if (kAFE_CF_PF[i] <= cf_max_pF) { _afe_tia_cf_led2 = (AFE4490TIACF)i; break; }

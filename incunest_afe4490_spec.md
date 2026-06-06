@@ -148,14 +148,14 @@ struct AFE4490Config {
     float             afe_led1_current_mA;   // IR LED drive current [mA] — actual DAC-quantised value
     float             afe_led2_current_mA;   // RED LED drive current [mA] — actual DAC-quantised value
     uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
-    AFE4490TIAGain    afe_tia_gain_led1;      // TIA RF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
+    AFE4490TIAGain    afe_tia_rf_led1;      // TIA RF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
     AFE4490TIACF      afe_tia_cf_led1;       // TIA CF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
-    AFE4490Stage2Gain afe_stage2_gain_led1;  // STG2GAIN1 for LED1 — gain bits only, no enable
-    bool              afe_stage2_en1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit enable
-    AFE4490TIAGain    afe_tia_gain_led2;     // TIA RF for LED2 (RED) — TIA_AMB_GAIN; always active
+    AFE4490Stage2Gain afe_stg2_rg_led1;  // STG2GAIN1 for LED1 — gain bits only, no enable
+    bool              afe_stg2_en_led1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit enable
+    AFE4490TIAGain    afe_tia_rf_led2;     // TIA RF for LED2 (RED) — TIA_AMB_GAIN; always active
     AFE4490TIACF      afe_tia_cf_led2;       // TIA CF for LED2 (RED) — TIA_AMB_GAIN; always active
-    AFE4490Stage2Gain afe_stage2_gain_led2;  // STG2GAIN2 for LED2 — gain bits only, no enable
-    bool              afe_stage2_en2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit enable; also forced ON when AMBDAC > 0
+    AFE4490Stage2Gain afe_stg2_rg_led2;  // STG2GAIN2 for LED2 — gain bits only, no enable
+    bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit enable; also forced ON when AMBDAC > 0
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
     AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
@@ -404,7 +404,7 @@ Declared `public` in `incunest_afe4490.h`. These are the **single source of trut
 
 ### Physical LUT arrays (constexpr)
 
-Indexed by casting the enum to `int`. Example: `float rf = kAFE_RF_OHM[(int)cfg.afe_tia_gain_led1];`
+Indexed by casting the enum to `int`. Example: `float rf = kAFE_RF_OHM[(int)cfg.afe_tia_rf_led1];`
 
 ```cpp
 // TIA feedback resistor — indexed by AFE4490TIAGain (0=RF_10K … 6=RF_1M)
@@ -1316,15 +1316,15 @@ Reference table for HGAC and RSQM algorithm design. Maps AFE4490 datasheet signa
 
 | Datasheet name | HW register | `AFE4490Config` field | Setter | Type / enum |
 |---|---|---|---|---|
-| **RF_LED1** | `TIAGAIN` D[2:0] | `afe_tia_gain_led1` | `setTIAGain()` | `AFE4490TIAGain` (`RF_10K`…`RF_1M`) |
-| **RF_LED2** | `TIA_AMB_GAIN` D[2:0] | `afe_tia_gain_led2` | `setTIAGain()` (shared when `ENSEPGAIN=0`) | `AFE4490TIAGain` |
-| **STG2GAIN1** | `TIAGAIN` D[10:8] | `afe_stage2_gain_led1` | `setStage2GainLED1()` | `AFE4490Stage2Gain` (`GAIN_0DB`…`GAIN_12DB`) |
-| **STG2GAIN2** | `TIA_AMB_GAIN` D[10:8] | `afe_stage2_gain_led2` | `setStage2GainLED2()` | `AFE4490Stage2Gain` |
+| **RF_LED1** | `TIAGAIN` D[2:0] | `afe_tia_rf_led1` | `setTIAGain()` | `AFE4490TIAGain` (`RF_10K`…`RF_1M`) |
+| **RF_LED2** | `TIA_AMB_GAIN` D[2:0] | `afe_tia_rf_led2` | `setTIAGain()` (shared when `ENSEPGAIN=0`) | `AFE4490TIAGain` |
+| **STG2GAIN1** | `TIAGAIN` D[10:8] | `afe_stg2_rg_led1` | `setStage2GainLED1()` | `AFE4490Stage2Gain` (`GAIN_0DB`…`GAIN_12DB`) |
+| **STG2GAIN2** | `TIA_AMB_GAIN` D[10:8] | `afe_stg2_rg_led2` | `setStage2GainLED2()` | `AFE4490Stage2Gain` |
 | **AMBDAC** | `TIA_AMB_GAIN` D[19:16] | `afe_ambdac_uA` | `setAmbDac(uint8_t uA)` | `uint8_t` 0–10 µA |
 | **LED1** (IR current) | `LEDCNTRL` D[15:8] | `afe_led1_current_mA` | `setLED1Current(float mA)` | `float` 0–range mA (DAC-quantised) |
 | **LED2** (RED current) | `LEDCNTRL` D[7:0] | `afe_led2_current_mA` | `setLED2Current(float mA)` | `float` 0–range mA (DAC-quantised) |
 
-> **RF_LED2 note:** when `ENSEPGAIN=0` (default), `setTIAGain()` writes the same RF value to both `TIAGAIN` and `TIA_AMB_GAIN`. `afe_tia_gain_led2` acts independently only when `ENSEPGAIN=1`.
+> **RF_LED2 note:** when `ENSEPGAIN=0` (default), `setTIAGain()` writes the same RF value to both `TIAGAIN` and `TIA_AMB_GAIN`. `afe_tia_rf_led2` acts independently only when `ENSEPGAIN=1`.
 
 ### 12.2 ADC data registers
 
@@ -1447,7 +1447,7 @@ Key references for each algorithm implemented in this library.
 |         | contains only D[10:8] gain bits (no enable). `setStage2En1(bool)` and          |
 |         | `setStage2En2(bool)` expose STAGE2EN1 (D14 of TIAGAIN) and STAGE2EN2           |
 |         | (D14 of TIA_AMB_GAIN) as independent explicit parameters. `AFE4490Config`      |
-|         | gains `afe_stage2_en1` and `afe_stage2_en2`. `$CFG` frame gains                |
+|         | gains `afe_stg2_en_led1` and `afe_stg2_en_led2`. `$CFG` frame gains                |
 |         | `stage2en1` and `stage2en2` fields. `$SET,stage2en1/2,<0\|1>` commands added.  |
 |         | PulseNest HW CONFIG TIA section gains STAGE2EN1/STAGE2EN2 checkboxes.          |
 |         | STAGE2EN2 is still forced ON when AMBDAC > 0.                                  |
