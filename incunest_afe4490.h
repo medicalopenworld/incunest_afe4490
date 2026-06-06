@@ -189,7 +189,7 @@ constexpr float kAFE_CF_PF[6] = {
 };
 
 // AFE4490RG → Stage 2 feedback resistance RG [Ω]
-constexpr float kAFE_STG2_RG_OHM[5] = {
+constexpr float kAFE_RG_OHM[5] = {
    100e3f,   // RG_100K   (×1)
    150e3f,   // RG_150K (×1.5)
    200e3f,   // RG_200K   (×2)
@@ -198,7 +198,7 @@ constexpr float kAFE_STG2_RG_OHM[5] = {
 };
 
 // AFE4490RG → linear voltage gain [dimensionless] = RG / Ri
-constexpr float kAFE_STG2_LINEAR[5] = {
+constexpr float kAFE_RG_GAIN[5] = {
     1.0f,    // RG_100K
     1.5f,    // RG_150K
     2.0f,    // RG_200K
@@ -207,7 +207,7 @@ constexpr float kAFE_STG2_LINEAR[5] = {
 };
 
 // Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
-constexpr float kAFE_STG2_RI_OHM = 100e3f;
+constexpr float kAFE_RI_OHM = 100e3f;
 
 // ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────
 // These functions convert between the enum values and the abbreviated string labels

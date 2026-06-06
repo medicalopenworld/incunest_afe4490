@@ -414,13 +414,13 @@ constexpr float kAFE_RF_OHM[7] = { 10e3f, 25e3f, 50e3f, 100e3f, 250e3f, 500e3f, 
 constexpr float kAFE_CF_PF[6]  = { 5.0f, 10.0f, 20.0f, 30.0f, 55.0f, 155.0f };
 
 // Stage 2 feedback resistor RG — indexed by AFE4490RG (0=RG_100K … 4=RG_400K)
-constexpr float kAFE_STG2_RG_OHM[5] = { 100e3f, 150e3f, 200e3f, 300e3f, 400e3f };
+constexpr float kAFE_RG_OHM[5] = { 100e3f, 150e3f, 200e3f, 300e3f, 400e3f };
 
 // Stage 2 linear gain (= RG/Ri) — same indexing as above
-constexpr float kAFE_STG2_LINEAR[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
+constexpr float kAFE_RG_GAIN[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
 
 // Stage 2 input resistor Ri — fixed by chip design (datasheet p.28)
-constexpr float kAFE_STG2_RI_OHM = 100e3f;
+constexpr float kAFE_RI_OHM = 100e3f;
 ```
 
 Register-code arrays (`rf_code[]`, `cf_code[]`, `stg2_gain_code[]`) remain in an anonymous namespace in `incunest_afe4490.cpp` — internal only, never exposed.

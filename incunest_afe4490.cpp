@@ -195,7 +195,7 @@ namespace {
         0x000300UL,   // RG_300K: STG2=3
         0x000400UL    // RG_400K:  STG2=4
     };
-    // Physical Stage 2 gains: use kAFE_STG2_LINEAR[] / kAFE_STG2_RG_OHM[] from header (single source of truth)
+    // Physical Stage 2 gains: use kAFE_RG_GAIN[] / kAFE_RG_OHM[] from header (single source of truth)
 }
 
 // ── Static member ─────────────────────────────────────────────────────────────
@@ -1047,9 +1047,9 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         // Optical transmittance — uses instantaneous led1_sub/led2_sub values.
         // APPLIED OT ≈ 0.05, NOT_APPLIED OT ≈ 2.8 (×54 margin); 2% PPG modulation → ±0.001 OT.
         const float rf1 = kAFE_RF_OHM[(int)_afe_tia_rf_led1];
-        const float rg1 = _afe_stg2_en_led1 ? kAFE_STG2_LINEAR[(int)_afe_stg2_rg_led1] : 1.0f;
+        const float rg1 = _afe_stg2_en_led1 ? kAFE_RG_GAIN[(int)_afe_stg2_rg_led1] : 1.0f;
         const float rf2 = kAFE_RF_OHM[(int)_afe_tia_rf_led2];
-        const float rg2 = _afe_stg2_en_led2 ? kAFE_STG2_LINEAR[(int)_afe_stg2_rg_led2] : 1.0f;
+        const float rg2 = _afe_stg2_en_led2 ? kAFE_RG_GAIN[(int)_afe_stg2_rg_led2] : 1.0f;
 
         // Optical transmittance for each channel (dimensionless):
         //   ot = LED_Sub / (LED_mA × RF_Ω × RG_linear)
