@@ -196,6 +196,13 @@ namespace {
         0x000400UL    // RG_400K:  STG2=4
     };
     // Physical Stage 2 gains: use kAFE_RG_GAIN[] / kAFE_RG_OHM[] from header (single source of truth)
+
+    // Internal queue item used when debug mode is active (begin(debug=true)).
+    // Carries AFE4490Data and AFE4490DebugData in a single queue slot for true atomicity.
+    struct DebugQueueItem {
+        AFE4490Data     data;
+        AFE4490DebugData dbg;
+    };
 }
 
 // ── Static member ─────────────────────────────────────────────────────────────
@@ -274,7 +281,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _rsqm_led1_sub{0.0f, 0.0f, 0},
       _rsqm_led2_sub{0.0f, 0.0f, 0},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
-      _rsqm_settling_countdown(0)
+      _rsqm_settling_countdown(0),
+      _debug_enabled(false)
 {
     // Quantize initial LED currents to the DAC grid (range already set in init list)
     _afe_led1_current_mA = _quantize_led_mA(_afe_led1_current_mA);
@@ -310,18 +318,20 @@ INCUNEST_AFE4490::~INCUNEST_AFE4490() {
 // does not call SPI.begin() to avoid reinitialising the bus and interfering with
 // other SPI devices. Only SPI.beginTransaction() / endTransaction() are used here.
 #ifndef INCUNEST_OFFLINE
-void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy) {
-    _pin_cs   = pin_cs;
-    _pin_drdy = pin_drdy;
-    _g_instance = this;
+void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
+    _pin_cs        = pin_cs;
+    _pin_drdy      = pin_drdy;
+    _debug_enabled = debug;
+    _g_instance    = this;
 
     pinMode(_pin_cs, OUTPUT);
     digitalWrite(_pin_cs, HIGH);
 
+    const size_t queue_item_size = debug ? sizeof(DebugQueueItem) : sizeof(AFE4490Data);
     _drdy_sem    = xSemaphoreCreateBinary();
     _spi_mutex   = xSemaphoreCreateMutex();
     _state_mutex = xSemaphoreCreateMutex();
-    _data_queue  = xQueueCreate(INCUNEST_AFE4490_QUEUE_SIZE, sizeof(AFE4490Data));
+    _data_queue  = xQueueCreate(INCUNEST_AFE4490_QUEUE_SIZE, queue_item_size);
     _hr2_calc_sem = xSemaphoreCreateBinary();
     _hr3_calc_sem = xSemaphoreCreateBinary();
 
@@ -899,18 +909,17 @@ void INCUNEST_AFE4490::setTimingReg(uint8_t addr, uint32_t value) {
 
 // ── getData() ─────────────────────────────────────────────────────────────────
 #ifndef INCUNEST_OFFLINE
-bool INCUNEST_AFE4490::getData(AFE4490Data& data) {
-    return xQueueReceive(_data_queue, &data, 0) == pdTRUE;
-}
-
-bool INCUNEST_AFE4490::getData(AFE4490Data& data, AFE4490DebugData& dbg) {
-    const bool ok = xQueueReceive(_data_queue, &data, 0) == pdTRUE;
-    if (ok) {
-        xSemaphoreTake(_state_mutex, portMAX_DELAY);
-        dbg = _debug_data;
-        xSemaphoreGive(_state_mutex);
+bool INCUNEST_AFE4490::getData(AFE4490Data& data, AFE4490DebugData* dbg) {
+    if (_debug_enabled) {
+        DebugQueueItem item;
+        const bool ok = xQueueReceive(_data_queue, &item, 0) == pdTRUE;
+        if (ok) {
+            data = item.data;
+            if (dbg) *dbg = item.dbg;
+        }
+        return ok;
     }
-    return ok;
+    return xQueueReceive(_data_queue, &data, 0) == pdTRUE;
 }
 #endif
 
@@ -1645,11 +1654,23 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // Update debug snapshot — always called under _state_mutex (held by _task_body() caller).
     _debug_data.analog = as;
 
-    // Push to queue; if full, drop oldest to keep most recent
-    if (xQueueSend(_data_queue, &_current_data, 0) != pdTRUE) {
-        AFE4490Data dummy;
-        xQueueReceive(_data_queue, &dummy, 0);
-        xQueueSend(_data_queue, &_current_data, 0);
+    // Push to queue; if full, drop oldest to keep most recent.
+    // Debug mode: push combined DebugQueueItem for atomic getData(data,dbg) access.
+    if (_debug_enabled) {
+        DebugQueueItem item;
+        item.data = _current_data;
+        item.dbg  = _debug_data;
+        if (xQueueSend(_data_queue, &item, 0) != pdTRUE) {
+            DebugQueueItem dummy;
+            xQueueReceive(_data_queue, &dummy, 0);
+            xQueueSend(_data_queue, &item, 0);
+        }
+    } else {
+        if (xQueueSend(_data_queue, &_current_data, 0) != pdTRUE) {
+            AFE4490Data dummy;
+            xQueueReceive(_data_queue, &dummy, 0);
+            xQueueSend(_data_queue, &_current_data, 0);
+        }
     }
 }
 

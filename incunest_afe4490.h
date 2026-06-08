@@ -402,7 +402,9 @@ public:
     // This library does not call SPI.begin() internally to avoid interfering with
     // other SPI devices sharing the same bus.
 #ifndef INCUNEST_OFFLINE
-    void begin(int pin_cs, int pin_drdy);
+    // debug=true: queue items carry AFE4490DebugData alongside AFE4490Data — enables
+    // getData(data, dbg) with true sample-level atomicity. Zero overhead when false (default).
+    void begin(int pin_cs, int pin_drdy, bool debug = false);
 #endif
 
     // Chip configuration setters (callable before or after begin())
@@ -485,8 +487,9 @@ public:
      * @return true if data was available, false if the queue was empty.
      */
 #ifndef INCUNEST_OFFLINE
-    bool getData(AFE4490Data& data);
-    bool getData(AFE4490Data& data, AFE4490DebugData& dbg);  // debug overload: also fills dbg snapshot (same call, minimised skew)
+    // dbg: if non-null and begin(debug=true) was used, filled atomically with the debug
+    // snapshot for the same sample. Ignored (not filled) when debug mode is inactive.
+    bool getData(AFE4490Data& data, AFE4490DebugData* dbg = nullptr);
 #endif
 
     // Shutdown — detaches ISR, deletes internal task and FreeRTOS objects, resets state.
@@ -835,6 +838,7 @@ private:
     uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
     uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
 
+    bool             _debug_enabled; // set by begin(debug=true); enables combined queue items
     // ── Output snapshot (written by task, pushed to queue) ──
     AFE4490Data      _current_data;
     AFE4490DebugData _debug_data;   // debug snapshot; written under _state_mutex each sample

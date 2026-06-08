@@ -101,9 +101,11 @@ struct AFE4490Data {
 
 ### 2.2 Initialization
 ```cpp
-void begin(int pin_cs, int pin_drdy);
+void begin(int pin_cs, int pin_drdy, bool debug = false);
 ```
 Initializes SPI, configures the chip with default values, attaches ISR to DRDY, and starts the internal FreeRTOS task.
+
+**`debug` parameter:** when `true`, the internal queue stores `DebugQueueItem {AFE4490Data + AFE4490DebugData}` per slot instead of `AFE4490Data` alone. This enables `getData(data, &dbg)` to return both atomically from the same queue item (same sample, no skew). When `false` (default), queue items are `sizeof(AFE4490Data)` — zero overhead for production use (IncuNest).
 
 **Default values after begin():**
 
@@ -241,9 +243,11 @@ void setHRValidRange(float min_bpm, float max_bpm);        // valid HR output ra
 
 ### 2.6 Data retrieval
 ```cpp
-bool getData(AFE4490Data& data);
+bool getData(AFE4490Data& data, AFE4490DebugData* dbg = nullptr);
 // Returns true and fills data if an item is available in the queue.
 // Returns false immediately if the queue is empty (non-blocking).
+// dbg: if non-null and begin(debug=true) was used, filled atomically with the debug
+//      snapshot for the same sample. Ignored when debug mode is inactive.
 ```
 
 The library samples internally at the configured rate (default 500 Hz) regardless of how often `getData()` is called.
@@ -510,6 +514,24 @@ OT (optical transmittance) is **not stored in the struct**. It is a RSQM-specifi
 |---|---|
 | `_update_rsqm()` | `i_pd_*` → computes OT internally (probe state detection) |
 | HGAC *(future)* | `v_tia_*`, `i_pd_*` (saturation zone monitoring) |
+
+---
+
+## 3d. AFE4490DebugData — debug/test snapshot struct
+
+Declared `public` in `incunest_afe4490.h`. Aggregates internal signals not published via `AFE4490Data`. Not in the production data path — not in the queue unless `begin(debug=true)` was called.
+
+```cpp
+struct AFE4490DebugData {
+    AFE4490AnalogState analog;  // V_ADC, V_TIA, I_PD for all 4 channels
+};
+```
+
+**Access:** `getData(data, &dbg)` — only valid when `begin(debug=true)`. When debug is inactive, `dbg` is not filled.
+
+**Queue mechanism:** when `debug=true`, the internal queue stores `DebugQueueItem {AFE4490Data + AFE4490DebugData}` per slot. A single `xQueueReceive` fills both `data` and `dbg` atomically — they always correspond to the same sample. When `debug=false`, queue slots are `sizeof(AFE4490Data)` only — zero RAM/CPU overhead.
+
+**Scalability:** future debug signals (e.g. HGAC internals, RSQM intermediate values) are added as fields of `AFE4490DebugData`. The `getData()` API does not change.
 
 ---
 
