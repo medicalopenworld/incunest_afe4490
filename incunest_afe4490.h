@@ -237,6 +237,13 @@ struct AFE4490AnalogState {
     float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
 };
 
+/// Debug/test snapshot — aggregates internal signals not published via AFE4490Data.
+/// Not in the production data path (not in queue). Intended for test tools (e.g. PulseNest).
+/// Retrieved via getData(data, dbg); updated every sample under _state_mutex.
+struct AFE4490DebugData {
+    AFE4490AnalogState analog;  // physical reconstruction: V_ADC, V_TIA, I_PD for all 4 channels
+};
+
 // ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────
 // These functions convert between the enum values and the abbreviated string labels
 // used in the $CFG serial frame and $SET command protocol.
@@ -479,6 +486,7 @@ public:
      */
 #ifndef INCUNEST_OFFLINE
     bool getData(AFE4490Data& data);
+    bool getData(AFE4490Data& data, AFE4490DebugData& dbg);  // debug overload: also fills dbg snapshot (same call, minimised skew)
 #endif
 
     // Shutdown — detaches ISR, deletes internal task and FreeRTOS objects, resets state.
@@ -828,7 +836,8 @@ private:
     uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
 
     // ── Output snapshot (written by task, pushed to queue) ──
-    AFE4490Data _current_data;
+    AFE4490Data      _current_data;
+    AFE4490DebugData _debug_data;   // debug snapshot; written under _state_mutex each sample
 
     // ── Static ISR trampoline ──
     // _g_instance holds a pointer to the single active INCUNEST_AFE4490 object so that

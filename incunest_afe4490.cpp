@@ -902,6 +902,16 @@ void INCUNEST_AFE4490::setTimingReg(uint8_t addr, uint32_t value) {
 bool INCUNEST_AFE4490::getData(AFE4490Data& data) {
     return xQueueReceive(_data_queue, &data, 0) == pdTRUE;
 }
+
+bool INCUNEST_AFE4490::getData(AFE4490Data& data, AFE4490DebugData& dbg) {
+    const bool ok = xQueueReceive(_data_queue, &data, 0) == pdTRUE;
+    if (ok) {
+        xSemaphoreTake(_state_mutex, portMAX_DELAY);
+        dbg = _debug_data;
+        xSemaphoreGive(_state_mutex);
+    }
+    return ok;
+}
 #endif
 
 // ── stop() ────────────────────────────────────────────────────────────────────
@@ -1631,6 +1641,9 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #if INCUNEST_TIMING_STATS
     _ts_hr3.update(esp_timer_get_time() - _t_hr3);
 #endif
+
+    // Update debug snapshot — always called under _state_mutex (held by _task_body() caller).
+    _debug_data.analog = as;
 
     // Push to queue; if full, drop oldest to keep most recent
     if (xQueueSend(_data_queue, &_current_data, 0) != pdTRUE) {
