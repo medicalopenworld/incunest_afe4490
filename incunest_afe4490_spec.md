@@ -261,12 +261,12 @@ The internal queue holds up to 10 samples (`INCUNEST_AFE4490_QUEUE_SIZE`). When 
 
 ### 2.6b Hardware diagnostics
 ```cpp
-uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = 100);
+uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = kAFE_DIAG_HOLDOFF_MS);
 ```
 Runs the AFE4490 hardware self-test sequence (datasheet section 8.4.3.3, Table 3).
 
 **Parameters:**
-- `diag_holdoff_ms` — duration (ms) of the post-diagnostic holdoff window. Default: 10 ms (~5 samples at 500 Hz), which covers the worst-case TIA settling time (RF_1M + CF_155P: 5τ ≈ 775 µs). Set to 0 to observe raw artefacts from the re-settling analog front-end.
+- `diag_holdoff_ms` — duration (ms) of the post-diagnostic holdoff window. Default: `kAFE_DIAG_HOLDOFF_MS`, derived from `kAFE_FLTRCNRSEL`: 500 Hz corner → 28 ms; 1000 Hz corner → 16 ms (datasheet p.11, filter settling time after diagnostics mode). Set to 0 to observe raw artefacts from the re-settling analog front-end.
 
 **Sequence:**
 1. Sets `_diag_active = true` — signals `_task_body()` to skip ADC reads and repeat the last valid output.
@@ -429,6 +429,14 @@ constexpr float kAFE_RI_OHM = 100e3f;
 // ADC full-scale constants — used for code-to-voltage reconstruction (datasheet p.26)
 constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale, 22-bit signed ADC)
 constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
+
+// Low-pass filter corner frequency (FLTRCNRSEL bit D15 of TIA_AMB_GAIN, datasheet p.75).
+// 0 = 500 Hz (reset default); 1 = 1000 Hz.
+// Written unconditionally to TIA_AMB_GAIN in _build_tia_amb_gain_led2().
+constexpr uint8_t  kAFE_FLTRCNRSEL      = 0;
+// Diagnostic holdoff: filter settling time after diagnostics mode (datasheet p.11).
+// 500 Hz corner → 28 ms; 1000 Hz corner → 16 ms.
+constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
 ```
 
 Register-code arrays (`rf_code[]`, `cf_code[]`, `stg2_gain_code[]`) remain in an anonymous namespace in `incunest_afe4490.cpp` — internal only, never exposed.
@@ -467,7 +475,7 @@ Inverted step by step:
 V_ADC  = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR          [V]   (datasheet p.26: 22-bit, ±1.2 V)
 V_TIA  = (V_ADC / (2 × RG) + I_CANCEL) × Ri                [V]   (= I_PD × RF, TIA output voltage)
 I_PD   = V_TIA / RF                                          [A]   (photodiode current)
-OT     = (I_PD_LED − I_PD_ALED) / I_LED                    [—]   (optical transmittance)
+OT     = (I_PD_LED − I_PD_ALED) / I_LED                    [—]   (electro-optical system ratio: LED efficiency × tissue transmittance × PD responsivity)
 ```
 
 ### Circuit parameters per channel
@@ -723,11 +731,13 @@ OT = (I_PD_LED − I_PD_ALED) / I_LED     [A/A, dimensionless]
 
 OT is computed inside `_update_rsqm()` from the `i_pd_*` fields of `AFE4490AnalogState` (see §3c). Keeping OT here avoids coupling `_compute_analog_state()` to RSQM constants. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
 
+OT is the **full electro-optical system ratio** — it combines LED wall-plug efficiency, tissue transmittance, and photodiode responsivity into a single dimensionless number. It is not the tissue optical transmittance alone.
+
 - When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
 - Threshold: `ot1 > 8.5e-5` OR `ot2 > 8.5e-5` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*
 - Single threshold (no hysteresis) — state oscillation is prevented by the 100-sample debounce in `_set_probe_state()` instead.
 
-Estimated values (physical scale, needs empirical calibration): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54).
+Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54).
 
 > Previous formula was heuristic: `LED_Sub / (LED_mA × RF_Ω × RG_linear)` — dimensionally not A/A, scale ~×3495 larger. Values measured in earlier sessions (APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.8) correspond to the old scale.
 
@@ -1327,7 +1337,7 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | → RF LED2/amb | 1 MΩ | — | 250 kΩ | **100 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
 | → CF LED2/amb | 5 pF | — | 5 pF | **auto (§7.2)** | Same as CF LED1 (ENSEPGAIN=0 shares config) |
 | → Stage2 LED2 | EN, 0 dB | — | disabled | **disabled** | Same criterion as Stage2 LED1 |
-| → FLTRCNRSEL | 500 Hz | — | 500 Hz | **500 Hz** | Matches PRF. 1000 Hz option only makes sense if PRF is raised |
+| → FLTRCNRSEL | 500 Hz | — | 500 Hz | **500 Hz** | Controlled by `kAFE_FLTRCNRSEL` (constexpr uint8_t, 0=500 Hz / 1=1000 Hz). Always written explicitly by `_build_tia_amb_gain_led2()`. Determines `kAFE_DIAG_HOLDOFF_MS` (28 ms @ 500 Hz, 16 ms @ 1000 Hz, datasheet p.11). |
 | → AMBDAC | 0 µA | — | 0 µA | **0 µA** | Ambient cancellation handled in hardware (LED1−ALED1VAL, LED2−ALED2VAL). AMBDAC only needed if ambient light saturates TIA before subtraction. Exposable via setter |
 | **LEDCNTRL** | 0x011414 | — | 0x001414 | **0x002222** | RANGE_0 + code 34 + TX_REF=0.75V → ~19.9 mA per LED |
 | → LED_RANGE | RANGE_1 | — | RANGE_0 | **RANGE_0** | Consistent with TX_REF=0.75V. FSR=150mA → resolution ~0.6mA/step |

@@ -213,6 +213,14 @@ constexpr float kAFE_RI_OHM = 100e3f;
 constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
 constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
 
+// Low-pass filter corner frequency selection (FLTRCNRSEL bit D15 of TIA_AMB_GAIN, datasheet p.75).
+// 0 = 500 Hz (reset default); 1 = 1000 Hz.
+// Written unconditionally to TIA_AMB_GAIN in _build_tia_amb_gain_led2().
+constexpr uint8_t  kAFE_FLTRCNRSEL      = 0;
+// Diagnostic holdoff: filter settling time after diagnostics mode (datasheet p.11).
+// 500 Hz corner → 28 ms; 1000 Hz corner → 16 ms.
+constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
+
 /// Physical quantities derived from ADC codes for one sample — purely the signal chain.
 /// Computed in _process_sample() before RSQM and HGAC; not stored in AFE4490Data.
 /// Datasheet Eq.2 (p.30):  V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
@@ -510,9 +518,10 @@ public:
     // reading the chip. This replaces transient outliers (analog front-end re-settling
     // after DIAG_EN is cleared) with neutral frozen input that the IIR/BPF/LP filters
     // absorb gracefully. Set to 0 to observe the raw diagnostic artefacts.
-    // Default: 10 ms (~5 samples at 500 Hz), covers worst-case TIA settling (RF_1M + CF_155P: 5τ ≈ 775 µs).
+    // Default: kAFE_DIAG_HOLDOFF_MS — derived from kAFE_FLTRCNRSEL (datasheet p.11):
+    //   500 Hz corner → 28 ms; 1000 Hz corner → 16 ms.
 #ifndef INCUNEST_OFFLINE
-    uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = 10);
+    uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = kAFE_DIAG_HOLDOFF_MS);
 #endif
 
     // ISR entry point (must be public for static trampoline)
@@ -537,6 +546,7 @@ private:
     static constexpr float    rsqm_alpha_var        = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
     static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
     static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
+    static constexpr float    rsqm_disconn_i_pd_thr = 50e-9f;  // |i_pd| < this on all 4 ch → disconnected; TIA bias current worst case ≈ 14 nA (×3.5 margin)
     static constexpr float    rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
                                                                  // Physical scale (A/A): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (needs empirical calibration)
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated

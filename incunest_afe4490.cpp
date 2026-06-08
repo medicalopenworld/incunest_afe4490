@@ -1305,7 +1305,7 @@ uint32_t INCUNEST_AFE4490::_build_tiagain_led1() {
 }
 
 uint32_t INCUNEST_AFE4490::_build_tia_amb_gain_led2() {
-    // TIA_AMB_GAIN register (0x21): RF_LED2[2:0] | CF_LED2[4:0] | STG2GAIN2[2:0] | STAGE2EN2 | AMBDAC[3:0]
+    // TIA_AMB_GAIN register (0x21): RF_LED2[2:0] | CF_LED2[4:0] | STG2GAIN2[2:0] | STAGE2EN2 | FLTRCNRSEL | AMBDAC[3:0]
     // RF/CF/Stage2 fields control LED2 (RED) when ENSEPGAIN=1, or both channels when ENSEPGAIN=0.
     uint32_t reg = rf_code[(int)_afe_tia_rf_led2];           // bits D[2:0]
     reg         |= cf_code[(int)_afe_tia_cf_led2];             // bits D[7:3]
@@ -1314,6 +1314,8 @@ uint32_t INCUNEST_AFE4490::_build_tia_amb_gain_led2() {
     // STAGE2EN2 (D14): set when explicitly enabled OR when AMBDAC > 0.
     // When AMBDAC > 0, Stage 2 must be active — the cancellation current has no effect without it.
     if (_afe_stg2_en_led2 || _afe_ambdac_uA > 0) reg |= 0x004000UL;
+    // FLTRCNRSEL (D15): low-pass filter corner — always written explicitly from library constant.
+    if (kAFE_FLTRCNRSEL) reg |= 0x008000UL;
     return reg;
 }
 
