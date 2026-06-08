@@ -1089,12 +1089,16 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     const bool ready = (_rsqm_led1_sub.count >= rsqm_ready_count);
 
     // ── Probe state detection ──────────────────────────────────────────────────
-    // PROBE_DISCONNECTED: instantaneous criterion — all four raw ADC channels negative AND
+    // PROBE_DISCONNECTED: instantaneous criterion — all four i_pd below threshold AND
     // |led1_sub|/|led2_sub| near zero on both channels.  When cable is disconnected,
-    // TIA input is floating; input-offset current drives LED1≈ALED1≈LED2≈ALED2 to the same
-    // large negative value, so led_aled = LED − ALED ≈ 0.  Responds in one sample; no EMA warmup required.
+    // the photodiode is not connected; i_pd reflects only TIA input bias current (~nA).
+    // The sub criterion confirms the four channels are equal (floating TIA input, no differential signal).
+    // Responds in one sample; no EMA warmup required.
     const bool disconnected =
-        led1 < 0 && aled1 < 0 && led2 < 0 && aled2 < 0 &&
+        fabsf(as.i_pd_led1)  < rsqm_disconn_i_pd_thr &&
+        fabsf(as.i_pd_led2)  < rsqm_disconn_i_pd_thr &&
+        fabsf(as.i_pd_aled1) < rsqm_disconn_i_pd_thr &&
+        fabsf(as.i_pd_aled2) < rsqm_disconn_i_pd_thr &&
         fabsf((float)led1_sub) < rsqm_disconn_sub_mean &&
         fabsf((float)led2_sub) < rsqm_disconn_sub_mean;
 
@@ -1105,8 +1109,10 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         // Physical formula (Eq.2 inversion): OT = (I_PD_LED − I_PD_ALED) / I_LED [A/A, dimensionless]
         // Ambient-subtracted: isolates the modulated component driven by the LED.
         // I_LED from LEDCNTRL register (datasheet p.28): 8-bit DAC, range 0–_afe_led_range_mA.
-        // APPLIED (finger present): ot ≈ 1.4e-5  (tissue absorbs ~95% of light)
-        // NOT_APPLIED (no finger):  ot ≈ 8e-4    (full light reaches photodiode)
+        // OT is the full electro-optical system ratio (LED wall-plug efficiency × tissue transmittance
+        // × photodiode responsivity) — not the tissue optical transmittance alone.
+        // APPLIED (finger present): ot ≈ 1.4e-5  (needs empirical calibration)
+        // NOT_APPLIED (no finger):  ot ≈ 8e-4    (needs empirical calibration)
         // Sentinel rsqm_ot_saturated (100.0) when LED_raw ≥ rsqm_adc_positive_sat: ADC clipped, OT undefined.
         const float i_led1_A = _afe_led1_current_mA * 1e-3f;
         const float i_led2_A = _afe_led2_current_mA * 1e-3f;
@@ -1439,25 +1445,14 @@ void INCUNEST_AFE4490::_task_body() {
             continue;
         }
 
-        if (_diag_active) {
-            // Chip cannot produce valid ADC data during diagnostics (~10 ms, ≈5 samples).
-            // Repeat last valid output to preserve temporal equi-spacing for HR2/HR3.
-            xSemaphoreTake(_state_mutex, portMAX_DELAY);
-            if (xQueueSend(_data_queue, &_current_data, 0) != pdTRUE) {
-                AFE4490Data dummy;
-                xQueueReceive(_data_queue, &dummy, 0);
-                xQueueSend(_data_queue, &_current_data, 0);
-            }
-            xSemaphoreGive(_state_mutex);
-            continue;
-        }
-
-        if (_diag_holdoff_samples > 0) {
-            // Post-diagnostic holdoff: analog front-end is re-settling after DIAG_EN cleared.
-            // Feed the frozen last-valid raw values into _process_sample() instead of reading
-            // the chip. A constant input is absorbed by IIR/BPF/LP filters with near-zero AC
-            // contribution — far less disruptive to the algorithms than a transient outlier.
-            --_diag_holdoff_samples;
+        if (_diag_active || _diag_holdoff_samples > 0) {
+            // During diagnostics the chip produces no valid ADC data (~10 ms, ≈5 samples).
+            // During post-diagnostic holdoff the analog front-end is re-settling.
+            // In both cases: feed frozen last-valid raw values into _process_sample() so
+            // filters advance continuously. A constant input is absorbed by IIR/BPF/LP
+            // filters with near-zero AC contribution — far less disruptive than an outlier.
+            // The two states are mutually exclusive; decrement only applies to holdoff.
+            if (_diag_holdoff_samples > 0) --_diag_holdoff_samples;
             xSemaphoreTake(_state_mutex, portMAX_DELAY);
             _process_sample(_diag_last_led1, _diag_last_led2,
                             _diag_last_aled1, _diag_last_aled2,
