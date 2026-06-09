@@ -557,7 +557,8 @@ private:
     static constexpr float    rsqm_alpha_var        = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
     static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
     static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
-    static constexpr float    rsqm_disconn_i_pd_thr = 50e-9f;  // |i_pd| < this on all 4 ch → disconnected; TIA bias current worst case ≈ 14 nA (×3.5 margin)
+    static constexpr float    rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
+                                                                 // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
     static constexpr float    rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
                                                                  // Physical scale (A/A): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (needs empirical calibration)
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
