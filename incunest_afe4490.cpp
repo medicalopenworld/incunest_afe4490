@@ -249,9 +249,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_dc_alpha(0.0f),
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
-      _spo2_dc_iir_alpha(0.0f), _spo2_ac_ema_beta(0.0f),
-      _spo2_dc_ir(0.0f), _spo2_dc_red(0.0f),
-      _spo2_ac2_ir(0.0f), _spo2_ac2_red(0.0f),
+      _spo2_ch_ir_ema{},
+      _spo2_ch_red_ema{},
       _spo2_sample_count(0),
       _spo2_a(spo2_a_default), _spo2_b(spo2_b_default),
       _hr1_dc(0.0f),
@@ -278,8 +277,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_update_interval(25u),
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
-      _rsqm_led1_sub{0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var},
-      _rsqm_led2_sub{0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var},
+      _rsqm_led1_sub_ema{},
+      _rsqm_led2_sub_ema{},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0),
       _debug_enabled(false)
@@ -976,8 +975,8 @@ void INCUNEST_AFE4490::_diag_task_trampoline(void* pv) {
 
 // ── _reset_algorithms() ───────────────────────────────────────────────────────
 void INCUNEST_AFE4490::_reset_algorithms() {
-    _spo2_dc_ir  = 0.0f; _spo2_dc_red  = 0.0f;
-    _spo2_ac2_ir = 0.0f; _spo2_ac2_red = 0.0f;
+    _spo2_ch_ir_ema.reset();
+    _spo2_ch_red_ema.reset();
     _spo2_sample_count = 0;
     _hr1_dc                    = 0.0f;
     _hr1_running_max           = 0.0f;
@@ -1003,8 +1002,8 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_sqi_result = 0.0f;
     _hr3_result = 0.0f; _hr3_sqi_result = 0.0f;
-    _rsqm_led1_sub          = {0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var};
-    _rsqm_led2_sub          = {0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var};
+    _rsqm_led1_sub_ema.reset();
+    _rsqm_led2_sub_ema.reset();
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
     _current_data = AFE4490Data{};
@@ -1095,10 +1094,10 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
 void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                      int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
     // ── EMA estimators ─────────────────────────────────────────────────────────
-    _rsqm_led1_sub.update((float)led1_sub);
-    _rsqm_led2_sub.update((float)led2_sub);
+    _rsqm_led1_sub_ema.update((float)led1_sub);
+    _rsqm_led2_sub_ema.update((float)led2_sub);
 
-    const bool ready = (_rsqm_led1_sub.count >= rsqm_ready_count);
+    const bool ready = (_rsqm_led1_sub_ema.count >= rsqm_ready_count);
 
     // ── Probe state detection ──────────────────────────────────────────────────
     // PROBE_DISCONNECTED: instantaneous criterion — all four i_pd below threshold AND
@@ -1152,8 +1151,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
     // Both channels required: SpO2 needs IR and RED simultaneously
     if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
-        (sqrtf(_rsqm_led1_sub.var) < rsqm_signal_weak_std ||
-         sqrtf(_rsqm_led2_sub.var) < rsqm_signal_weak_std))
+        (sqrtf(_rsqm_led1_sub_ema.var) < rsqm_signal_weak_std ||
+         sqrtf(_rsqm_led2_sub_ema.var) < rsqm_signal_weak_std))
         diag |= RSQM_SIGNAL_WEAK;
 
     // RSQM_HW_SETTLING: set externally by HGAC or config change; counts down to 0
@@ -1363,8 +1362,10 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     float fs              = (float)_afe_sample_rate_hz;
     _spo2_warmup_samples    = (uint32_t)(_spo2_warmup_s    * fs);
     _hr1_refractory_samples = (uint32_t)(hr1_refractory_s  * fs);
-    _spo2_dc_iir_alpha           = expf(-1.0f / (_spo2_dc_iir_tau_s * fs));
-    _spo2_ac_ema_beta            = 1.0f - expf(-1.0f / (_spo2_ac_ema_tau_s * fs));
+    _spo2_ch_ir_ema.init(_spo2_dc_iir_tau_s, _spo2_ac_ema_tau_s, fs);
+    _spo2_ch_red_ema.init(_spo2_dc_iir_tau_s, _spo2_ac_ema_tau_s, fs);
+    _rsqm_led1_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
+    _rsqm_led2_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
     _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
@@ -1740,38 +1741,58 @@ void INCUNEST_AFE4490::_update_spo2(int32_t led1_sub, int32_t led2_sub) {
     float ir  = (float)led1_sub;
     float red = (float)led2_sub;
 
-    // IIR DC extraction
-    _spo2_dc_ir  = _spo2_dc_iir_alpha * _spo2_dc_ir  + (1.0f - _spo2_dc_iir_alpha) * ir;
-    _spo2_dc_red = _spo2_dc_iir_alpha * _spo2_dc_red + (1.0f - _spo2_dc_iir_alpha) * red;
+    // DC extraction + AC² power estimation via EmaChannel (one call per channel):
+    //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 1.6 s
+    //   Step 2 — AC: d = x − mean                           DC-subtraction high-pass
+    //                NOTE: future alternative — replace DC-subtraction with a BPF (0.5–5 Hz)
+    //                      to isolate the pulsatile band more precisely and reject motion artefacts
+    //   Step 3 — AC²: var += α_var × (d² − var)            EMA of AC², τ = 1.0 s
+    //                NOTE: future alternative — BPF-filtered AC² for a PI closer to spectral PI
+    _spo2_ch_ir_ema.update(ir);
+    _spo2_ch_red_ema.update(red);
 
-    // EMA of AC²
-    float ac_ir  = ir  - _spo2_dc_ir;
-    float ac_red = red - _spo2_dc_red;
-    _spo2_ac2_ir  = _spo2_ac_ema_beta * ac_ir  * ac_ir  + (1.0f - _spo2_ac_ema_beta) * _spo2_ac2_ir;
-    _spo2_ac2_red = _spo2_ac_ema_beta * ac_red * ac_red + (1.0f - _spo2_ac_ema_beta) * _spo2_ac2_red;
-
-    // Perfusion Index (always updated, independent of SpO2 warmup)
-    _current_data.pi = (_spo2_dc_ir > 1.0f) ? (sqrtf(_spo2_ac2_ir) / _spo2_dc_ir) * 100.0f : -1.0f;
+    // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup)
+    // PI = sqrt(E[AC²]) / DC × 100
+    _current_data.pi = (_spo2_ch_ir_ema.mean > 1.0f)
+                       ? (sqrtf(_spo2_ch_ir_ema.var) / _spo2_ch_ir_ema.mean) * 100.0f
+                       : -1.0f;
 
     _spo2_sample_count++;
 
     // Skip during warmup or if DC is too low (no finger)
     if (_spo2_sample_count < _spo2_warmup_samples ||
-        _spo2_dc_ir < _spo2_min_dc || _spo2_dc_red < _spo2_min_dc) {
+        _spo2_ch_ir_ema.mean < _spo2_min_dc || _spo2_ch_red_ema.mean < _spo2_min_dc) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
 
-    float rms_ac_ir  = sqrtf(_spo2_ac2_ir);
-    float rms_ac_red = sqrtf(_spo2_ac2_red);
+    // ── DC (current EMA method) ───────────────────────────────────────────────
+    // DC = slow IIR low-pass of raw signal (mean of EmaChannel, τ = 1.6 s).
+    // NOTE: future alternative — median over a sliding window (more robust to motion).
+    float dc_ir  = _spo2_ch_ir_ema.mean;
+    float dc_red = _spo2_ch_red_ema.mean;
+
+    // ── AC (current method: DC subtraction) ──────────────────────────────────
+    // AC amplitude = RMS of (x − DC) = sqrt(EMA of (x−DC)²) = sqrt(var of EmaChannel).
+    // NOTE: future alternative A — bandpass filter (0.5–5 Hz) applied to raw signal,
+    //       then RMS of filtered output. More selective, rejects sub-Hz motion baseline.
+    // NOTE: future alternative B — peak-to-peak amplitude of bandpass-filtered signal
+    //       over one cardiac cycle, then divided by 2. Used by some Masimo implementations.
+    float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
+    float ac_red = sqrtf(_spo2_ch_red_ema.var);
 
     // Avoid division by near-zero
-    if (_spo2_dc_ir < 1.0f || _spo2_dc_red < 1.0f || rms_ac_ir < 1.0f) {
+    if (dc_ir < 1.0f || dc_red < 1.0f || ac_ir < 1.0f) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
 
-    float R    = (rms_ac_red / _spo2_dc_red) / (rms_ac_ir / _spo2_dc_ir);
+    // ── R ratio ───────────────────────────────────────────────────────────────
+    // R = (AC_red / DC_red) / (AC_ir / DC_ir)
+    // ISO 80601-2-61:2026 calls this the "modulation ratio" or "ratio of ratios".
+    // This is the core of the SpO2 algorithm. SpO2 = a − b·R (empirical calibration curve).
+    // Each term (AC/DC) is the Perfusion Index of the channel (dimensionless, ~0–1).
+    float R = (ac_red / dc_red) / (ac_ir / dc_ir);
     float spo2 = _spo2_a - _spo2_b * R;
 
     _current_data.spo2_r = R;

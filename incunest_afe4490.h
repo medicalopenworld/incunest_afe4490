@@ -545,26 +545,66 @@ private:
 
     struct BiquadState { float v1, v2; };
 
-    // EMA estimator for one signal channel (mean + variance)
+    // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
+    // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
+    // _biquad_step() and _biquad_precharge() operate on state in-place.
+    struct BiquadFilter {
+        float f_low, f_high;          // cutoff frequencies (Hz) — parameterisable at runtime
+        float b0, b1, b2, a1, a2;    // DF-II transposed coefficients
+        BiquadState state;
+        bool  needs_precharge;        // true after reset; consumed on first sample
+    };
+
+    // EMA (Exponential Moving Average) estimator for one signal channel (mean + variance).
+    // EMA low-pass: y += α·(x − y)  ≡  y = (1−α)·y + α·x   (α small = slow, α→1 = fast)
+    // Configured by time constants τ (seconds): α = 1 − exp(−1/(τ·fs))
     struct EmaChannel {
-        float    mean       { 0.0f };
-        float    var        { 0.0f };
-        uint32_t count      { 0 };
-        float    alpha_mean;
-        float    alpha_var;
+        float    mean  = 0.0f;
+        float    var   = 0.0f;
+        uint32_t count = 0;
+
+        // Set time constants and sample rate; computes α internally.
+        // Must be called before the first update(). Safe to call again to reconfigure.
+        void init(float tau_mean_s, float tau_var_s, float fs) {
+            _alpha_mean = 1.0f - expf(-1.0f / (tau_mean_s * fs));
+            _alpha_var  = 1.0f - expf(-1.0f / (tau_var_s  * fs));
+        }
+
+        // Zero mean, var and count; keeps α unchanged (no need to re-init after reset).
+        void reset() { mean = 0.0f; var = 0.0f; count = 0; }
 
         inline void update(float x) {
-            mean += alpha_mean * (x - mean);
+            mean += _alpha_mean * (x - mean);
             float d = x - mean;
-            var  += alpha_var  * (d * d - var);
+            var  += _alpha_var  * (d * d - var);
             count++;
         }
+
+    private:
+        float _alpha_mean = 0.0f;
+        float _alpha_var  = 0.0f;
     };
 
     // ── RSQM constants ─────────────────────────────────────────────────────────
-    static constexpr float    rsqm_ema_alpha_mean    = 0.02f;    // EMA α for mean  (τ ≈ 100 ms @ 500 Hz)
-    static constexpr float    rsqm_ema_alpha_var     = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
-    static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
+    // EMA mean τ: 2000 ms, f_c = 0.08 Hz.
+    // Must be slow enough that f_c << 0.5 Hz (min physiological HR) so the mean tracks only
+    // the DC baseline and does not follow the pulsatile component — otherwise d = x−mean is
+    // underestimated, biasing the variance estimate and causing false RSQM_SIGNAL_WEAK.
+    // Also used for OT (optical transmittance): responds to hardware level changes (HGAC
+    // RF/LED adjustments, settling ~150 ms) within 3τ ≈ 6 s — acceptable because
+    // RSQM_HW_SETTLING gates HGAC actions during that period.
+    static constexpr float    rsqm_ema_mean_tau_s    = 2.0f;     // τ_mean = 2 s → α ≈ 0.001 @ 500 Hz
+
+    // EMA variance τ: 4000 ms, f_c = 0.04 Hz.
+    // Must be slower than mean (τ_var > τ_mean) because the variance estimate needs to
+    // accumulate several complete cardiac cycles to be reliable:
+    //   @ 60 bpm (1 Hz, period 1000 ms): τ_var covers 4 full cycles
+    //   @ 30 bpm (0.5 Hz, period 2000 ms): τ_var covers 2 full cycles (minimum acceptable)
+    // Using τ_var = τ_mean = 2 s would cover only 1 cycle at 30 bpm — borderline.
+    // τ_var > τ_mean is intentional asymmetry justified by different physical requirements.
+    static constexpr float    rsqm_ema_var_tau_s     = 4.0f;     // τ_var  = 4 s → α ≈ 0.0005 @ 500 Hz
+
+    static constexpr uint32_t rsqm_ready_count      = 6000;     // samples before estimators trusted (3 × τ_var = 12 s @ 500 Hz)
     static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
     static constexpr float    rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
                                                                  // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
@@ -575,16 +615,6 @@ private:
     static constexpr float    rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
     static constexpr uint8_t  rsqm_probe_state_min_count = 100;  // consecutive samples required to change probe state (200 ms @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED
-
-    // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
-    // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
-    // _biquad_step() and _biquad_precharge() operate on state in-place.
-    struct BiquadFilter {
-        float f_low, f_high;          // cutoff frequencies (Hz) — parameterisable at runtime
-        float b0, b1, b2, a1, a2;    // DF-II transposed coefficients
-        BiquadState state;
-        bool  needs_precharge;        // true after reset; consumed on first sample
-    };
 
     // ── SPI primitives ────────────────────────────────────────────────────────
 #ifndef INCUNEST_OFFLINE
@@ -767,15 +797,20 @@ private:
     // ── Rate-dependent algorithm parameters (derived from _afe_sample_rate_hz) ──
     uint32_t          _spo2_warmup_samples;
     uint32_t          _hr1_refractory_samples;
-    float             _spo2_dc_iir_alpha;
-    float             _spo2_ac_ema_beta;
     float             _hr1_dc_alpha;
 
     // ── SpO2 state ──
-    float    _spo2_dc_ir;
-    float    _spo2_dc_red;
-    float    _spo2_ac2_ir;
-    float    _spo2_ac2_red;
+    // DC and AC² power for IR and RED channels, tracked via EmaChannel:
+    //   mean  = DC component (slow IIR low-pass of x)
+    //           α_mean = 1 − exp(−1/(τ_dc·fs)),  τ_dc = spo2_dc_iir_tau_s (default 1.6 s)
+    //           NOTE: future alternative — bandpass filter for DC tracking
+    //   var   = AC power estimate = E[(x − mean)²] = EMA of AC²
+    //           α_var  = 1 − exp(−1/(τ_ac·fs)),  τ_ac = spo2_ac_ema_tau_s  (default 1.0 s)
+    //           NOTE: future alternative — bandpass-filtered AC² instead of DC-subtraction AC²
+    //   count = unused by SpO2 (sample counting done via _spo2_sample_count)
+    //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
+    EmaChannel _spo2_ch_ir_ema;
+    EmaChannel _spo2_ch_red_ema;
     uint32_t _spo2_sample_count;
     float    _spo2_a;
     float    _spo2_b;
@@ -841,8 +876,8 @@ private:
     float    _hr_max_bpm;
 
     // ── RSQM state ────────────────────────────────────────────────────────────
-    EmaChannel _rsqm_led1_sub;     // EMA estimator for led1_sub (IR differential)
-    EmaChannel _rsqm_led2_sub;     // EMA estimator for led2_sub (RED differential)
+    EmaChannel _rsqm_led1_sub_ema;     // EMA estimator for led1_sub (IR differential)
+    EmaChannel _rsqm_led2_sub_ema;     // EMA estimator for led2_sub (RED differential)
     ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
