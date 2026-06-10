@@ -29,8 +29,18 @@ namespace {
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
     constexpr float    spo2_warmup_s       = 5.0f;     // s  — warmup before reporting SpO2
-    constexpr float    spo2_dc_iir_tau_s   = 1.6f;     // s  — DC IIR time constant
-    constexpr float    spo2_ac_ema_tau_s   = 1.0f;     // s  — AC² EMA time constant
+    // EMA mean τ (DC baseline): 1.6 s, f_c ≈ 0.1 Hz.
+    // Must be slow enough that f_c << min physiological HR (0.5 Hz @ 30 bpm) so the DC
+    // estimate tracks only the static baseline (tissue + venous blood + ambient) and does
+    // not follow the pulsatile component — otherwise AC = x−DC is underestimated, biasing
+    // the R ratio and SpO2. Fast enough to adapt to slow probe repositioning (~5 s settle).
+    constexpr float    spo2_ema_mean_tau_s   = 1.6f;
+    // EMA variance τ (AC² power): 1.0 s.
+    // Averaging window for pulsatile power = RMS²_AC. Must cover at least 1–2 cardiac cycles
+    // for a stable estimate. At neonatal HR 120–160 bpm (period 0.375–0.5 s): covers 2–2.7
+    // cycles. At 60 bpm (period 1 s): covers ~1 cycle. At 30 bpm: marginal (0.5 cycle), but
+    // the 5 s warmup ensures the estimator has settled before the first SpO2 output is used.
+    constexpr float    spo2_ema_var_tau_s    = 1.0f;
     // Calibration coefficients derived from experimental data with a
     // UpnMed U401-D(01AS-F) probe, type Nellcor Non-Oximax.
     // Override at runtime with setSpO2Coefficients() for a different probe.
@@ -262,8 +272,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_bpf({0.4f, 15.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
       _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0),
       _spo2_warmup_s(spo2_warmup_s),
-      _spo2_dc_iir_tau_s(spo2_dc_iir_tau_s),
-      _spo2_ac_ema_tau_s(spo2_ac_ema_tau_s),
+      _spo2_ema_mean_tau_s(spo2_ema_mean_tau_s),
+      _spo2_ema_var_tau_s(spo2_ema_var_tau_s),
       _spo2_min(spo2_min),
       _spo2_max(spo2_max),
       _spo2_min_dc(spo2_min_dc),
@@ -725,16 +735,16 @@ void INCUNEST_AFE4490::setSpO2WarmupS(float s) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2DcIirTauS(float tau_s) {
+void INCUNEST_AFE4490::setSpO2EmaMeanTauS(float tau_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_dc_iir_tau_s = tau_s;
+    _spo2_ema_mean_tau_s = tau_s;
     _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2AcEmaTauS(float tau_s) {
+void INCUNEST_AFE4490::setSpO2EmaVarTauS(float tau_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_ac_ema_tau_s = tau_s;
+    _spo2_ema_var_tau_s = tau_s;
     _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
@@ -846,8 +856,8 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_a           = _spo2_a;
     cfg.spo2_b           = _spo2_b;
     cfg.spo2_warmup_s         = _spo2_warmup_s;
-    cfg.spo2_dc_iir_tau_s     = _spo2_dc_iir_tau_s;
-    cfg.spo2_ac_ema_tau_s     = _spo2_ac_ema_tau_s;
+    cfg.spo2_ema_mean_tau_s     = _spo2_ema_mean_tau_s;
+    cfg.spo2_ema_var_tau_s     = _spo2_ema_var_tau_s;
     cfg.spo2_min              = _spo2_min;
     cfg.spo2_max              = _spo2_max;
     cfg.spo2_min_dc           = _spo2_min_dc;
@@ -1362,8 +1372,8 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     float fs              = (float)_afe_sample_rate_hz;
     _spo2_warmup_samples    = (uint32_t)(_spo2_warmup_s    * fs);
     _hr1_refractory_samples = (uint32_t)(hr1_refractory_s  * fs);
-    _spo2_ch_ir_ema.init(_spo2_dc_iir_tau_s, _spo2_ac_ema_tau_s, fs);
-    _spo2_ch_red_ema.init(_spo2_dc_iir_tau_s, _spo2_ac_ema_tau_s, fs);
+    _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
+    _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
     _rsqm_led1_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
     _rsqm_led2_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));

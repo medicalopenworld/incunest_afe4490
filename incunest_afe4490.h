@@ -370,8 +370,8 @@ struct AFE4490Config {
     float             spo2_b;
     // SpO2 algorithm parameters
     float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
-    float             spo2_dc_iir_tau_s;         // DC removal IIR time constant [s]
-    float             spo2_ac_ema_tau_s;         // AC² EMA time constant [s]
+    float             spo2_ema_mean_tau_s;         // EMA mean (DC) time constant [s]
+    float             spo2_ema_var_tau_s;          // EMA variance (AC²) time constant [s]
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
     float             spo2_min_dc;               // no-finger DC threshold [ADC counts]
@@ -442,8 +442,8 @@ public:
 
     // SpO2 algorithm setters (callable before or after begin())
     void setSpO2WarmupS(float s);                              // warmup period before reporting SpO2
-    void setSpO2DcIirTauS(float tau_s);                        // DC IIR time constant; triggers recalc
-    void setSpO2AcEmaTauS(float tau_s);                        // AC² EMA time constant; triggers recalc
+    void setSpO2EmaMeanTauS(float tau_s);                      // EMA mean (DC) time constant; triggers recalc
+    void setSpO2EmaVarTauS(float tau_s);                       // EMA variance (AC²) time constant; triggers recalc
     void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
     void setSpO2MinDC(float counts);                           // no-finger DC threshold [ADC counts]
     void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
@@ -802,10 +802,10 @@ private:
     // ── SpO2 state ──
     // DC and AC² power for IR and RED channels, tracked via EmaChannel:
     //   mean  = DC component (slow IIR low-pass of x)
-    //           α_mean = 1 − exp(−1/(τ_dc·fs)),  τ_dc = spo2_dc_iir_tau_s (default 1.6 s)
+    //           α_mean = 1 − exp(−1/(τ_mean·fs)),  τ_mean = spo2_ema_mean_tau_s (default 1.6 s)
     //           NOTE: future alternative — bandpass filter for DC tracking
     //   var   = AC power estimate = E[(x − mean)²] = EMA of AC²
-    //           α_var  = 1 − exp(−1/(τ_ac·fs)),  τ_ac = spo2_ac_ema_tau_s  (default 1.0 s)
+    //           α_var  = 1 − exp(−1/(τ_var·fs)),   τ_var  = spo2_ema_var_tau_s  (default 1.0 s)
     //           NOTE: future alternative — bandpass-filtered AC² instead of DC-subtraction AC²
     //   count = unused by SpO2 (sample counting done via _spo2_sample_count)
     //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
@@ -859,8 +859,8 @@ private:
 
     // ── Algorithm tuning parameters (runtime-configurable) ──────────────────
     float    _spo2_warmup_s;
-    float    _spo2_dc_iir_tau_s;
-    float    _spo2_ac_ema_tau_s;
+    float    _spo2_ema_mean_tau_s;
+    float    _spo2_ema_var_tau_s;
     float    _spo2_min;
     float    _spo2_max;
     float    _spo2_min_dc;

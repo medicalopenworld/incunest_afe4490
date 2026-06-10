@@ -175,8 +175,8 @@ struct AFE4490Config {
     float             spo2_b;
     // SpO2 algorithm parameters
     float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
-    float             spo2_dc_iir_tau_s;         // DC removal IIR time constant [s]
-    float             spo2_ac_ema_tau_s;         // AC² EMA time constant [s]
+    float             spo2_ema_mean_tau_s;         // DC removal IIR time constant [s]
+    float             spo2_ema_var_tau_s;         // AC² EMA time constant [s]
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
     float             spo2_min_dc;               // no-finger DC threshold [ADC counts]
@@ -219,8 +219,8 @@ All setters callable before or after `begin()`. Setters marked *recalc* internal
 ```cpp
 // SpO2
 void setSpO2WarmupS(float s);                              // warmup before reporting SpO2 [s] — recalc
-void setSpO2DcIirTauS(float tau_s);                        // DC IIR time constant [s] — recalc
-void setSpO2AcEmaTauS(float tau_s);                        // AC² EMA time constant [s] — recalc
+void setSpO2EmaMeanTauS(float tau_s);                        // DC IIR time constant [s] — recalc
+void setSpO2EmaVarTauS(float tau_s);                        // AC² EMA time constant [s] — recalc
 void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
 void setSpO2MinDC(float counts);                           // no-finger DC threshold [ADC counts]
 void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
@@ -1563,7 +1563,7 @@ Key references for each algorithm implemented in this library.
 |         | `FW_HR_MIN_BPM` (HR1/HR2/HR3TestCalc) and `HR_MIN_HZ` (HRFFTCalc)         |
 |         | updated accordingly.                                                       |
 | v0.24   | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
-|         | via 13 new setters (setSpO2WarmupS, setSpO2DcIirTauS, setSpO2AcEmaTauS,   |
+|         | via 13 new setters (setSpO2WarmupS, setSpO2EmaMeanTauS, setSpO2EmaVarTauS,   |
 |         | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
 |         | setHR1MaCutoffHz, setHR1SqiCvMax, setHR2MinCorr, setHR2UpdateInterval,    |
 |         | setHR3UpdateInterval, setHRValidRange). hr_search_{min,max}_bpm now        |
