@@ -546,15 +546,24 @@ private:
     struct BiquadState { float v1, v2; };
 
     // EMA estimator for one signal channel (mean + variance)
-    struct RsqmEmaChannel {
-        float    ema_mean;
-        float    ema_var;
-        uint32_t count;
+    struct EmaChannel {
+        float    mean       { 0.0f };
+        float    var        { 0.0f };
+        uint32_t count      { 0 };
+        float    alpha_mean;
+        float    alpha_var;
+
+        inline void update(float x) {
+            mean += alpha_mean * (x - mean);
+            float d = x - mean;
+            var  += alpha_var  * (d * d - var);
+            count++;
+        }
     };
 
     // ── RSQM constants ─────────────────────────────────────────────────────────
-    static constexpr float    rsqm_alpha_mean       = 0.02f;    // EMA α for mean  (τ ≈ 100 ms @ 500 Hz)
-    static constexpr float    rsqm_alpha_var        = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
+    static constexpr float    rsqm_ema_alpha_mean    = 0.02f;    // EMA α for mean  (τ ≈ 100 ms @ 500 Hz)
+    static constexpr float    rsqm_ema_alpha_var     = 0.004f;   // EMA α for variance (τ ≈ 500 ms @ 500 Hz)
     static constexpr uint32_t rsqm_ready_count      = 750;      // samples before estimators trusted (3 × τ_var = 1500 ms)
     static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
     static constexpr float    rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
@@ -832,8 +841,8 @@ private:
     float    _hr_max_bpm;
 
     // ── RSQM state ────────────────────────────────────────────────────────────
-    RsqmEmaChannel _rsqm_led1_sub;     // EMA estimator for led1_sub (IR differential)
-    RsqmEmaChannel _rsqm_led2_sub;     // EMA estimator for led2_sub (RED differential)
+    EmaChannel _rsqm_led1_sub;     // EMA estimator for led1_sub (IR differential)
+    EmaChannel _rsqm_led2_sub;     // EMA estimator for led2_sub (RED differential)
     ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state

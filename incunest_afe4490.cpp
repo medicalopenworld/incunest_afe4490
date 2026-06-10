@@ -278,8 +278,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_update_interval(25u),
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
-      _rsqm_led1_sub{0.0f, 0.0f, 0},
-      _rsqm_led2_sub{0.0f, 0.0f, 0},
+      _rsqm_led1_sub{0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var},
+      _rsqm_led2_sub{0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0),
       _debug_enabled(false)
@@ -1003,8 +1003,8 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_sqi_result = 0.0f;
     _hr3_result = 0.0f; _hr3_sqi_result = 0.0f;
-    _rsqm_led1_sub          = {0.0f, 0.0f, 0};
-    _rsqm_led2_sub          = {0.0f, 0.0f, 0};
+    _rsqm_led1_sub          = {0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var};
+    _rsqm_led2_sub          = {0.0f, 0.0f, 0, rsqm_ema_alpha_mean, rsqm_ema_alpha_var};
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
     _current_data = AFE4490Data{};
@@ -1095,15 +1095,8 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
 void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                      int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
     // ── EMA estimators ─────────────────────────────────────────────────────────
-    _rsqm_led1_sub.ema_mean += rsqm_alpha_mean * ((float)led1_sub - _rsqm_led1_sub.ema_mean);
-    {   float d = (float)led1_sub - _rsqm_led1_sub.ema_mean;
-        _rsqm_led1_sub.ema_var += rsqm_alpha_var * (d * d - _rsqm_led1_sub.ema_var); }
-    _rsqm_led1_sub.count++;
-
-    _rsqm_led2_sub.ema_mean += rsqm_alpha_mean * ((float)led2_sub - _rsqm_led2_sub.ema_mean);
-    {   float d = (float)led2_sub - _rsqm_led2_sub.ema_mean;
-        _rsqm_led2_sub.ema_var += rsqm_alpha_var * (d * d - _rsqm_led2_sub.ema_var); }
-    _rsqm_led2_sub.count++;
+    _rsqm_led1_sub.update((float)led1_sub);
+    _rsqm_led2_sub.update((float)led2_sub);
 
     const bool ready = (_rsqm_led1_sub.count >= rsqm_ready_count);
 
@@ -1159,8 +1152,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
     // Both channels required: SpO2 needs IR and RED simultaneously
     if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
-        (sqrtf(_rsqm_led1_sub.ema_var) < rsqm_signal_weak_std ||
-         sqrtf(_rsqm_led2_sub.ema_var) < rsqm_signal_weak_std))
+        (sqrtf(_rsqm_led1_sub.var) < rsqm_signal_weak_std ||
+         sqrtf(_rsqm_led2_sub.var) < rsqm_signal_weak_std))
         diag |= RSQM_SIGNAL_WEAK;
 
     // RSQM_HW_SETTLING: set externally by HGAC or config change; counts down to 0
