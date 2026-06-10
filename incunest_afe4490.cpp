@@ -28,19 +28,20 @@ namespace {
     constexpr float    kPi                  = 3.14159265358979f;
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
-    constexpr float    spo2_warmup_s       = 5.0f;     // s  — warmup before reporting SpO2
-    // EMA mean τ (DC baseline): 1.6 s, f_c ≈ 0.1 Hz.
-    // Must be slow enough that f_c << min physiological HR (0.5 Hz @ 30 bpm) so the DC
-    // estimate tracks only the static baseline (tissue + venous blood + ambient) and does
-    // not follow the pulsatile component — otherwise AC = x−DC is underestimated, biasing
-    // the R ratio and SpO2. Fast enough to adapt to slow probe repositioning (~5 s settle).
-    constexpr float    spo2_ema_mean_tau_s   = 1.6f;
-    // EMA variance τ (AC² power): 1.0 s.
-    // Averaging window for pulsatile power = RMS²_AC. Must cover at least 1–2 cardiac cycles
-    // for a stable estimate. At neonatal HR 120–160 bpm (period 0.375–0.5 s): covers 2–2.7
-    // cycles. At 60 bpm (period 1 s): covers ~1 cycle. At 30 bpm: marginal (0.5 cycle), but
-    // the 5 s warmup ensures the estimator has settled before the first SpO2 output is used.
-    constexpr float    spo2_ema_var_tau_s    = 1.0f;
+    constexpr float    spo2_warmup_s       = 18.0f;    // s  — warmup before reporting SpO2 (3 × τ_var = 3 × 6 s)
+    // EMA mean τ (DC baseline): 2.0 s, f_c ≈ 0.08 Hz.
+    // Same value as rsqm_ema_mean_tau_s — both track the DC baseline of the same signal
+    // (led1_sub / led2_sub) with the same physical requirement: f_c << min physiological HR
+    // (0.5 Hz @ 30 bpm) so the DC estimate does not follow the pulsatile component.
+    // If it did, AC = x−DC would be underestimated, biasing the R ratio and SpO2.
+    constexpr float    spo2_ema_mean_tau_s   = 2.0f;
+    // EMA variance τ (AC² power = SpO2 averaging time): 6.0 s.
+    // ISO 80601-2-61:2026 Annex JJ.2 d) requires a transfer standard to have an averaging
+    // time of minimum 6 s and maximum 10 s for determining SpO2. 6 s is therefore the
+    // minimum considered adequate for a stable, calibration-grade SpO2 estimate.
+    // At 60 bpm (period 1 s): covers ~6 cardiac cycles. At 120 bpm: ~12 cycles.
+    // Tradeoff: slower response to real desaturation events vs. lower SpO2 noise.
+    constexpr float    spo2_ema_var_tau_s    = 6.0f;
     // Calibration coefficients derived from experimental data with a
     // UpnMed U401-D(01AS-F) probe, type Nellcor Non-Oximax.
     // Override at runtime with setSpO2Coefficients() for a different probe.
