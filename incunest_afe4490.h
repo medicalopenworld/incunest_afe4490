@@ -129,12 +129,6 @@ enum class AFE4490Channel {
     LED2_SUB  // RED ambient-corrected
 };
 
-enum class AFE4490Filter {
-    NONE,
-    MOVING_AVERAGE,
-    BUTTERWORTH  // default: 0.5–20 Hz Butterworth bandpass
-};
-
 enum class AFE4490RF {
     RF_10K,
     RF_25K,
@@ -359,7 +353,6 @@ struct AFE4490Config {
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
-    AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
@@ -432,7 +425,7 @@ public:
 
     // Signal and filter configuration
     void setPPGChannel(AFE4490Channel channel);
-    void setPPGDispFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
+    void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
 
     // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
     void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
@@ -543,16 +536,42 @@ public:
 private:
     // ── Private types ─────────────────────────────────────────────────────────
 
-    struct BiquadState { float v1, v2; };
-
-    // BiquadFilter groups coefficients, state and cutoff frequencies for one filter instance.
-    // _recalc_biquad() writes b0/b1/b2/a1/a2 from f_low/f_high and _afe_sample_rate_hz.
-    // _biquad_step() and _biquad_precharge() operate on state in-place.
+    // 2nd-order Butterworth filter (bandpass or lowpass) using DF-II transposed form.
+    // init_bp() / init_lp() compute coefficients via bilinear transform; process() runs
+    // one sample; reset() clears state and schedules precharge on the next process() call.
     struct BiquadFilter {
-        float f_low, f_high;          // cutoff frequencies (Hz) — parameterisable at runtime
-        float b0, b1, b2, a1, a2;    // DF-II transposed coefficients
-        BiquadState state;
-        bool  needs_precharge;        // true after reset; consumed on first sample
+        float f_low  = 0.0f;   // bandpass lower cutoff [Hz] (unused for LP)
+        float f_high = 0.0f;   // upper cutoff / LP cutoff [Hz]
+
+        // Design a 2nd-order Butterworth bandpass. Recalculates coefficients; does not reset state.
+        void init_bp(float f_low_hz, float f_high_hz, float fs);
+
+        // Design a 2nd-order Butterworth lowpass. Recalculates coefficients; does not reset state.
+        void init_lp(float f_high_hz, float fs);
+
+        // Clear state and schedule precharge on next process() call.
+        void reset() { _v1 = 0.0f; _v2 = 0.0f; _needs_precharge = true; }
+
+        // Process one sample (DF-II transposed). Precharges to steady-state on first call after reset().
+        inline float process(float x) {
+            if (_needs_precharge) {
+                float denom = 1.0f + _a1 + _a2;
+                float y_ss  = (denom != 0.0f) ? x * (_b0 + _b1 + _b2) / denom : 0.0f;
+                _v1 = y_ss - _b0 * x;
+                _v2 = _b2 * x - _a2 * y_ss;
+                _needs_precharge = false;
+            }
+            float y = _b0 * x + _v1;
+            _v1     = _b1 * x - _a1 * y + _v2;
+            _v2     = _b2 * x - _a2 * y;
+            return y;
+        }
+
+    private:
+        float _b0 = 0.0f, _b1 = 0.0f, _b2 = 0.0f;   // DF-II transposed coefficients
+        float _a1 = 0.0f, _a2 = 0.0f;
+        float _v1 = 0.0f, _v2 = 0.0f;                 // filter state
+        bool  _needs_precharge = true;
     };
 
     // EMA (Exponential Moving Average) estimator for one signal channel (mean + variance).
@@ -628,10 +647,6 @@ private:
 
     // Recomputes rate-dependent algorithm parameters from _afe_sample_rate_hz
     void _recalc_rate_params();
-    // Recomputes Butterworth bandpass biquad coefficients into filt from _afe_sample_rate_hz and filt.f_low/f_high
-    void _recalc_biquad(BiquadFilter& filt);
-    // Recomputes Butterworth low-pass biquad coefficients into filt (uses filt.f_high as cutoff)
-    void _recalc_biquad_lp(BiquadFilter& filt);
     // Returns TIA settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window)
     uint32_t _compute_settle_margin() const;
     // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for the given RF.
@@ -660,7 +675,6 @@ private:
 #endif
 
     // Signal processing
-    float _biquad_process(float x, BiquadFilter& filt);  // precharge on first call, then step
     void  _process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                           int32_t led1_sub, int32_t led2_sub);
 
@@ -684,12 +698,12 @@ private:
     // HR2 async split: fast per-sample path + linearise + compute
     bool _update_hr2_sample(int32_t led1_sub); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr2();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
-    void _compute_hr2();                          // autocorr on _hr2_seg → _hr2_result/_hr2_sqi_result
+    void _compute_hr2();                          // autocorr on _hr2_seg → _hr2_result/_hr2_result_sqi
 
     // HR3 async split
     bool _update_hr3_sample(int32_t led1_sub); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr3();                        // DC+Hann into _hr3_fft (call under _state_mutex)
-    void _compute_hr3();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_sqi_result
+    void _compute_hr3();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
 
     // HR2/HR3 async FreeRTOS tasks
 #ifndef INCUNEST_OFFLINE
@@ -731,9 +745,9 @@ private:
     volatile bool     _hr2_computing;   // true while Task B holds _hr2_seg; prevents Task A from overwriting
     volatile bool     _hr3_computing;   // true while Task C uses _hr3_fft; prevents Task A from overwriting
     float             _hr2_result;      // written by Task B, copied to _current_data under _state_mutex
-    float             _hr2_sqi_result;
+    float             _hr2_result_sqi;
     float             _hr3_result;      // written by Task C
-    float             _hr3_sqi_result;
+    float             _hr3_result_sqi;
 
 #if INCUNEST_TIMING_STATS
     // ── Timing instrumentation ─────────────────────────────────────────────────
@@ -776,16 +790,9 @@ private:
 
     // ── Signal processing configuration ──
     AFE4490Channel    _ppgdisp_channel;
-    AFE4490Filter     _ppgdisp_filter_type;
 
-    // ── PPG display filter (Butterworth bandpass or MA, configurable via setPPGDispFilter()) ──
+    // ── PPG display filter (Butterworth bandpass, configurable via setPPGDispFilter()) ──
     BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz
-
-    // ── Moving average state (PPG display filter — used when _ppgdisp_filter_type == MOVING_AVERAGE) ──
-    static constexpr int ma_len = 8;
-    float    _ppgdisp_ma_buf[ma_len];
-    int      _ppgdisp_ma_idx;
-    float    _ppgdisp_ma_sum;
 
     // ── HR1 moving average state (independent of PPG display filter) ──
     static constexpr int hr1_ma_max_len = 64;  // supports up to 640 Hz @ 5 Hz cutoff
@@ -910,8 +917,6 @@ public:
 
     // Biquad filter
     using TestBiquadFilter = BiquadFilter;
-    void  test_recalc_biquad(BiquadFilter& f)           { _recalc_biquad(f); }
-    float test_biquad_process(float x, BiquadFilter& f) { return _biquad_process(x, f); }
 
     // HR1
     void  test_feed_hr1(int32_t led1_sub) { _update_hr1(led1_sub); }

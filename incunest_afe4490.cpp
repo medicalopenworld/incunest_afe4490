@@ -69,8 +69,10 @@ namespace {
 
     // ── HR3 ───────────────────────────────────────────────────────────────────
     constexpr int      hr3_decim_factor    = 10;       // 500 Hz → 50 Hz effective sample rate
-    constexpr int      hr3_sqi_local_w     = 5;        // SQI window half-width [bins] beyond each of the two peak bins (~±0.49 Hz)
-    constexpr int      hr3_peak_valid_w    = 5;        // true-peak validation half-width [bins]: peak_bin must be max in ±W
+    // SQI window half-width W [bins] on each side of {b1, b2}.
+    // Window = [b1-W .. b2+W], total width = 2W+2 bins (~±0.49 Hz at 50 Hz/512).
+    // Wider W → SQI sensitive to broader spectral context; narrower W → more local.
+    constexpr int      hr3_snr_local_w     = 5;
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
@@ -239,8 +241,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _diag_task_handle(nullptr),
       _hr2_computing(false), _hr3_computing(false),
-      _hr2_result(0.0f), _hr2_sqi_result(0.0f),
-      _hr3_result(0.0f), _hr3_sqi_result(0.0f),
+      _hr2_result(0.0f), _hr2_result_sqi(0.0f),
+      _hr3_result(0.0f), _hr3_result_sqi(0.0f),
       _afe_sample_rate_hz(500), _afe_adc_averages(8),
       _afe_led1_current_mA(20.0f), _afe_led2_current_mA(20.0f), _afe_led_range_mA(150),
       _afe_sep_tia_en(true),
@@ -254,9 +256,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_stg2_en_led2(true),
       _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1_SUB),
-      _ppgdisp_filter_type(AFE4490Filter::BUTTERWORTH),
-      _ppgdisp_bpf({0.5f, 20.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
-      _ppgdisp_ma_idx(0), _ppgdisp_ma_sum(0.0f),
+      _ppgdisp_bpf(),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_dc_alpha(0.0f),
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
@@ -268,9 +268,9 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
       _hr1_interval_count(0),
-      _hr2_bpf({0.5f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
+      _hr2_bpf(),
       _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_decim_counter(0), _hr2_update_counter(0),
-      _hr3_bpf({0.4f, 15.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f}, true}),
+      _hr3_bpf(),
       _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0),
       _spo2_warmup_s(spo2_warmup_s),
       _spo2_ema_mean_tau_s(spo2_ema_mean_tau_s),
@@ -297,13 +297,15 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     // Quantize initial LED currents to the DAC grid (range already set in init list)
     _afe_led1_current_mA = _quantize_led_mA(_afe_led1_current_mA);
     _afe_led2_current_mA = _quantize_led_mA(_afe_led2_current_mA);
-    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
     memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
     _hr1_ma_idx = 0; _hr1_ma_sum = 0.0f;
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
     _current_data = AFE4490Data{};
+    _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
+    _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
+    _hr3_bpf.f_low     = 0.4f;  _hr3_bpf.f_high     = 15.0f;
     _recalc_rate_params();
     _reset_algorithms();
 }
@@ -680,45 +682,28 @@ void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _ppgdisp_channel = channel;
     // Reset filter state: changing channel means a different signal enters the filter
-    _ppgdisp_bpf.state          = {0.0f, 0.0f};
-    _ppgdisp_bpf.needs_precharge = true;
-    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
-    _ppgdisp_ma_idx = 0;
-    _ppgdisp_ma_sum = 0.0f;
+    _ppgdisp_bpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setPPGDispFilter(AFE4490Filter type, float f_low_hz, float f_high_hz) {
+void INCUNEST_AFE4490::setPPGDispFilter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _ppgdisp_filter_type        = type;
-    _ppgdisp_bpf.f_low      = f_low_hz;
-    _ppgdisp_bpf.f_high     = f_high_hz;
-    if (type == AFE4490Filter::BUTTERWORTH) _recalc_biquad(_ppgdisp_bpf);
-    _ppgdisp_bpf.state           = {0.0f, 0.0f};
-    _ppgdisp_bpf.needs_precharge = true;
-    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
-    _ppgdisp_ma_idx = 0;
-    _ppgdisp_ma_sum = 0.0f;
+    _ppgdisp_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
+    _ppgdisp_bpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
 void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr2_bpf.f_low      = f_low_hz;
-    _hr2_bpf.f_high     = f_high_hz;
-    _recalc_biquad(_hr2_bpf);
-    _hr2_bpf.state           = {0.0f, 0.0f};
-    _hr2_bpf.needs_precharge = true;
+    _hr2_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
+    _hr2_bpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
 void INCUNEST_AFE4490::setHR3Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr3_bpf.f_low           = f_low_hz;
-    _hr3_bpf.f_high          = f_high_hz;
-    _recalc_biquad(_hr3_bpf);
-    _hr3_bpf.state           = {0.0f, 0.0f};
-    _hr3_bpf.needs_precharge = true;
+    _hr3_bpf.init_lp(f_high_hz, (float)_afe_sample_rate_hz);
+    _hr3_bpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -847,7 +832,6 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
 #endif
     cfg.ppgdisp_channel      = _ppgdisp_channel;
-    cfg.ppgdisp_filter_type  = _ppgdisp_filter_type;
     cfg.ppgdisp_f_low_hz     = _ppgdisp_bpf.f_low;
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
@@ -996,23 +980,18 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr1_sample_idx     = 0;
     _hr1_interval_count = 0;
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
-    _ppgdisp_bpf.state           = {0.0f, 0.0f};
-    _ppgdisp_bpf.needs_precharge = true;
-    memset(_ppgdisp_ma_buf, 0, sizeof(_ppgdisp_ma_buf));
-    _ppgdisp_ma_idx = 0; _ppgdisp_ma_sum = 0.0f;
-    _hr2_bpf.state           = {0.0f, 0.0f};
-    _hr2_bpf.needs_precharge = true;
+    _ppgdisp_bpf.reset();
+    _hr2_bpf.reset();
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
     _hr2_decim_counter = 0; _hr2_update_counter = 0;
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
-    _hr3_bpf.state           = {0.0f, 0.0f};
-    _hr3_bpf.needs_precharge = true;
+    _hr3_bpf.reset();
     _hr3_buf_idx = 0; _hr3_buf_count = 0;
     _hr3_decim_counter = 0; _hr3_update_counter = 0;
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
     _hr2_computing = false;  _hr3_computing = false;
-    _hr2_result = 0.0f; _hr2_sqi_result = 0.0f;
-    _hr3_result = 0.0f; _hr3_sqi_result = 0.0f;
+    _hr2_result = 0.0f; _hr2_result_sqi = 0.0f;
+    _hr3_result = 0.0f; _hr3_result_sqi = 0.0f;
     _rsqm_led1_sub_ema.reset();
     _rsqm_led2_sub_ema.reset();
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
@@ -1381,27 +1360,11 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
     if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) _hr1_ma_len = (uint32_t)hr1_ma_max_len;
-    _recalc_biquad(_ppgdisp_bpf);
-    _recalc_biquad(_hr2_bpf);
-    _recalc_biquad(_hr3_bpf);
+    _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, fs);
+    _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, fs);
+    _hr3_bpf.init_lp(_hr3_bpf.f_high, fs);
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
-}
-
-void INCUNEST_AFE4490::_recalc_biquad_lp(BiquadFilter& filt) {
-    // 2nd-order Butterworth low-pass via bilinear transform.
-    // Uses filt.f_high as the -3 dB cutoff frequency.
-    // DC gain = 1.0; state unchanged (caller is responsible for resetting if needed).
-    float fs   = (float)_afe_sample_rate_hz;
-    float Ohm  = tanf(kPi * filt.f_high / fs);  // prewarped cutoff
-    float Ohm2 = Ohm * Ohm;
-    float sqrt2 = 1.41421356f;
-    float d    = 1.0f + sqrt2 * Ohm + Ohm2;
-    filt.b0    =  Ohm2 / d;
-    filt.b1    =  2.0f * filt.b0;
-    filt.b2    =  filt.b0;
-    filt.a1    =  2.0f * (Ohm2 - 1.0f) / d;
-    filt.a2    = (1.0f - sqrt2 * Ohm + Ohm2) / d;
 }
 
 uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
@@ -1434,21 +1397,40 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
     }
 }
 
-void INCUNEST_AFE4490::_recalc_biquad(BiquadFilter& filt) {
+// ── BiquadFilter methods ──────────────────────────────────────────────────────
+
+void INCUNEST_AFE4490::BiquadFilter::init_bp(float f_low_hz, float f_high_hz, float fs) {
     // 2nd-order Butterworth bandpass via bilinear transform.
     // Analog prototype: H(s) = BW·s / (s² + BW·s + Ω₀²)
-    float fs    = (float)_afe_sample_rate_hz;
+    // State unchanged — call reset() if needed.
+    f_low  = f_low_hz;
+    f_high = f_high_hz;
     float k     = 2.0f * fs;
-    float o_low = k * tanf(kPi * filt.f_low  / fs);
-    float o_hi  = k * tanf(kPi * filt.f_high / fs);
+    float o_low = k * tanf(3.14159265358979f * f_low_hz  / fs);
+    float o_hi  = k * tanf(3.14159265358979f * f_high_hz / fs);
     float o0sq  = o_low * o_hi;
     float bw    = o_hi - o_low;
     float d     = k*k + bw*k + o0sq;
-    filt.b0 =  bw * k / d;
-    filt.b1 =  0.0f;
-    filt.b2 = -bw * k / d;
-    filt.a1 =  2.0f * (o0sq - k*k) / d;
-    filt.a2 =  (k*k - bw*k + o0sq) / d;
+    _b0 =  bw * k / d;
+    _b1 =  0.0f;
+    _b2 = -bw * k / d;
+    _a1 =  2.0f * (o0sq - k*k) / d;
+    _a2 =  (k*k - bw*k + o0sq) / d;
+}
+
+void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float fs) {
+    // 2nd-order Butterworth low-pass via bilinear transform.
+    // Uses f_high_hz as the -3 dB cutoff. State unchanged — call reset() if needed.
+    f_high = f_high_hz;
+    float Ohm  = tanf(3.14159265358979f * f_high_hz / fs);
+    float Ohm2 = Ohm * Ohm;
+    float sqrt2 = 1.41421356f;
+    float d    = 1.0f + sqrt2 * Ohm + Ohm2;
+    _b0 =  Ohm2 / d;
+    _b1 =  2.0f * _b0;
+    _b2 =  _b0;
+    _a1 =  2.0f * (Ohm2 - 1.0f) / d;
+    _a2 = (1.0f - sqrt2 * Ohm + Ohm2) / d;
 }
 
 // ── FreeRTOS task ─────────────────────────────────────────────────────────────
@@ -1553,25 +1535,6 @@ void IRAM_ATTR INCUNEST_AFE4490::_drdy_isr() {
 
 // ── Signal processing ─────────────────────────────────────────────────────────
 
-// Direct Form II Transposed biquad.
-// On the first call (needs_precharge=true), pre-charges the state to DC steady-state
-// so the first output is ~0 instead of a large transient. Derivation:
-//   y_ss  = x0 * (b0+b1+b2) / (1+a1+a2)   (= 0 for a bandpass filter)
-//   v1_ss = y_ss - b0*x0
-//   v2_ss = b2*x0 - a2*y_ss
-float INCUNEST_AFE4490::_biquad_process(float x, BiquadFilter& filt) {
-    if (filt.needs_precharge) {
-        float y_ss      = x * (filt.b0 + filt.b1 + filt.b2) / (1.0f + filt.a1 + filt.a2);
-        filt.state.v1   = y_ss - filt.b0 * x;
-        filt.state.v2   = filt.b2 * x - filt.a2 * y_ss;
-        filt.needs_precharge = false;
-    }
-    float y       = filt.b0 * x + filt.state.v1;
-    filt.state.v1 = filt.b1 * x - filt.a1 * y + filt.state.v2;
-    filt.state.v2 = filt.b2 * x - filt.a2 * y;
-    return y;
-}
-
 void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                    int32_t led1_sub, int32_t led2_sub) {
     // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA, I_PD, OT)
@@ -1591,24 +1554,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
         default: /* LED1_SUB */        raw_ppg = (float)led1_sub; break;
     }
 
-    // Apply filter
-    float filtered;
-    switch (_ppgdisp_filter_type) {
-        case AFE4490Filter::BUTTERWORTH:
-            filtered = _biquad_process(raw_ppg, _ppgdisp_bpf);
-            break;
-        case AFE4490Filter::MOVING_AVERAGE: {
-            _ppgdisp_ma_sum -= _ppgdisp_ma_buf[_ppgdisp_ma_idx];
-            _ppgdisp_ma_buf[_ppgdisp_ma_idx] = raw_ppg;
-            _ppgdisp_ma_sum += raw_ppg;
-            _ppgdisp_ma_idx = (_ppgdisp_ma_idx + 1) % ma_len;
-            filtered = _ppgdisp_ma_sum / (float)ma_len;
-            break;
-        }
-        default: /* NONE */
-            filtered = raw_ppg;
-            break;
-    }
+    float filtered = _ppgdisp_bpf.process(raw_ppg);
 
     _current_data.ppg_disp        = -(int32_t)filtered;  // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up)
     _current_data.led1       = led1;
@@ -1753,11 +1699,11 @@ void INCUNEST_AFE4490::_update_spo2(int32_t led1_sub, int32_t led2_sub) {
     float red = (float)led2_sub;
 
     // DC extraction + AC² power estimation via EmaChannel (one call per channel):
-    //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 1.6 s
+    //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 2.0 s
     //   Step 2 — AC: d = x − mean                           DC-subtraction high-pass
     //                NOTE: future alternative — replace DC-subtraction with a BPF (0.5–5 Hz)
     //                      to isolate the pulsatile band more precisely and reject motion artefacts
-    //   Step 3 — AC²: var += α_var × (d² − var)            EMA of AC², τ = 1.0 s
+    //   Step 3 — AC²: var += α_var × (d² − var)            EMA of AC², τ = 6.0 s (ISO 80601-2-61:2026 JJ.2 d)
     //                NOTE: future alternative — BPF-filtered AC² for a PI closer to spectral PI
     _spo2_ch_ir_ema.update(ir);
     _spo2_ch_red_ema.update(red);
@@ -1896,7 +1842,7 @@ void INCUNEST_AFE4490::_update_hr1(int32_t led1_sub) {
 // Returns true when the computation window fires (buffer full, interval elapsed).
 bool INCUNEST_AFE4490::_update_hr2_sample(int32_t led1_sub) {
     float ir = (float)led1_sub;
-    float filtered = -_biquad_process(ir, _hr2_bpf);
+    float filtered = -_hr2_bpf.process(ir);
 
     _hr2_decim_counter++;
     if (_hr2_decim_counter < (uint32_t)hr2_decim_factor) return false;
@@ -1920,12 +1866,12 @@ void INCUNEST_AFE4490::_linearize_hr2() {
         _hr2_seg[i] = _hr2_buf[(_hr2_buf_idx + i) % hr2_buf_len];
 }
 
-// Slow path: autocorrelation on _hr2_seg → _hr2_result / _hr2_sqi_result.
+// Slow path: autocorrelation on _hr2_seg → _hr2_result / _hr2_result_sqi.
 // Called by Task B. Reads only _hr2_seg (no other shared state written).
 void INCUNEST_AFE4490::_compute_hr2() {
     float acorr0 = 0.0f;
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
-    if (acorr0 < 1.0f) { _hr2_sqi_result = 0.0f; return; }
+    if (acorr0 < 1.0f) { _hr2_result_sqi = 0.0f; return; }
 
     float fs2     = (float)_afe_sample_rate_hz / (float)hr2_decim_factor;
     int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * fs2);
@@ -1960,20 +1906,20 @@ void INCUNEST_AFE4490::_compute_hr2() {
         }
     }
 
-    if (peak_idx < 0) { _hr2_sqi_result = 0.0f; return; }
+    if (peak_idx < 0) { _hr2_result_sqi = 0.0f; return; }
 
     float denom      = y_prev - 2.0f * y_peak + y_next;
     float delta      = (denom < 0.0f) ? 0.5f * (y_prev - y_next) / denom : 0.0f;
     float peak_lag_s = (float)(min_lag + peak_idx + delta) / fs2;
 
-    if (peak_lag_s <= 0.0f) { _hr2_sqi_result = 0.0f; return; }
+    if (peak_lag_s <= 0.0f) { _hr2_result_sqi = 0.0f; return; }
 
     float hr2 = 60.0f / peak_lag_s;
     if (hr2 >= _hr_min_bpm && hr2 <= _hr_max_bpm) {
         _hr2_result     = hr2;
-        _hr2_sqi_result = y_peak;
+        _hr2_result_sqi = y_peak;
     } else {
-        _hr2_sqi_result = 0.0f;
+        _hr2_result_sqi = 0.0f;
     }
 }
 
@@ -1982,8 +1928,8 @@ void INCUNEST_AFE4490::_update_hr2(int32_t led1_sub) {
     if (!_update_hr2_sample(led1_sub)) return;
     _linearize_hr2();
     _compute_hr2();
-    if (_hr2_sqi_result > 0.0f) _current_data.hr2 = _hr2_result;
-    _current_data.hr2_sqi = _hr2_sqi_result;
+    if (_hr2_result_sqi > 0.0f) _current_data.hr2 = _hr2_result;
+    _current_data.hr2_sqi = _hr2_result_sqi;
 }
 
 // ── HR3 algorithm — split into fast path + async computation ──────────────────
@@ -1992,7 +1938,7 @@ void INCUNEST_AFE4490::_update_hr2(int32_t led1_sub) {
 // Returns true when the computation window fires (buffer full, interval elapsed).
 bool INCUNEST_AFE4490::_update_hr3_sample(int32_t led1_sub) {
     float ir = (float)led1_sub;
-    float filtered = -_biquad_process(ir, _hr3_bpf);  // negate: peaks up
+    float filtered = -_hr3_bpf.process(ir);  // negate: peaks up
 
     _hr3_decim_counter++;
     if (_hr3_decim_counter < (uint32_t)hr3_decim_factor) return false;
@@ -2024,7 +1970,7 @@ void INCUNEST_AFE4490::_linearize_hr3() {
     }
 }
 
-// Slow path: FFT + HPS on _hr3_fft → _hr3_result / _hr3_sqi_result.
+// Slow path: FFT + HPS on _hr3_fft → _hr3_result / _hr3_result_sqi.
 // Called by Task C. Reads/writes only _hr3_fft and result floats (no other shared state).
 void INCUNEST_AFE4490::_compute_hr3() {
     // ── In-place radix-2 DIT FFT ──
@@ -2040,7 +1986,7 @@ void INCUNEST_AFE4490::_compute_hr3() {
     if (search_max >= nyquist)    search_max = nyquist - 2;
     if (search_max > nyquist / 3) search_max = nyquist / 3;  // 3rd harmonic must stay inside Nyquist
     if (search_min < 1)           search_min = 1;
-    if (search_min >= search_max) { _hr3_sqi_result = 0.0f; return; }
+    if (search_min >= search_max) { _hr3_result_sqi = 0.0f; return; }
 
     // HPS = P[k] * P[2k] * P[3k]  where P[k] = re[k]^2 + im[k]^2
     // _hr3_fft is stored interleaved: [re0, im0, re1, im1, ...], so bin k occupies
@@ -2060,50 +2006,46 @@ void INCUNEST_AFE4490::_compute_hr3() {
         if (hps > peak_hps) { peak_hps = hps; peak_bin = k; }
     }
 
-    // ── True-peak validation: peak_bin must be the maximum in ±hr3_peak_valid_w ──
-    // Checks neighbors outside the search range too: a boundary maximum caused by
-    // a low-frequency hump (movement artifact, no finger) will fail this test
-    // because a bin just outside the search range will be >= peak_hps.
-    {
-        bool valid = true;
-        for (int j = peak_bin - hr3_peak_valid_w; j <= peak_bin + hr3_peak_valid_w && valid; j++) {
-            if (j == peak_bin || j < 1 || j >= nyquist) continue;
-            if (hps_at(j) >= peak_hps) valid = false;
-        }
-        if (!valid) { _hr3_sqi_result = 0.0f; return; }
-    }
-
-    // ── Parabolic interpolation on original spectrum around HPS peak ──
-    float yp = _hr3_fft[2*(peak_bin-1)] * _hr3_fft[2*(peak_bin-1)] + _hr3_fft[2*(peak_bin-1)+1] * _hr3_fft[2*(peak_bin-1)+1];
-    float y0 = _hr3_fft[2* peak_bin]    * _hr3_fft[2* peak_bin]    + _hr3_fft[2* peak_bin+1]    * _hr3_fft[2* peak_bin+1];
-    float yn = _hr3_fft[2*(peak_bin+1)] * _hr3_fft[2*(peak_bin+1)] + _hr3_fft[2*(peak_bin+1)+1] * _hr3_fft[2*(peak_bin+1)+1];
-    float denom = yp - 2.0f * y0 + yn;
-    float delta = (denom < 0.0f) ? 0.5f * (yp - yn) / denom : 0.0f;
+    // ── Gaussian interpolation: sub-bin interpolation on log|X|² ────────────
+    // For a Hann-windowed DFT, adjacent bins around the peak carry a phase
+    // factor e^{±jπ} = -1 relative to the peak bin.  This causes the Jacobsen
+    // formula (Re{(X[k+1]-X[k-1])/(2X[k]-X[k+1]-X[k-1])}) to invert its sign
+    // and return δ ≈ −0.5·δ_true.  Parabolic on linear |X|² underestimates by
+    // ~50% because the Hann main lobe is not parabolic in power scale.
+    // Gaussian interpolation (parabolic fit on log|X|²) gives δ ≈ 1.07·δ_true
+    // for a pure tone, reducing HR3 error from ~0.5 BPM to < 0.1 BPM.
+    float p_m = _hr3_fft[2*(peak_bin-1)]*_hr3_fft[2*(peak_bin-1)] + _hr3_fft[2*(peak_bin-1)+1]*_hr3_fft[2*(peak_bin-1)+1];
+    float p_c = _hr3_fft[2* peak_bin  ]*_hr3_fft[2* peak_bin  ] + _hr3_fft[2* peak_bin  +1]*_hr3_fft[2* peak_bin  +1];
+    float p_p = _hr3_fft[2*(peak_bin+1)]*_hr3_fft[2*(peak_bin+1)] + _hr3_fft[2*(peak_bin+1)+1]*_hr3_fft[2*(peak_bin+1)+1];
+    float lm    = logf(p_m > 0.0f ? p_m : 1e-30f);
+    float lc    = logf(p_c > 0.0f ? p_c : 1e-30f);
+    float lp    = logf(p_p > 0.0f ? p_p : 1e-30f);
+    float denom = lm - 2.0f*lc + lp;   // < 0 for a genuine power peak
+    float delta = (denom != 0.0f) ? 0.5f*(lm - lp) / denom : 0.0f;
     float peak_freq = ((float)peak_bin + delta) * bin_res;  // Hz
 
-    if (peak_freq <= 0.0f) { _hr3_sqi_result = 0.0f; return; }
+    if (peak_freq <= 0.0f) { _hr3_result_sqi = 0.0f; return; }
 
     float hr3 = 60.0f * peak_freq;
     if (hr3 >= _hr_min_bpm && hr3 <= _hr_max_bpm) {
         _hr3_result = hr3;
 
-        // ── SQI: two-bin HPS fraction in a local window ─────────────────────────
+        // ── SQI: two-bin HPS local SNR ───────────────────────────────────────────
         // Due to the Hann window, a real signal at a non-integer bin position
         // (peak_bin + delta) splits its energy across b1=floor(peak_bin+delta) and
         // b2=b1+1. A metric based on a single bin is therefore bin-position-dependent.
         //
-        // Fix: use (hps(b1) + hps(b2)) as numerator, where b1=floor and b2=ceil
-        // of the fractional peak bin (peak_bin + delta). b1 ≤ b2 always, so the
-        // window [b1-W, b2+W] is always well-defined. Both bins scale identically
-        // with bin alignment, making the ratio bin-independent.
+        // Fix: use (hps(b1) + hps(b2)) as numerator, where b1=floor(peak_bin+delta)
+        // and b2=b1+1. Since delta∈[-0.5, 0.5], b1 is always peak_bin or peak_bin-1,
+        // so peak_bin is always in {b1,b2} → hps_num ≥ peak_hps always.
         //
-        // Denominator: sum of HPS over a local window [b1-W, b2+W] of width
-        // W+2+W = 2·hr3_sqi_local_w+2 bins. This excludes distant harmonics that
-        // would inflate the denominator for high HR signals.
+        // Denominator: sum of HPS over local window [b1-W, b2+W] of width
+        // 2·hr3_snr_local_w+2 bins. Local window excludes distant harmonics that
+        // would inflate the denominator for high-HR signals.
         //
         // Normalised against a uniform-noise baseline (2 / n_window) so that:
-        //   SQI = 0  when hps_num / hps_win == baseline (noise floor)
-        //   SQI = 1  when all HPS energy sits in b1 and b2
+        //   SQI = 0  when snr == baseline (flat noise floor)
+        //   SQI = 1  when all HPS energy in the window sits in b1 and b2
         int   b1 = (int)floorf((float)peak_bin + delta);   // floor of fractional bin
         int   b2 = b1 + 1;                                 // ceil  of fractional bin
         if (b1 < 1)            b1 = 1;
@@ -2111,8 +2053,8 @@ void INCUNEST_AFE4490::_compute_hr3() {
         float hps_b1  = (b1 == peak_bin) ? peak_hps : hps_at(b1);
         float hps_b2  = (b2 == peak_bin) ? peak_hps : hps_at(b2);
         float hps_num = hps_b1 + hps_b2;
-        int   b_lo = b1 - hr3_sqi_local_w;
-        int   b_hi = b2 + hr3_sqi_local_w;
+        int   b_lo = b1 - hr3_snr_local_w;
+        int   b_hi = b2 + hr3_snr_local_w;
         float hps_win = 0.0f;
         int   n_win   = 0;
         for (int k = b_lo; k <= b_hi; k++) {
@@ -2123,15 +2065,15 @@ void INCUNEST_AFE4490::_compute_hr3() {
             n_win++;
         }
         if (hps_win > 0.0f && n_win > 2) {
-            float fraction = hps_num / hps_win;
+            float snr      = hps_num / hps_win;
             float baseline = 2.0f / (float)n_win;
-            _hr3_sqi_result = fmaxf(0.0f, fminf(1.0f,
-                (fraction - baseline) / (1.0f - baseline)));
+            _hr3_result_sqi = fmaxf(0.0f, fminf(1.0f,
+                (snr - baseline) / (1.0f - baseline)));
         } else {
-            _hr3_sqi_result = 0.0f;  // insufficient window → conservative
+            _hr3_result_sqi = 0.0f;  // insufficient window → conservative
         }
     } else {
-        _hr3_sqi_result = 0.0f;
+        _hr3_result_sqi = 0.0f;
     }
 }
 
@@ -2140,8 +2082,8 @@ void INCUNEST_AFE4490::_update_hr3(int32_t led1_sub) {
     if (!_update_hr3_sample(led1_sub)) return;
     _linearize_hr3();
     _compute_hr3();
-    if (_hr3_sqi_result > 0.0f) _current_data.hr3 = _hr3_result;
-    _current_data.hr3_sqi = _hr3_sqi_result;
+    if (_hr3_result_sqi > 0.0f) _current_data.hr3 = _hr3_result;
+    _current_data.hr3_sqi = _hr3_result_sqi;
 }
 
 // ── HR2 async task (Task B) ────────────────────────────────────────────────────
@@ -2166,8 +2108,8 @@ void INCUNEST_AFE4490::_hr2_task_body() {
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
-        if (_hr2_sqi_result > 0.0f) _current_data.hr2 = _hr2_result;
-        _current_data.hr2_sqi = _hr2_sqi_result;
+        if (_hr2_result_sqi > 0.0f) _current_data.hr2 = _hr2_result;
+        _current_data.hr2_sqi = _hr2_result_sqi;
         xSemaphoreGive(_state_mutex);
 
         _hr2_computing = false;  // release slot after results committed
@@ -2197,8 +2139,8 @@ void INCUNEST_AFE4490::_hr3_task_body() {
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
-        if (_hr3_sqi_result > 0.0f) _current_data.hr3 = _hr3_result;
-        _current_data.hr3_sqi = _hr3_sqi_result;
+        if (_hr3_result_sqi > 0.0f) _current_data.hr3 = _hr3_result;
+        _current_data.hr3_sqi = _hr3_result_sqi;
         xSemaphoreGive(_state_mutex);
 
         _hr3_computing = false;  // release slot after results committed

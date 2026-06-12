@@ -164,7 +164,6 @@ struct AFE4490Config {
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit enable; also forced ON when AMBDAC > 0
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
-    AFE4490Filter     ppgdisp_filter_type;   // PPG display filter type
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
@@ -205,7 +204,7 @@ AFE4490Config getConfig();
 ### 2.4 Signal and filter configuration
 ```cpp
 void setPPGChannel(AFE4490Channel channel);
-void setPPGDispFilter(AFE4490Filter type, float f_low_hz = 0.5f, float f_high_hz = 20.0f);
+void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
 // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
 void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
@@ -339,11 +338,6 @@ enum class AFE4490Channel {
     LED2_ALED2   // RED ambient-corrected
 };
 
-enum class AFE4490Filter {
-    NONE,
-    MOVING_AVERAGE,
-    BUTTERWORTH
-};
 
 enum class AFE4490RF {
     RF_10K,
@@ -560,7 +554,25 @@ SpO2 = a - b × R
 ```
 
 Coefficients `a` and `b` are empirical (calibration). Configurable via `setSpO2Coefficients()`.
-`spo2_sqi` is a continuous [0–1] quality metric based on the Perfusion Index (PI):
+
+**DC and AC² estimation via EmaChannel:**
+
+Both DC and AC power are extracted from a single `EmaChannel` per signal (IR and RED), using two independent time constants:
+
+- **`spo2_ema_mean_tau_s` = 2.0 s** — tracks the DC baseline (slow IIR low-pass, f_c ≈ 0.08 Hz). Must satisfy f_c << 0.5 Hz (minimum physiological HR at 30 bpm) so the mean does not follow the pulsatile component. Same value as `rsqm_ema_mean_tau_s` — both track the DC of the same signal with the same physical requirement.
+- **`spo2_ema_var_tau_s` = 6.0 s** — tracks the AC² power (EMA of `(x − mean)²`). Minimum averaging time required by **ISO 80601-2-61:2026 Annex JJ.2 d)**, which mandates ≥ 6 s averaging for the SpO2 transfer standard reference. A shorter τ would give a fluctuating AC estimate that violates the norm.
+- **`spo2_warmup_s` = 18.0 s** — SpO2 output suppressed until 3 × τ_var = 3 × 6 s, time for the EMA variance estimator to converge.
+
+The two τ values are intentionally different because DC and AC² have distinct temporal requirements: DC must track slow baseline drift (τ = 2 s), while AC² must be stable enough for a reliable SpO2 estimate (τ ≥ 6 s per ISO).
+
+**Perfusion Index (PI):**
+
+```
+PI = sqrt(EmaChannel.var) / EmaChannel.mean × 100  [%]
+   = RMS_AC / DC × 100
+```
+
+`spo2_sqi` is a continuous [0–1] quality metric based on PI:
 
 ```
 sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)
@@ -1184,7 +1196,7 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 
 | Parameter | Constant | Value | Used by | Effect |
 |---|---|---|---|---|
-| DC removal time constant | `dc_iir_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 1.6 s | SpO2, HR1 | IIR low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
+| DC removal time constant | `spo2_ema_mean_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 2.0 s (SpO2), 1.6 s (HR1) | SpO2, HR1 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
 | Input channel selection | `setPPGChannel()` default | LED1_ALED1 | All algorithms | Selects which of the 6 raw signals enters the processing chain |
 | Decimation factor | `hr2_decim_factor`, `hr3_decim_factor` | ×10 | HR2, HR3 | Reduces 500 Hz → 50 Hz before autocorrelation / FFT; sets effective frequency resolution |
 
@@ -1194,16 +1206,16 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 
 See §5.1 for algorithm description.
 
-| Parameter | Constant | Value | Effect |
-|---|---|---|---|
-| Calibration coefficient a | `spo2_a` | 114.9208 | SpO2 = a − b·R intercept; calibrated with MS100 simulator / Nellcor R-curve |
-| Calibration coefficient b | `spo2_b` | 30.5547 | SpO2 = a − b·R slope |
-| DC IIR time constant | `dc_iir_tau_s` | 1.6 s | Speed of DC baseline tracking |
-| AC EMA time constant | `ac_ema_tau_s` | 1.0 s | Smoothing of AC amplitude estimate |
-| Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 |
-| Warm-up period | `warmup_s` | 5.0 s | SpO2 suppressed during initial filter transient |
-| SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | PI below this → SQI = 0 |
-| SQI PI upper bound | `spo2_pi_sqi_hi` | 2.0 % | PI above this → SQI = 1 |
+| Parameter | Constant | Value | Justification | Effect |
+|---|---|---|---|---|
+| Calibration coefficient a | `spo2_a` | 114.9208 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R intercept |
+| Calibration coefficient b | `spo2_b` | 30.5547 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R slope |
+| DC EMA time constant | `spo2_ema_mean_tau_s` | 2.0 s | f_c ≈ 0.08 Hz << 0.5 Hz (30 bpm min HR); same signal as RSQM → same τ | Speed of DC baseline tracking |
+| AC² EMA time constant | `spo2_ema_var_tau_s` | 6.0 s | **ISO 80601-2-61:2026 Annex JJ.2 d)**: averaging time ≥ 6 s for SpO2 reference | Stability of AC amplitude / PI estimate |
+| Warm-up period | `spo2_warmup_s` | 18.0 s | 3 × τ_var = 3 × 6 s — EMA variance convergence | SpO2 suppressed during initial transient |
+| Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 | No-finger detection guard |
+| SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | Nellcor/Masimo clinical threshold | PI below this → SQI = 0 |
+| SQI PI upper bound | `spo2_pi_sqi_hi` | 2.0 % | Nellcor/Masimo clinical threshold | PI above this → SQI = 1 |
 
 ---
 
