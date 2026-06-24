@@ -382,6 +382,14 @@ struct AFE4490Config {
     // HR valid range (HR1 + HR2 + HR3)
     float             hr_min_bpm;                // valid output lower bound [bpm]
     float             hr_max_bpm;                // valid output upper bound [bpm]
+    // RSQM algorithm parameters
+    float             rsqm_ot_thr;               // OT threshold: NOT_APPLIED vs APPLIED [A/A]
+    float             rsqm_signal_weak_std;      // LED1_Sub_std threshold for SIGNAL_WEAK [ADC counts]
+    float             rsqm_disconn_led_sub_thr;  // |led_sub| min for DISCONNECTED detection [ADC counts]
+    float             rsqm_disconn_i_pd_thr;     // |i_pd| min for DISCONNECTED detection [A]
+    float             rsqm_probe_state_min_s;    // debounce time to change probe state [s]
+    float             rsqm_ema_mean_tau_s;        // RSQM EMA mean time constant [s]
+    float             rsqm_ema_var_tau_s;         // RSQM EMA variance time constant [s]
 };
 
 // ── INCUNEST_AFE4490 class ─────────────────────────────────────────────────────────
@@ -455,6 +463,14 @@ public:
 
     // HR valid range setter (applies to HR1 + HR2 + HR3)
     void setHRValidRange(float min_bpm, float max_bpm);
+
+    // RSQM algorithm setters (callable before or after begin())
+    void setRsqmOtThr(float v);                     // OT threshold: NOT_APPLIED vs APPLIED [A/A]
+    void setRsqmSignalWeakStd(float v);             // LED1_Sub_std threshold for SIGNAL_WEAK [ADC counts]
+    void setRsqmDisconnLedSubThr(float v);          // |led_sub| min for DISCONNECTED detection [ADC counts]
+    void setRsqmDisconnIPdThr(float v);             // |i_pd| min for DISCONNECTED detection [A]
+    void setRsqmProbeStateMinS(float s);            // debounce time to change probe state [s]; triggers recalc
+    void setRsqmEmaTau(float mean_tau_s, float var_tau_s); // RSQM EMA time constants [s]; triggers recalc
 
     /**
      * @brief Retrieves the next available sample from the internal queue (non-blocking).
@@ -584,24 +600,24 @@ private:
 
         // Set time constants and sample rate; computes α internally.
         // Must be called before the first update(). Safe to call again to reconfigure.
-        void init(float tau_mean_s, float tau_var_s, float fs) {
-            _alpha_mean = 1.0f - expf(-1.0f / (tau_mean_s * fs));
-            _alpha_var  = 1.0f - expf(-1.0f / (tau_var_s  * fs));
+        void init(float mean_tau_s, float var_tau_s, float fs) {
+            _mean_alpha = 1.0f - expf(-1.0f / (mean_tau_s * fs));
+            _var_alpha  = 1.0f - expf(-1.0f / (var_tau_s  * fs));
         }
 
         // Zero mean, var and count; keeps α unchanged (no need to re-init after reset).
         void reset() { mean = 0.0f; var = 0.0f; count = 0; }
 
         inline void update(float x) {
-            mean += _alpha_mean * (x - mean);
+            mean += _mean_alpha * (x - mean);
             float d = x - mean;
-            var  += _alpha_var  * (d * d - var);
+            var  += _var_alpha  * (d * d - var);
             count++;
         }
 
     private:
-        float _alpha_mean = 0.0f;
-        float _alpha_var  = 0.0f;
+        float _mean_alpha = 0.0f;
+        float _var_alpha  = 0.0f;
     };
 
     // ── RSQM constants ─────────────────────────────────────────────────────────
@@ -612,7 +628,7 @@ private:
     // Also used for OT (optical transmittance): responds to hardware level changes (HGAC
     // RF/LED adjustments, settling ~150 ms) within 3τ ≈ 6 s — acceptable because
     // RSQM_HW_SETTLING gates HGAC actions during that period.
-    static constexpr float    rsqm_ema_mean_tau_s    = 2.0f;     // τ_mean = 2 s → α ≈ 0.001 @ 500 Hz
+    float             rsqm_ema_mean_tau_s    = 2.0f;     // τ_mean = 2 s → α ≈ 0.001 @ 500 Hz
 
     // EMA variance τ: 4000 ms, f_c = 0.04 Hz.
     // Must be slower than mean (τ_var > τ_mean) because the variance estimate needs to
@@ -621,18 +637,18 @@ private:
     //   @ 30 bpm (0.5 Hz, period 2000 ms): τ_var covers 2 full cycles (minimum acceptable)
     // Using τ_var = τ_mean = 2 s would cover only 1 cycle at 30 bpm — borderline.
     // τ_var > τ_mean is intentional asymmetry justified by different physical requirements.
-    static constexpr float    rsqm_ema_var_tau_s     = 4.0f;     // τ_var  = 4 s → α ≈ 0.0005 @ 500 Hz
+    float             rsqm_ema_var_tau_s     = 4.0f;     // τ_var  = 4 s → α ≈ 0.0005 @ 500 Hz
 
     static constexpr uint32_t rsqm_ready_count      = 6000;     // samples before estimators trusted (3 × τ_var = 12 s @ 500 Hz)
-    static constexpr float    rsqm_disconn_sub_mean = 5000.0f;  // |led_aled| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
-    static constexpr float    rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
+    float             rsqm_disconn_led_sub_thr = 5000.0f;  // |led_sub| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
+    float             rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
                                                                  // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
-    static constexpr float    rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
+    float             rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
                                                                  // Physical scale (A/A): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (needs empirical calibration)
     static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
     static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
-    static constexpr float    rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
-    static constexpr uint8_t  rsqm_probe_state_min_count = 100;  // consecutive samples required to change probe state (200 ms @ 500 Hz)
+    float             rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
+    float             rsqm_probe_state_min_s = 0.2f;    // debounce time to change probe state [s] (= 100 samples @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED
 
     // ── SPI primitives ────────────────────────────────────────────────────────
@@ -685,7 +701,7 @@ private:
     // RSQM — runs after _compute_analog_state(); fills rsqi, diag_code, probe_state
     void _update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                       int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as);
-    void _set_probe_state(ProbeState requested); // debounce gate: commits state only after rsqm_probe_state_min_count consecutive requests
+    void _set_probe_state(ProbeState requested); // debounce gate: commits state only after _rsqm_probe_state_min_samples consecutive requests
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
     void _update_spo2(int32_t led1_sub, int32_t led2_sub);
@@ -887,7 +903,8 @@ private:
     EmaChannel _rsqm_led2_sub_ema;     // EMA estimator for led2_sub (RED differential)
     ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
-    uint8_t        _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
+    uint32_t       _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
+    uint32_t       _rsqm_probe_state_min_samples { 100 };                        // cached from rsqm_probe_state_min_s × fs
     uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
 
     bool             _debug_enabled; // set by begin(debug=true); enables combined queue items

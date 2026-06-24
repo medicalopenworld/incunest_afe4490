@@ -800,6 +800,46 @@ void INCUNEST_AFE4490::setHRValidRange(float min_bpm, float max_bpm) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+// ── RSQM algorithm setters ────────────────────────────────────────────────────
+void INCUNEST_AFE4490::setRsqmOtThr(float v) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    rsqm_ot_thr = v;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setRsqmSignalWeakStd(float v) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    rsqm_signal_weak_std = v;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setRsqmDisconnLedSubThr(float v) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    rsqm_disconn_led_sub_thr = v;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setRsqmDisconnIPdThr(float v) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    rsqm_disconn_i_pd_thr = v;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setRsqmProbeStateMinS(float s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    rsqm_probe_state_min_s = s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setRsqmEmaTau(float mean_tau_s, float var_tau_s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    rsqm_ema_mean_tau_s = mean_tau_s;
+    rsqm_ema_var_tau_s  = var_tau_s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 // ── getConfig() ───────────────────────────────────────────────────────────────
 AFE4490Config INCUNEST_AFE4490::getConfig() {
     AFE4490Config cfg;
@@ -856,6 +896,13 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hr3_update_interval   = _hr3_update_interval;
     cfg.hr_min_bpm            = _hr_min_bpm;
     cfg.hr_max_bpm            = _hr_max_bpm;
+    cfg.rsqm_ot_thr              = rsqm_ot_thr;
+    cfg.rsqm_signal_weak_std     = rsqm_signal_weak_std;
+    cfg.rsqm_disconn_led_sub_thr = rsqm_disconn_led_sub_thr;
+    cfg.rsqm_disconn_i_pd_thr    = rsqm_disconn_i_pd_thr;
+    cfg.rsqm_probe_state_min_s   = rsqm_probe_state_min_s;
+    cfg.rsqm_ema_mean_tau_s      = rsqm_ema_mean_tau_s;
+    cfg.rsqm_ema_var_tau_s       = rsqm_ema_var_tau_s;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
 #endif
@@ -1006,11 +1053,11 @@ void INCUNEST_AFE4490::_reset_algorithms() {
 
 // _set_probe_state — debounce gate for probe state transitions.
 // Commits the requested state to _rsqm_probe_state only after
-// rsqm_probe_state_min_count consecutive calls with the same value.
+// _rsqm_probe_state_min_samples consecutive calls with the same value.
 // Any change in the requested state resets the counter.
 void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
     if (requested == _rsqm_probe_state_pending) {
-        if (++_rsqm_probe_state_count >= rsqm_probe_state_min_count) {
+        if (++_rsqm_probe_state_count >= _rsqm_probe_state_min_samples) {
             if (requested != _rsqm_probe_state && _diag_task_handle)
                 xTaskNotify(_diag_task_handle, 0, eNoAction); // wake diag task on state change
             _rsqm_probe_state = requested;
@@ -1100,8 +1147,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         fabsf(as.i_pd_led2)  < rsqm_disconn_i_pd_thr &&
         fabsf(as.i_pd_aled1) < rsqm_disconn_i_pd_thr &&
         fabsf(as.i_pd_aled2) < rsqm_disconn_i_pd_thr &&
-        fabsf((float)led1_sub) < rsqm_disconn_sub_mean &&
-        fabsf((float)led2_sub) < rsqm_disconn_sub_mean;
+        fabsf((float)led1_sub) < rsqm_disconn_led_sub_thr &&
+        fabsf((float)led2_sub) < rsqm_disconn_led_sub_thr;
 
     if (disconnected) {
         _set_probe_state(ProbeState::PROBE_DISCONNECTED);
@@ -1350,8 +1397,10 @@ void INCUNEST_AFE4490::_apply_control_regs() {
 
 void INCUNEST_AFE4490::_recalc_rate_params() {
     float fs              = (float)_afe_sample_rate_hz;
-    _spo2_warmup_samples    = (uint32_t)(_spo2_warmup_s    * fs);
-    _hr1_refractory_samples = (uint32_t)(hr1_refractory_s  * fs);
+    _spo2_warmup_samples         = (uint32_t)(_spo2_warmup_s         * fs);
+    _hr1_refractory_samples      = (uint32_t)(hr1_refractory_s       * fs);
+    _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * fs);
+    if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
     _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
     _rsqm_led1_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
@@ -2066,7 +2115,7 @@ void INCUNEST_AFE4490::_compute_hr3() {
         }
         if (hps_win > 0.0f && n_win > 2) {
             float snr      = hps_num / hps_win;
-            float baseline = 2.0f / (float)n_win;
+            float baseline = 2.0f / (float)n_win;  // expected snr under flat noise: numerator spans exactly 2 bins (b1+b2) out of n_win
             _hr3_result_sqi = fmaxf(0.0f, fminf(1.0f,
                 (snr - baseline) / (1.0f - baseline)));
         } else {

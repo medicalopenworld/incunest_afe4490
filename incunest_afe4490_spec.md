@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.32
+# incunest_afe4490 — Specification v0.33
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -193,6 +193,14 @@ struct AFE4490Config {
     // HR valid range (HR1 + HR2 + HR3)
     float             hr_min_bpm;                // valid output lower bound [bpm]
     float             hr_max_bpm;                // valid output upper bound [bpm]
+    // RSQM algorithm parameters (runtime-configurable via setRsqm*() setters)
+    float             rsqm_ot_thr;               // OT threshold: NOT_APPLIED vs APPLIED [A/A]
+    float             rsqm_signal_weak_std;      // LED1_Sub_std threshold for SIGNAL_WEAK [ADC counts]
+    float             rsqm_disconn_led_sub_thr;  // |led_sub| min for DISCONNECTED detection [ADC counts]
+    float             rsqm_disconn_i_pd_thr;     // |i_pd| min for DISCONNECTED detection [A]
+    float             rsqm_probe_state_min_s;    // debounce time to change probe state [s]
+    float             rsqm_ema_mean_tau_s;        // RSQM EMA mean time constant [s]
+    float             rsqm_ema_var_tau_s;         // RSQM EMA variance time constant [s]
 };
 AFE4490Config getConfig();
 ```
@@ -238,6 +246,14 @@ void setHR3UpdateInterval(uint32_t decimated_samples);     // FFT+HPS recompute 
 
 // HR1 + HR2 + HR3
 void setHRValidRange(float min_bpm, float max_bpm);        // valid HR output range [bpm]
+
+// RSQM — all callable before or after begin()
+void setRsqmOtThr(float v);                     // OT threshold: NOT_APPLIED vs APPLIED [A/A]
+void setRsqmSignalWeakStd(float v);             // LED1_Sub_std threshold for SIGNAL_WEAK [ADC counts]
+void setRsqmDisconnLedSubThr(float v);          // |led_sub| min for DISCONNECTED detection [ADC counts]
+void setRsqmDisconnIPdThr(float v);             // |i_pd| min for DISCONNECTED detection [A]
+void setRsqmProbeStateMinS(float s);            // debounce time [s] — recalc
+void setRsqmEmaTau(float mean_tau_s, float var_tau_s); // RSQM EMA time constants [s] — recalc
 ```
 
 ### 2.6 Data retrieval
@@ -736,12 +752,14 @@ Runs in `_process_sample()` after `_compute_analog_state()`, once per sample at 
 Two per-channel EMA estimators track mean and variance of the differential signal (LED_Sub = LED − ALED):
 
 ```
-ema_mean += α_mean × (x − ema_mean)          α_mean = 0.02  (τ ≈ 100 ms @ 500 Hz)
+ema_mean += α_mean × (x − ema_mean)          α_mean = 1−exp(−1/(τ_mean·fs)), τ_mean = rsqm_ema_mean_tau_s (default 2.0 s)
 d = x − ema_mean
-ema_var  += α_var  × (d² − ema_var)           α_var  = 0.004 (τ ≈ 500 ms @ 500 Hz)
+ema_var  += α_var  × (d² − ema_var)           α_var  = 1−exp(−1/(τ_var·fs)),  τ_var  = rsqm_ema_var_tau_s  (default 4.0 s)
 ```
 
-Estimators are considered **ready** after 750 samples (3 × τ_var = 1500 ms). During warmup, `probe_state = PROBE_DISCONNECTED` and `rsqi = 0`.
+Both `rsqm_ema_mean_tau_s` and `rsqm_ema_var_tau_s` are runtime-configurable via `setRsqmEmaTau()`; changing them triggers `_recalc_rate_params()`.
+
+Estimators are considered **ready** after `rsqm_ready_count` = 6000 samples (3 × τ_var = 12 s @ 500 Hz). During warmup, `probe_state = PROBE_DISCONNECTED` and `rsqi = 0`.
 
 > Reset required on hardware config change (RF / RG / AMBDAC): `ema_mean = x_current; ema_var = 0; count = 0`. Implemented as part of HGAC (not yet active in v0.27).
 
@@ -768,8 +786,8 @@ OT is computed inside `_update_rsqm()` from the `i_pd_*` fields of `AFE4490Analo
 OT is the **full electro-optical system ratio** — it combines LED wall-plug efficiency, tissue transmittance, and photodiode responsivity into a single dimensionless number. It is not the tissue optical transmittance alone.
 
 - When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
-- Threshold: `ot1 > 8.5e-5` OR `ot2 > 8.5e-5` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*
-- Single threshold (no hysteresis) — state oscillation is prevented by the 100-sample debounce in `_set_probe_state()` instead.
+- Threshold: `ot1 > rsqm_ot_thr` OR `ot2 > rsqm_ot_thr` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*. Default `rsqm_ot_thr = 8.5e-5` — runtime-configurable via `setRsqmOtThr()`.
+- Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_set_probe_state()` instead.
 
 Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54).
 
@@ -779,7 +797,7 @@ Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_A
 
 **PROBE_APPLIED** — neither of the above.
 
-**State transition debounce (`_set_probe_state`):** any state change requires 100 consecutive samples (~200 ms @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events.
+**State transition debounce (`_set_probe_state`):** any state change requires `_rsqm_probe_state_min_samples` consecutive samples (= `rsqm_probe_state_min_s × fs`, default 0.2 s = 100 samples @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events. Runtime-configurable via `setRsqmProbeStateMinS()`.
 
 #### 5.6.3 DiagCode
 
