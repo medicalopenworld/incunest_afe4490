@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.32 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.34 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.32"
+#define INCUNEST_AFE4490_VERSION "0.34"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -219,23 +219,26 @@ constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
 /// Computed in _process_sample() before RSQM and HGAC; not stored in AFE4490Data.
 /// Datasheet Eq.2 (p.30):  V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 /// Inversions:
-///   V_ADC = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR          [V]
-///   V_TIA = (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri          [V]  (= I_PD × RF)
-///   I_PD  = V_TIA / RF_ohm                                      [A]
+///   V_ADC      = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR              [V]
+///   V_TIA_DIFF = 2 × (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri          [V]  (= 2 × I_PD × RF)
+///   I_PD       = V_TIA_DIFF / (2 × RF_ohm)                             [A]
+/// V_TIA convention: DIFFERENTIAL (datasheet §9.2.2: target 0.6 V, V_OD(fs) = 1.0 V).
+/// Per-branch value = v_tia_diff / 2 (TI linear FS 0.5 V; measured hard clip ~0.97 V/branch).
+/// Naming rule 4b: bare "v_tia" is forbidden — always suffix _diff or _branch.
 /// ALED channels use the same RF and RG as the corresponding LED channel.
 /// When STAGE2EN=0: RG_ohm = kAFE_RI_OHM (unity gain).
 /// OT is not stored here — computed by _update_rsqm() from i_pd fields (RSQM-specific concept).
 struct AFE4490AnalogState {
-    float v_adc_led1,  v_adc_led2,  v_adc_aled1,  v_adc_aled2;  // V
-    float v_tia_led1,  v_tia_led2,  v_tia_aled1,  v_tia_aled2;  // V  (= I_PD × RF)
-    float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
+    float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
+    float v_tia_diff_led1, v_tia_diff_led2, v_tia_diff_aled1, v_tia_diff_aled2;  // V  (= 2 × I_PD × RF)
+    float i_pd_led1,       i_pd_led2,       i_pd_aled1,       i_pd_aled2;        // A
 };
 
 /// Debug/test snapshot — aggregates internal signals not published via AFE4490Data.
 /// Not in the production data path (not in queue). Intended for test tools (e.g. PulseNest).
 /// Retrieved via getData(data, dbg); updated every sample under _state_mutex.
 struct AFE4490DebugData {
-    AFE4490AnalogState analog;  // physical reconstruction: V_ADC, V_TIA, I_PD for all 4 channels
+    AFE4490AnalogState analog;  // physical reconstruction: V_ADC, V_TIA_DIFF, I_PD for all 4 channels
 };
 
 // ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────
@@ -694,7 +697,7 @@ private:
     void  _process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                           int32_t led1_sub, int32_t led2_sub);
 
-    // Analog reconstruction — runs first in _process_sample(); provides V_ADC, V_TIA, I_PD, OT
+    // Analog reconstruction — runs first in _process_sample(); provides V_ADC, V_TIA_DIFF, I_PD, OT
     AFE4490AnalogState _compute_analog_state(int32_t led1, int32_t led2,
                                              int32_t aled1, int32_t aled2) const;
 

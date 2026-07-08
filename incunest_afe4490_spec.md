@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.33
+# incunest_afe4490 — Specification v0.34
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -50,9 +50,9 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 ```
 4 raw ADC codes (led1, led2, aled1, aled2)  +  2 SW-subtracted (led1_sub, led2_sub)
     │
-    ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA, I_PD, OT)  — see §3c
+    ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA_DIFF, I_PD, OT)  — see §3c
     │       ├─→ _update_rsqm()      (probe state, DiagCode, RSQI)
-    │       └─→ HGAC (future)       (saturation zone control — v_tia, i_pd)
+    │       └─→ HGAC (future)       (saturation zone control — v_tia_diff, i_pd)
     │
     ├─→ selected channel (setPPGChannel)
     │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
@@ -486,11 +486,13 @@ Datasheet forward equation: `V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG`
 Inverted step by step:
 
 ```
-V_ADC  = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR          [V]   (datasheet p.26: 22-bit, ±1.2 V)
-V_TIA  = (V_ADC / (2 × RG) + I_CANCEL) × Ri                [V]   (= I_PD × RF, TIA output voltage)
-I_PD   = V_TIA / RF                                          [A]   (photodiode current)
-OT     = (I_PD_LED − I_PD_ALED) / I_LED                    [—]   (electro-optical system ratio: LED efficiency × tissue transmittance × PD responsivity)
+V_ADC      = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR           [V]   (datasheet p.26: 22-bit, ±1.2 V)
+V_TIA_DIFF = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri             [V]   (= 2 × I_PD × RF, differential TIA output)
+I_PD       = V_TIA_DIFF / (2 × RF)                              [A]   (photodiode current)
+OT         = (I_PD_LED − I_PD_ALED) / I_LED                     [—]   (electro-optical system ratio: LED efficiency × tissue transmittance × PD responsivity)
 ```
+
+**V_TIA convention (naming rule 4b, 2026-07-08):** the library stores the **differential** TIA output voltage, matching the datasheet numbers literally (§9.2.2 ideal operating point = 0.6 V, V_OD(fs) = 1.0 V). Per-branch value = `v_tia_diff / 2`. The bare name `v_tia` is forbidden — every identifier must carry the `_diff` or `_branch` suffix. Empirical limits (IncuNest 16.A, `tia_linearity_sweep.py` 2026-07-08): linear up to ~1.8 V diff, hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-subtraction).
 
 ### Circuit parameters per channel
 
@@ -510,9 +512,9 @@ ALED1/ALED2 channels share the same RF and RG as LED1/LED2 respectively (same TI
 
 ```cpp
 struct AFE4490AnalogState {
-    float v_adc_led1,  v_adc_led2,  v_adc_aled1,  v_adc_aled2;  // V
-    float v_tia_led1,  v_tia_led2,  v_tia_aled1,  v_tia_aled2;  // V  (= I_PD × RF)
-    float i_pd_led1,   i_pd_led2,   i_pd_aled1,   i_pd_aled2;   // A
+    float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
+    float v_tia_diff_led1, v_tia_diff_led2, v_tia_diff_aled1, v_tia_diff_aled2;  // V  (= 2 × I_PD × RF)
+    float i_pd_led1,       i_pd_led2,       i_pd_aled1,       i_pd_aled2;        // A
 };
 ```
 
@@ -523,7 +525,7 @@ OT (optical transmittance) is **not stored in the struct**. It is a RSQM-specifi
 | Consumer | Fields used |
 |---|---|
 | `_update_rsqm()` | `i_pd_*` → computes OT internally (probe state detection) |
-| HGAC *(future)* | `v_tia_*`, `i_pd_*` (saturation zone monitoring) |
+| HGAC *(future)* | `v_tia_diff_*`, `i_pd_*` (saturation zone monitoring) |
 
 ---
 
@@ -533,7 +535,7 @@ Declared `public` in `incunest_afe4490.h`. Aggregates internal signals not publi
 
 ```cpp
 struct AFE4490DebugData {
-    AFE4490AnalogState analog;  // V_ADC, V_TIA, I_PD for all 4 channels
+    AFE4490AnalogState analog;  // V_ADC, V_TIA_DIFF, I_PD for all 4 channels
 };
 ```
 

@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.31 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.34 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -79,18 +79,24 @@ namespace {
     constexpr float    hr_min_bpm          =  40.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
     constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
-    // ── HGAC — TIA operating range ────────────────────────────────────────────
+    // ── HGAC — TIA operating range (DIFFERENTIAL domain, naming rule 4b) ─────
     // Reference: AFE4490 datasheet Fig. 135 ("AGC Loop"), §9.2.2.
     // TIA differential output range = ±1.0 V; ADC full-scale = ±1.2 V (22-bit).
-    // To recover V_TIA_diff from an ADC reading at any Stage 2 gain and AMBDAC setting:
-    //   tia_volt = (adc_value * 1.2f / 2097151.0f) / rg_gain + ambdac_val * 0.2f
+    // To recover v_tia_diff from an ADC reading at any Stage 2 gain and AMBDAC setting:
+    //   v_tia_diff_volt = (adc_value * 1.2f / 2097151.0f) / rg_gain + ambdac_val * 0.2f
     // where rg_gain is the linear Stage 2 gain (1/1.5/2/3/4), ambdac_val is AMBDAC[3:0]
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
     // 2097151 = 2^21-1: per datasheet Table 7, positive full-scale code maps to +1.2 V.
-    // When STAGE2EN = 0 (Stage 2 bypassed): tia_volt = adc_value * 1.2f / 2097151.0f.
-    static constexpr float hgac_tia_sat_volt   = 1.0f;  // V — TIA diff full scale (hard limit; §9.2.2, Fig. 135)
-    static constexpr float hgac_tia_thr_volt   = 0.9f;  // V — TIA threshold: reduce LEDmA/RF before reaching saturation
-    static constexpr float hgac_tia_ideal_volt = 0.6f;  // V — Ideal Operating Point (Fig. 135)
+    // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_diff_volt = adc_value * 1.2f / 2097151.0f.
+    static constexpr float hgac_v_tia_diff_fs    = 1.0f;  // V — V_OD(fs): limit of TI-guaranteed linearity/specs (§9.2.2, Fig. 135). NOT the physical clip.
+    static constexpr float hgac_v_tia_diff_thr   = 0.9f;  // V — HGAC actuation threshold: reduce LEDmA/RF before reaching fs
+    static constexpr float hgac_v_tia_diff_ideal = 0.6f;  // V — Ideal Operating Point, diff (Fig. 135, §9.2.2)
+    // Empirical limits (IncuNest 16.A, tia_linearity_sweep.py, 2026-07-08):
+    //   measured linear up to ~1.8 V diff (slope within 3% of baseline);
+    //   hard physical clip ~1.94 V diff (TIA output node hits the rail,
+    //   pre-ambient-subtraction; independent of RF and AMBDAC).
+    // Reserved for future use if HGAC ever needs the physical clip:
+    // static constexpr float hgac_v_tia_diff_clip = 1.94f;  // V — empirical hard clip (2026-07-08)
 
     // ── HR3 FFT — radix-2 Cooley-Tukey DIT (in-place, complex interleaved) ──
     // x: float array of 2N elements [re0,im0, re1,im1, ..., re(N-1),im(N-1)]
@@ -1071,9 +1077,10 @@ void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
 // Analog state reconstruction — converts raw ADC codes to physical signal-chain quantities.
 // Datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 // Inverted:
-//   V_ADC = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR
-//   V_TIA = (V_ADC / (2 × RG) + I_CANCEL_A) × Ri   [= I_PD × RF]
-//   I_PD  = V_TIA / RF
+//   V_ADC      = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR
+//   V_TIA_DIFF = 2 × (V_ADC / (2 × RG) + I_CANCEL_A) × Ri   [= 2 × I_PD × RF]
+//   I_PD       = V_TIA_DIFF / (2 × RF)
+// V_TIA convention: DIFFERENTIAL (naming rule 4b; per-branch = diff / 2).
 // When STAGE2EN=0: RG = Ri = kAFE_RI_OHM (unity gain).
 // ALED channels share the RF and RG of the corresponding LED channel.
 // OT is not computed here — it is a RSQM concept, computed in _update_rsqm() from i_pd fields.
@@ -1106,21 +1113,21 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     const float ri       = kAFE_RI_OHM;
     const float i_cancel = (float)_afe_ambdac_uA * 1e-6f;  // A
 
-    // ── V_TIA = (V_ADC / (2 × RG) + I_CANCEL) × Ri ─────────────────────────
+    // ── V_TIA_DIFF = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri ─────────────────
     // Inverted from datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
-    // V_TIA is defined here as I_PD × RF (TIA output voltage before Stage 2).
+    // Differential TIA output voltage before Stage 2 (= 2 × I_PD × RF, rule 4b).
     // LED1/ALED1 share rf1, rg1; LED2/ALED2 share rf2, rg2 (same TIA path).
-    as.v_tia_led1  = (as.v_adc_led1  / (2.0f * rg1) + i_cancel) * ri;
-    as.v_tia_led2  = (as.v_adc_led2  / (2.0f * rg2) + i_cancel) * ri;
-    as.v_tia_aled1 = (as.v_adc_aled1 / (2.0f * rg1) + i_cancel) * ri;
-    as.v_tia_aled2 = (as.v_adc_aled2 / (2.0f * rg2) + i_cancel) * ri;
+    as.v_tia_diff_led1  = 2.0f * (as.v_adc_led1  / (2.0f * rg1) + i_cancel) * ri;
+    as.v_tia_diff_led2  = 2.0f * (as.v_adc_led2  / (2.0f * rg2) + i_cancel) * ri;
+    as.v_tia_diff_aled1 = 2.0f * (as.v_adc_aled1 / (2.0f * rg1) + i_cancel) * ri;
+    as.v_tia_diff_aled2 = 2.0f * (as.v_adc_aled2 / (2.0f * rg2) + i_cancel) * ri;
 
-    // ── I_PD = V_TIA / RF ───────────────────────────────────────────────────
-    // From V_TIA = I_PD × RF (TIA transimpedance definition).
-    as.i_pd_led1  = as.v_tia_led1  / rf1;
-    as.i_pd_led2  = as.v_tia_led2  / rf2;
-    as.i_pd_aled1 = as.v_tia_aled1 / rf1;
-    as.i_pd_aled2 = as.v_tia_aled2 / rf2;
+    // ── I_PD = V_TIA_DIFF / (2 × RF) ─────────────────────────────────────────
+    // From V_TIA_DIFF = 2 × I_PD × RF (TIA transimpedance, differential).
+    as.i_pd_led1  = as.v_tia_diff_led1  / (2.0f * rf1);
+    as.i_pd_led2  = as.v_tia_diff_led2  / (2.0f * rf2);
+    as.i_pd_aled1 = as.v_tia_diff_aled1 / (2.0f * rf1);
+    as.i_pd_aled2 = as.v_tia_diff_aled2 / (2.0f * rf2);
 
     return as;
 }
@@ -1586,7 +1593,7 @@ void IRAM_ATTR INCUNEST_AFE4490::_drdy_isr() {
 
 void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                    int32_t led1_sub, int32_t led2_sub) {
-    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA, I_PD, OT)
+    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA_DIFF, I_PD, OT)
     const AFE4490AnalogState as = _compute_analog_state(led1, led2, aled1, aled2);
 
     // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
