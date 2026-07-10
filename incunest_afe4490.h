@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.35 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.36 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.35"
+#define INCUNEST_AFE4490_VERSION "0.36"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -86,10 +86,15 @@ constexpr uint32_t AFE_DIAG_LED1SC_ALM      = 0x00000800UL;  // bit 11 — LED1 
 constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — common-mode voltage out of range
 constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
 //
-// Bits 13+: RSQM software checks — set continuously by _update_rsqm() at 500 Hz
-constexpr uint32_t RSQM_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
-constexpr uint32_t RSQM_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
-constexpr uint32_t RSQM_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
+// Bits 13+: RSQM software checks — set continuously by _update_rsqm() at 500 Hz.
+// ANTICIPATORY CODE (2026-07-11): these flags currently have NO programmatic consumer
+// beyond the aggregate rsqi gate (diag_code == 0) and human inspection in pulsenest_lab.
+// Their intended consumer is HGAC, which may end up doing its own internal checks and
+// never read them — they may remain unused. HW_SETTLING is currently unreachable: nobody
+// sets _rsqm_settling_countdown > 0 yet (intended producer: HGAC / config changes).
+constexpr uint32_t RSQM_DIAG_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
+constexpr uint32_t RSQM_DIAG_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
+constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 
 // ── Public data struct ────────────────────────────────────────────────────────
 struct AFE4490Data {
@@ -115,7 +120,7 @@ struct AFE4490Data {
     float   hr3_sqi;     // HR3 Signal Quality Index [0–1]: HPS peak prominence in search range; 0=diffuse HPS, 1=dominant peak
     // RSQM outputs
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
-    uint32_t   diag_code;    // DiagCode bitmask: RSQM_AMB_SAT | RSQM_SIGNAL_WEAK | RSQM_HW_SETTLING | ...
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SIGNAL_WEAK | RSQM_DIAG_HW_SETTLING | ...
     ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, or PROBE_APPLIED
 };
 
@@ -203,7 +208,9 @@ constexpr float kAFE_RG_GAIN[5] = {
 // Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
 constexpr float kAFE_RI_OHM = 100e3f;
 
-// ADC full-scale constants — used for code-to-voltage reconstruction (datasheet p.26)
+// ADC full-scale constants — used for code-to-voltage reconstruction
+// (datasheet p.11: ADC full-scale voltage ±1.2 V, 22-bit resolution;
+//  p.43 §8.4.1: 22-bit twos complement output format)
 constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
 constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
 
@@ -253,12 +260,14 @@ struct AFE4490AnalogState {
     // ── Physical detection thresholds ────────────────────────────────────────
     static constexpr float   kVTiaDiffFs  = 1.0f;      // V — V_OD(fs): TI-guaranteed linearity (§9.2.2, Fig. 135)
     static constexpr float   kVTiaDiffLin = 1.8f;      // V — empirical linearity limit (tia_linearity_sweep.py 2026-07-08, IncuNest 16.A)
-    // ADC saturation thresholds: empirical rails (IncuNest 16.A, 2026-07-10) with a
+    // ADC saturation thresholds: rails measured empirically via an AMBDAC sweep test
+    // on IncuNest 16.A hardware (2026-07-10, driving the ADC into both rails), with a
     // ~220-count guard band inside the rail. Rails are NOT the datasheet code limits
-    // (±2^21): positive rail = +2096921 (constant, all 4 channels); negative rail =
-    // -2096919 (constant on LED1/LED2; ALED1/ALED2 publish averaged codes that
-    // oscillate down to ~-2096810 without pinning — ADC averaging mixes clipped and
-    // non-clipped conversions). Guard = 2x the worst observed ALED-to-rail distance
+    // (±2^21): empirical positive rail = +2096921 (constant, all 4 channels);
+    // empirical negative rail = -2096919 (constant on LED1/LED2; ALED1/ALED2 publish
+    // averaged codes that oscillate down to ~-2096810 without pinning — ADC averaging
+    // mixes clipped and non-clipped conversions).
+    // Guard = 2x the worst observed ALED-to-rail distance
     // (109 counts), applied to BOTH polarities (the averaging mechanism is sign-
     // independent). False positives are impossible in practice: a legitimate code
     // within 220 counts of the rail (0.01% of range) is functionally saturated anyway.
@@ -699,10 +708,10 @@ private:
     // EMA mean τ: 2000 ms, f_c = 0.08 Hz.
     // Must be slow enough that f_c << 0.5 Hz (min physiological HR) so the mean tracks only
     // the DC baseline and does not follow the pulsatile component — otherwise d = x−mean is
-    // underestimated, biasing the variance estimate and causing false RSQM_SIGNAL_WEAK.
+    // underestimated, biasing the variance estimate and causing false RSQM_DIAG_SIGNAL_WEAK.
     // Also used for OT (optical transmittance): responds to hardware level changes (HGAC
     // RF/LED adjustments, settling ~150 ms) within 3τ ≈ 6 s — acceptable because
-    // RSQM_HW_SETTLING gates HGAC actions during that period.
+    // RSQM_DIAG_HW_SETTLING gates HGAC actions during that period.
     float             rsqm_ema_mean_tau_s    = 2.0f;     // τ_mean = 2 s → α ≈ 0.001 @ 500 Hz
 
     // EMA variance τ: 4000 ms, f_c = 0.04 Hz.
@@ -721,7 +730,7 @@ private:
     float             rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
                                                                  // Physical scale (A/A): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (needs empirical calibration)
     // ADC saturation thresholds live in AFE4490AnalogState (kAdcSatPos/kAdcSatNeg) since v0.35.
-    float             rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
+    float             rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_DIAG_SIGNAL_WEAK (needs HW calibration)
     float             rsqm_probe_state_min_s = 0.2f;    // debounce time to change probe state [s] (= 100 samples @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED
 

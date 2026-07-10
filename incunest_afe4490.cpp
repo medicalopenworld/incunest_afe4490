@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.35 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.36 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1091,7 +1091,9 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     AFE4490AnalogState as;
 
     // ── ADC code → volts ────────────────────────────────────────────────────
-    // Datasheet p.26: 22-bit signed ADC, differential full-scale range ±1.2 V.
+    // Datasheet p.11 (Electrical Characteristics, ADC): 22-bit resolution,
+    // ADC full-scale voltage ±1.2 V. Datasheet p.43 (§8.4.1): output format
+    // is 22-bit twos complement → code range ±(2^21 − 1).
     // V_ADC = code / (2^21 − 1) × 1.2 V
     const float scale = kAFE_ADC_FSR / kAFE_ADC_FS_COUNTS;
     as.v_adc_led1  = (float)led1  * scale;
@@ -1206,20 +1208,20 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     // ── DiagCode ───────────────────────────────────────────────────────────────
     uint32_t diag = 0;
 
-    // RSQM_AMB_SAT: either ambient channel at or beyond positive rail
+    // RSQM_DIAG_AMB_SAT: either ambient channel at or beyond positive rail
     if (as.adcSatPos(AFE4490Ch::ALED1) || as.adcSatPos(AFE4490Ch::ALED2))
-        diag |= RSQM_AMB_SAT;
+        diag |= RSQM_DIAG_AMB_SAT;
 
-    // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
+    // RSQM_DIAG_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
     // Both channels required: SpO2 needs IR and RED simultaneously
     if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
         (sqrtf(_rsqm_led1_sub_ema.var) < rsqm_signal_weak_std ||
          sqrtf(_rsqm_led2_sub_ema.var) < rsqm_signal_weak_std))
-        diag |= RSQM_SIGNAL_WEAK;
+        diag |= RSQM_DIAG_SIGNAL_WEAK;
 
-    // RSQM_HW_SETTLING: set externally by HGAC or config change; counts down to 0
+    // RSQM_DIAG_HW_SETTLING: set externally by HGAC or config change; counts down to 0
     if (_rsqm_settling_countdown > 0) {
-        diag |= RSQM_HW_SETTLING;
+        diag |= RSQM_DIAG_HW_SETTLING;
         --_rsqm_settling_countdown;
     }
 
