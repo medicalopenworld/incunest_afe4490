@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.34 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.35 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.34"
+#define INCUNEST_AFE4490_VERSION "0.35"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -227,11 +227,83 @@ constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
 /// Naming rule 4b: bare "v_tia" is forbidden — always suffix _diff or _branch.
 /// ALED channels use the same RF and RG as the corresponding LED channel.
 /// When STAGE2EN=0: RG_ohm = kAFE_RI_OHM (unity gain).
-/// OT is not stored here — computed by _update_rsqm() from i_pd fields (RSQM-specific concept).
+
+/// Channel identifier for AFE4490AnalogState per-channel queries.
+/// The value is the bit index used in the validity masks (bit = 1 << (uint8_t)ch).
+enum class AFE4490Ch : uint8_t { LED1 = 0, ALED1 = 1, LED2 = 2, ALED2 = 3 };
+
+/// Per-channel measurement state, derived from the validity masks (see chState()).
+/// Precedence: CH_CLIPPED > CH_OFF_SPEC > CH_CLEAN.
+enum class AFE4490ChState : uint8_t {
+    CH_CLEAN    = 0,  // trustworthy measurement: inside every guaranteed-linear range
+    CH_OFF_SPEC = 1,  // v_tia_diff in (kVTiaDiffFs, kVTiaDiffLin]: outside TI guarantee but
+                      // empirically linear (sweep 2026-07-08) — value most likely correct
+    CH_CLIPPED  = 2,  // ADC saturated or TIA beyond empirical linearity: the stored value is
+                      // a BOUND, not a measurement (sat pos: real ≥ stored; sat neg: real ≤ stored)
+};
+
+/// Invalidity policy: VALUE-ALWAYS. Every field is always computed from the raw codes,
+/// even when part of the chain is saturated — the validity masks (one bit per channel,
+/// bit index = AFE4490Ch) tell the consumer whether each value is a measurement or a bound.
+/// Consumers must query through the helpers (chState/chClean/otLedxValid/...), never the
+/// masks directly, so the packing (per-stage masks) can change without touching consumers.
+/// The thresholds below are PHYSICS (datasheet / silicon / per-board characterization),
+/// not policy — HGAC actuation thresholds (hgac_v_tia_diff_thr/ideal) live in the controller.
 struct AFE4490AnalogState {
+    // ── Physical detection thresholds ────────────────────────────────────────
+    static constexpr float   kVTiaDiffFs  = 1.0f;      // V — V_OD(fs): TI-guaranteed linearity (§9.2.2, Fig. 135)
+    static constexpr float   kVTiaDiffLin = 1.8f;      // V — empirical linearity limit (tia_linearity_sweep.py 2026-07-08, IncuNest 16.A)
+    // ADC saturation thresholds: empirical rails (IncuNest 16.A, 2026-07-10) with a
+    // ~220-count guard band inside the rail. Rails are NOT the datasheet code limits
+    // (±2^21): positive rail = +2096921 (constant, all 4 channels); negative rail =
+    // -2096919 (constant on LED1/LED2; ALED1/ALED2 publish averaged codes that
+    // oscillate down to ~-2096810 without pinning — ADC averaging mixes clipped and
+    // non-clipped conversions). Guard = 2x the worst observed ALED-to-rail distance
+    // (109 counts), applied to BOTH polarities (the averaging mechanism is sign-
+    // independent). False positives are impossible in practice: a legitimate code
+    // within 220 counts of the rail (0.01% of range) is functionally saturated anyway.
+    static constexpr int32_t kAdcSatPos   =  2096700;  // counts — positive rail +2096921 minus guard
+    static constexpr int32_t kAdcSatNeg   = -2096700;  // counts — negative rail -2096919 plus guard
+
+    // ── Values (always computed — see validity masks below) ─────────────────
     float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
     float v_tia_diff_led1, v_tia_diff_led2, v_tia_diff_aled1, v_tia_diff_aled2;  // V  (= 2 × I_PD × RF)
     float i_pd_led1,       i_pd_led2,       i_pd_aled1,       i_pd_aled2;        // A
+    float ot_led1,         ot_led2;  // A/A — optical transmittance: (i_pd_led − i_pd_aled) / ILEDx_A.
+                                     // Full electro-optical system ratio (LED efficiency × tissue ×
+                                     // PD responsivity). Validity: otLed1Valid()/otLed2Valid().
+
+    // ── Validity masks — bit = channel (1 << (uint8_t)AFE4490Ch) ────────────
+    uint8_t adc_sat_pos  = 0;  // ADC code ≥ kAdcSatPos
+    uint8_t adc_sat_neg  = 0;  // ADC code ≤ kAdcSatNeg
+    uint8_t tia_over_fs  = 0;  // v_tia_diff > kVTiaDiffFs (photocurrent unipolar → no lower bound)
+    uint8_t tia_over_lin = 0;  // v_tia_diff > kVTiaDiffLin
+
+    // ── Helpers (mandatory access path — packing may change) ────────────────
+    bool adcSatPos(AFE4490Ch ch)  const { return (adc_sat_pos  & _bit(ch)) != 0; }
+    bool adcSatNeg(AFE4490Ch ch)  const { return (adc_sat_neg  & _bit(ch)) != 0; }
+    bool adcSat(AFE4490Ch ch)     const { return adcSatPos(ch) || adcSatNeg(ch); }
+    bool tiaOverFs(AFE4490Ch ch)  const { return (tia_over_fs  & _bit(ch)) != 0; }
+    bool tiaOverLin(AFE4490Ch ch) const { return (tia_over_lin & _bit(ch)) != 0; }
+
+    AFE4490ChState chState(AFE4490Ch ch) const {
+        if (adcSat(ch) || tiaOverLin(ch)) return AFE4490ChState::CH_CLIPPED;
+        if (tiaOverFs(ch))                return AFE4490ChState::CH_OFF_SPEC;
+        return AFE4490ChState::CH_CLEAN;
+    }
+    bool chClean(AFE4490Ch ch) const { return chState(ch) == AFE4490ChState::CH_CLEAN; }
+
+    // OT validity is strict (both source channels CH_CLEAN): OT is a ratio of two
+    // measurements — an OFF_SPEC or CLIPPED operand makes the ratio unreliable.
+    bool otLed1Valid() const { return chClean(AFE4490Ch::LED1) && chClean(AFE4490Ch::ALED1); }
+    bool otLed2Valid() const { return chClean(AFE4490Ch::LED2) && chClean(AFE4490Ch::ALED2); }
+
+    bool anyAdcSat()    const { return (adc_sat_pos | adc_sat_neg) != 0; }              // HGAC O1
+    bool anyTiaOverFs() const { return tia_over_fs != 0; }                              // HGAC O2
+    bool allClean()     const { return (adc_sat_pos | adc_sat_neg | tia_over_fs | tia_over_lin) == 0; }
+
+private:
+    static uint8_t _bit(AFE4490Ch ch) { return (uint8_t)(1u << (uint8_t)ch); }
 };
 
 /// Debug/test snapshot — aggregates internal signals not published via AFE4490Data.
@@ -648,8 +720,7 @@ private:
                                                                  // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
     float             rsqm_ot_thr           = 8.5e-5f;  // OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
                                                                  // Physical scale (A/A): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (needs empirical calibration)
-    static constexpr float    rsqm_ot_saturated     = 100.0f;   // OT sentinel when LED_raw saturated
-    static constexpr int32_t  rsqm_adc_positive_sat = 2096921;  // 22-bit ADC near positive rail (≈ 95% of FS)
+    // ADC saturation thresholds live in AFE4490AnalogState (kAdcSatPos/kAdcSatNeg) since v0.35.
     float             rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_SIGNAL_WEAK (needs HW calibration)
     float             rsqm_probe_state_min_s = 0.2f;    // debounce time to change probe state [s] (= 100 samples @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED

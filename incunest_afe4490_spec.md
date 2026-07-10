@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.34
+# incunest_afe4490 — Specification v0.35
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -508,24 +508,62 @@ When `STAGE2EN = 0` (bits[14] of TIAGAIN / TIA_AMB_GAIN): Stage 2 bypassed → u
 
 ALED1/ALED2 channels share the same RF and RG as LED1/LED2 respectively (same TIA path, only timing differs).
 
-### Struct definition
+### Struct definition (v0.35)
 
 ```cpp
+enum class AFE4490Ch : uint8_t { LED1 = 0, ALED1 = 1, LED2 = 2, ALED2 = 3 };  // value = mask bit index
+
+enum class AFE4490ChState : uint8_t {
+    CH_CLEAN    = 0,  // trustworthy measurement
+    CH_OFF_SPEC = 1,  // v_tia_diff in (kVTiaDiffFs, kVTiaDiffLin]: outside TI guarantee, empirically linear
+    CH_CLIPPED  = 2,  // ADC saturated or TIA beyond empirical linearity: value is a BOUND, not a measurement
+};
+
 struct AFE4490AnalogState {
+    // Physical detection thresholds (PHYSICS — datasheet/silicon/board characterization, never runtime policy)
+    static constexpr float   kVTiaDiffFs  = 1.0f;      // V — V_OD(fs), TI-guaranteed linearity (§9.2.2)
+    static constexpr float   kVTiaDiffLin = 1.8f;      // V — empirical linearity limit (sweep 2026-07-08, IncuNest 16.A)
+    static constexpr int32_t kAdcSatPos   =  2096700;  // counts — empirical positive rail +2096921 minus ~220-count guard
+    static constexpr int32_t kAdcSatNeg   = -2096700;  // counts — empirical negative rail −2096919 plus ~220-count guard
+
+    // Values — ALWAYS computed (value-always policy), even under saturation
     float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
     float v_tia_diff_led1, v_tia_diff_led2, v_tia_diff_aled1, v_tia_diff_aled2;  // V  (= 2 × I_PD × RF)
     float i_pd_led1,       i_pd_led2,       i_pd_aled1,       i_pd_aled2;        // A
+    float ot_led1,         ot_led2;                                              // A/A — (i_pd_led − i_pd_aled)/ILEDx_A
+
+    // Validity masks — bit = channel (1 << (uint8_t)AFE4490Ch)
+    uint8_t adc_sat_pos  = 0;  // code ≥ kAdcSatPos
+    uint8_t adc_sat_neg  = 0;  // code ≤ kAdcSatNeg
+    uint8_t tia_over_fs  = 0;  // v_tia_diff > kVTiaDiffFs (no lower bound: photocurrent unipolar)
+    uint8_t tia_over_lin = 0;  // v_tia_diff > kVTiaDiffLin
+
+    // Helpers — mandatory access path (mask packing may change without touching consumers)
+    bool adcSatPos/adcSatNeg/adcSat(AFE4490Ch) const;
+    bool tiaOverFs/tiaOverLin(AFE4490Ch) const;
+    AFE4490ChState chState(AFE4490Ch) const;   // precedence: CLIPPED > OFF_SPEC > CLEAN
+    bool chClean(AFE4490Ch) const;             // == CH_CLEAN
+    bool otLed1Valid/otLed2Valid() const;      // strict: both source channels CH_CLEAN
+    bool anyAdcSat() const;                    // HGAC O1
+    bool anyTiaOverFs() const;                 // HGAC O2
+    bool allClean() const;
 };
 ```
 
-OT (optical transmittance) is **not stored in the struct**. It is a RSQM-specific concept — computed inside `_update_rsqm()` from the `i_pd_*` fields (see §5.6.2). Keeping it out of the struct avoids coupling the physical reconstruction layer with RSQM constants (`rsqm_adc_positive_sat`, `rsqm_ot_saturated`).
+**Invalidity policy (value-always, v0.35):** every field is always computed from the raw codes — no NaN, no sentinels. The validity masks tell the consumer whether each value is a *measurement* (`CH_CLEAN`), a probably-correct value outside TI guarantee (`CH_OFF_SPEC`, empirically linear band 1.0–1.8 V diff), or a *bound* (`CH_CLIPPED`: ADC sat pos → real ≥ stored; sat neg → real ≤ stored; TIA over lin → TIA compresses). Rationale: an OFF_SPEC value is still the best estimate; a clipped value is an actionable bound for HGAC; and traces remain plottable. Consumers must use the helpers, never the raw masks — packing is per-stage today (option A) but may become per-channel (option B).
+
+**Thresholds in the struct:** the four `k*` constants are physics (datasheet FS, silicon rail, per-board offline characterization) — no runtime-configuration use case exists. HGAC actuation POLICY (`hgac_v_tia_diff_thr = 0.9`, `hgac_v_tia_diff_ideal = 0.6`) stays in the controller (`.cpp` anonymous namespace).
+
+**ADC rail characterization (IncuNest 16.A, 2026-07-10, via AMBDAC over-cancellation):** the empirical rails are NOT the datasheet code limits (±2^21). Positive rail = **+2096921**, constant and identical on all 4 channels. Negative rail = **−2096919**, constant on LED1/LED2; ALED1/ALED2 do not pin — their published codes oscillate down to ~−2096810 (approximate interval, limited observation time), because ADC averaging mixes clipped and non-clipped conversions within the window. Detection thresholds therefore carry a **guard band of ~220 counts** (2× the worst observed ALED-to-rail distance of 109 counts) inside the rail, applied to both polarities since the averaging mechanism is sign-independent. A legitimate code within 220 counts of the rail (0.01% of range) is functionally saturated anyway, so false positives are not a practical concern. Note: an exact comparison against the assumed symmetric rail −2096921 would never have triggered (`adc_sat_neg` dead flag) — found empirically.
+
+**OT (optical transmittance)** is stored in the struct since v0.35 (was previously computed inside `_update_rsqm()`). Formula: `ot_ledx = (i_pd_ledx − i_pd_aledx) / ILEDx_A` [A/A]. Value-always; validity via `otLedxValid()` (both source channels must be `CH_CLEAN` — OT is a ratio of two measurements). The former `rsqm_ot_saturated = 100.0` sentinel and `rsqm_adc_positive_sat` constant are removed.
 
 ### Consumers
 
 | Consumer | Fields used |
 |---|---|
-| `_update_rsqm()` | `i_pd_*` → computes OT internally (probe state detection) |
-| HGAC *(future)* | `v_tia_diff_*`, `i_pd_*` (saturation zone monitoring) |
+| `_update_rsqm()` | `ot_led1/ot_led2` + `otLedxValid()` (probe state), `adcSatPos(ALEDx)` (RSQM_AMB_SAT), `i_pd_*` (disconnect) |
+| HGAC *(future)* | `v_tia_diff_*`, `i_pd_*`, masks via `anyAdcSat()`/`anyTiaOverFs()` (O1/O2) |
 
 ---
 
@@ -783,12 +821,12 @@ Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_S
 OT = (I_PD_LED − I_PD_ALED) / I_LED     [A/A, dimensionless]
 ```
 
-OT is computed inside `_update_rsqm()` from the `i_pd_*` fields of `AFE4490AnalogState` (see §3c). Keeping OT here avoids coupling `_compute_analog_state()` to RSQM constants. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
+Since v0.35 OT is computed in `_compute_analog_state()` and stored in `AFE4490AnalogState` (`ot_led1`/`ot_led2`, see §3c); `_update_rsqm()` only consumes it. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
 
 OT is the **full electro-optical system ratio** — it combines LED wall-plug efficiency, tissue transmittance, and photodiode responsivity into a single dimensionless number. It is not the tissue optical transmittance alone.
 
-- When `LED_raw ≥ 2 096 921` (near ADC positive rail): `ot = 100.0` (sentinel — prevents false APPLIED from saturated channel)
-- Threshold: `ot1 > rsqm_ot_thr` OR `ot2 > rsqm_ot_thr` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*. Default `rsqm_ot_thr = 8.5e-5` — runtime-configurable via `setRsqmOtThr()`.
+- Explicit saturation policy (v0.35, replaces the former `ot = 100.0` sentinel): a channel is flagged not-applied when `!as.otLedxValid()` (any source channel not `CH_CLEAN`: ADC saturated either rail, or TIA beyond linearity) OR `as.ot_ledx > rsqm_ot_thr`. Rationale: with the probe applied on RSQM-calibrated hardware, saturation is not an expected condition (HGAC will own that case). Note this is stricter than pre-v0.35 (which only checked positive saturation of the LED channel, not ALED).
+- Threshold: `led1_not_applied` OR `led2_not_applied` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*. Default `rsqm_ot_thr = 8.5e-5` — runtime-configurable via `setRsqmOtThr()`.
 - Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_set_probe_state()` instead.
 
 Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54).
@@ -825,7 +863,7 @@ Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_A
 
 | Bit | Constant | Condition |
 |---|---|---|
-| 0x2000 | `RSQM_AMB_SAT` | `aled1 ≥ 2 096 921` OR `aled2 ≥ 2 096 921` |
+| 0x2000 | `RSQM_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `kAdcSatPos` = 2 096 700) |
 | 0x4000 | `RSQM_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
 | 0x8000 | `RSQM_HW_SETTLING` | Countdown > 0 (set externally by HGAC; not yet active in v0.27) |
 
@@ -1535,6 +1573,19 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.35   | `AFE4490AnalogState`: value-always invalidity policy. New fields             |
+|         | `ot_led1`/`ot_led2` (OT moved from `_update_rsqm()` to                       |
+|         | `_compute_analog_state()`); 4 validity masks (adc_sat_pos/neg,               |
+|         | tia_over_fs/lin, bit=channel per new `AFE4490Ch` enum); helpers +            |
+|         | `chState()` (`AFE4490ChState`: CH_CLEAN/CH_OFF_SPEC/CH_CLIPPED,              |
+|         | precedence CLIPPED>OFF_SPEC>CLEAN); physical constants in struct             |
+|         | (kVTiaDiffFs=1.0, kVTiaDiffLin=1.8, kAdcSatPos/Neg=±2096700: empirical       |
+|         | rails +2096921/−2096919 with ~220-count guard — ALED codes near the          |
+|         | negative rail oscillate without pinning due to ADC averaging).               |
+|         | Removed `rsqm_ot_saturated` sentinel and `rsqm_adc_positive_sat`;            |
+|         | `hgac_v_tia_diff_fs` superseded by `kVTiaDiffFs`. RSQM saturation            |
+|         | policy now explicit and stricter (`otLedxValid()`: both channels             |
+|         | CH_CLEAN, both rails, TIA linearity). Spec §3c, §5.6.2, §5.6.3.              |
 | v0.32   | Default values changed: LED1/LED2 current 11.7 mA → ~19.9 mA (code 34,  |
 |         | range 150 mA), TIA gain RF_500K → RF_100K. Matched to Medle probe at     |
 |         | 20 mA. Spec tables updated (§3, §8 TX/RX params, §9 register decisions). |

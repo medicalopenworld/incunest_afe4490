@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.34 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.35 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -88,13 +88,13 @@ namespace {
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
     // 2097151 = 2^21-1: per datasheet Table 7, positive full-scale code maps to +1.2 V.
     // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_diff_volt = adc_value * 1.2f / 2097151.0f.
-    static constexpr float hgac_v_tia_diff_fs    = 1.0f;  // V — V_OD(fs): limit of TI-guaranteed linearity/specs (§9.2.2, Fig. 135). NOT the physical clip.
-    static constexpr float hgac_v_tia_diff_thr   = 0.9f;  // V — HGAC actuation threshold: reduce LEDmA/RF before reaching fs
+    // Physical thresholds (fs = V_OD(fs) 1.0 V, empirical lin 1.8 V) live in
+    // AFE4490AnalogState (kVTiaDiffFs / kVTiaDiffLin) since v0.35 — physics belongs to
+    // the reconstruction layer; only HGAC actuation POLICY stays here.
+    static constexpr float hgac_v_tia_diff_thr   = 0.9f;  // V — HGAC actuation threshold: reduce ILED/RF before reaching kVTiaDiffFs
     static constexpr float hgac_v_tia_diff_ideal = 0.6f;  // V — Ideal Operating Point, diff (Fig. 135, §9.2.2)
-    // Empirical limits (IncuNest 16.A, tia_linearity_sweep.py, 2026-07-08):
-    //   measured linear up to ~1.8 V diff (slope within 3% of baseline);
-    //   hard physical clip ~1.94 V diff (TIA output node hits the rail,
-    //   pre-ambient-subtraction; independent of RF and AMBDAC).
+    // Empirical hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-
+    // subtraction; independent of RF and AMBDAC; IncuNest 16.A sweep 2026-07-08).
     // Reserved for future use if HGAC ever needs the physical clip:
     // static constexpr float hgac_v_tia_diff_clip = 1.94f;  // V — empirical hard clip (2026-07-08)
 
@@ -1083,7 +1083,8 @@ void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
 // V_TIA convention: DIFFERENTIAL (naming rule 4b; per-branch = diff / 2).
 // When STAGE2EN=0: RG = Ri = kAFE_RI_OHM (unity gain).
 // ALED channels share the RF and RG of the corresponding LED channel.
-// OT is not computed here — it is a RSQM concept, computed in _update_rsqm() from i_pd fields.
+// Also computes ot_led1/ot_led2 and the validity masks (value-always policy: every field
+// is computed regardless of saturation; masks tell measurement vs bound — see header).
 AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     int32_t led1, int32_t led2, int32_t aled1, int32_t aled2) const {
 
@@ -1129,6 +1130,32 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     as.i_pd_aled1 = as.v_tia_diff_aled1 / (2.0f * rf1);
     as.i_pd_aled2 = as.v_tia_diff_aled2 / (2.0f * rf2);
 
+    // ── OT = (I_PD_LED − I_PD_ALED) / I_LED  [A/A, dimensionless] ────────────
+    // Ambient-subtracted: isolates the modulated component driven by the LED.
+    // I_LED from LEDCNTRL register (datasheet p.28): 8-bit DAC, range 0–_afe_led_range_mA.
+    // Full electro-optical system ratio (LED wall-plug efficiency × tissue transmittance
+    // × photodiode responsivity) — not the tissue optical transmittance alone.
+    // APPLIED (finger present): ot ≈ 1.4e-5; NOT_APPLIED (no finger): ot ≈ 8e-4.
+    // Value-always: computed even under saturation — validity via otLedxValid().
+    as.ot_led1 = (as.i_pd_led1 - as.i_pd_aled1) / (_afe_led1_current_mA * 1e-3f);
+    as.ot_led2 = (as.i_pd_led2 - as.i_pd_aled2) / (_afe_led2_current_mA * 1e-3f);
+
+    // ── Validity masks (bit = channel, order per AFE4490Ch) ──────────────────
+    // adc_sat: code at/beyond ≈95% of rail — stored values are bounds, not measurements.
+    // tia_over_fs: outside TI-guaranteed linearity (OFF_SPEC band up to kVTiaDiffLin).
+    // tia_over_lin: beyond empirical linearity — TIA compresses, value is a bound.
+    // No lower TIA bound: photocurrent is unipolar (v_tia_diff ≥ 0 physically).
+    const int32_t code[4] = { led1, aled1, led2, aled2 };
+    const float   vtd[4]  = { as.v_tia_diff_led1, as.v_tia_diff_aled1,
+                              as.v_tia_diff_led2, as.v_tia_diff_aled2 };
+    for (int ch = 0; ch < 4; ++ch) {
+        const uint8_t bit = (uint8_t)(1u << ch);
+        if (code[ch] >= AFE4490AnalogState::kAdcSatPos)  as.adc_sat_pos  |= bit;
+        if (code[ch] <= AFE4490AnalogState::kAdcSatNeg)  as.adc_sat_neg  |= bit;
+        if (vtd[ch]  >  AFE4490AnalogState::kVTiaDiffFs) as.tia_over_fs  |= bit;
+        if (vtd[ch]  >  AFE4490AnalogState::kVTiaDiffLin) as.tia_over_lin |= bit;
+    }
+
     return as;
 }
 
@@ -1160,27 +1187,18 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     if (disconnected) {
         _set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
-        // Optical transmittance — computed here from i_pd fields (RSQM-specific concept).
-        // Physical formula (Eq.2 inversion): OT = (I_PD_LED − I_PD_ALED) / I_LED [A/A, dimensionless]
-        // Ambient-subtracted: isolates the modulated component driven by the LED.
-        // I_LED from LEDCNTRL register (datasheet p.28): 8-bit DAC, range 0–_afe_led_range_mA.
-        // OT is the full electro-optical system ratio (LED wall-plug efficiency × tissue transmittance
-        // × photodiode responsivity) — not the tissue optical transmittance alone.
-        // APPLIED (finger present): ot ≈ 1.4e-5  (needs empirical calibration)
-        // NOT_APPLIED (no finger):  ot ≈ 8e-4    (needs empirical calibration)
-        // Sentinel rsqm_ot_saturated (100.0) when LED_raw ≥ rsqm_adc_positive_sat: ADC clipped, OT undefined.
-        const float i_led1_A = _afe_led1_current_mA * 1e-3f;
-        const float i_led2_A = _afe_led2_current_mA * 1e-3f;
-        const float optical_transmittance_led1 = (led1 >= rsqm_adc_positive_sat)
-                                                     ? rsqm_ot_saturated
-                                                     : (as.i_pd_led1 - as.i_pd_aled1) / i_led1_A;
-        const float optical_transmittance_led2 = (led2 >= rsqm_adc_positive_sat)
-                                                     ? rsqm_ot_saturated
-                                                     : (as.i_pd_led2 - as.i_pd_aled2) / i_led2_A;
+        // OT is computed in _compute_analog_state() (as.ot_led1/ot_led2, A/A);
+        // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
+        // Explicit RSQM policy (was hidden in the former 100.0 sentinel): an OT whose
+        // source channels are not CH_CLEAN (ADC saturated or TIA beyond linearity) is
+        // treated as NOT_APPLIED — with the probe applied and RSQM-calibrated hardware,
+        // saturation is not an expected condition (HGAC will own that case).
+        const bool led1_not_applied = !as.otLed1Valid() || (as.ot_led1 > rsqm_ot_thr);
+        const bool led2_not_applied = !as.otLed2Valid() || (as.ot_led2 > rsqm_ot_thr);
 
-        // OR logic: one saturated channel is enough to flag NOT_APPLIED.
+        // OR logic: one bad channel is enough to flag NOT_APPLIED.
         // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.
-        _set_probe_state(((optical_transmittance_led1 > rsqm_ot_thr) || (optical_transmittance_led2 > rsqm_ot_thr))
+        _set_probe_state((led1_not_applied || led2_not_applied)
                              ? ProbeState::PROBE_NOT_APPLIED
                              : ProbeState::PROBE_APPLIED);
     }
@@ -1189,7 +1207,7 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     uint32_t diag = 0;
 
     // RSQM_AMB_SAT: either ambient channel at or beyond positive rail
-    if (aled1 >= rsqm_adc_positive_sat || aled2 >= rsqm_adc_positive_sat)
+    if (as.adcSatPos(AFE4490Ch::ALED1) || as.adcSatPos(AFE4490Ch::ALED2))
         diag |= RSQM_AMB_SAT;
 
     // RSQM_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
