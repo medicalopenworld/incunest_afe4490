@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.37 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.38-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -50,7 +50,15 @@ namespace {
     constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
     constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
     constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
-    constexpr float    spo2_min_dc         = 1000.0f;  // ADC counts — no-finger threshold
+    // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2's DC/AC now
+    // live in OT units (~1e-5 typical, dimensionless A/A) instead of ADC counts (~1e5).
+    // spo2_min_i_pd_a is the no-finger gate — on absolute i_pd magnitude, NOT the OT ratio
+    // itself (OT is unreliable near zero signal: numerator and denominator both tiny).
+    // Placeholder value, needs HW calibration (same status as rsqm_signal_weak_std).
+    constexpr float    spo2_min_i_pd_a     = 1e-7f;    // A — no-finger threshold (absolute i_pd)
+    // Numerical guard only (not a physiological threshold): avoids dividing by a near-zero
+    // OT value in the R/PI ratio. Four orders of magnitude below typical OT DC (~1e-5).
+    constexpr float    spo2_ot_div_eps     = 1e-9f;
     // SQI: Perfusion Index thresholds (Nellcor/Masimo clinical reference).
     // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
     constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
@@ -284,7 +292,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_ema_var_tau_s(spo2_ema_var_tau_s),
       _spo2_min(spo2_min),
       _spo2_max(spo2_max),
-      _spo2_min_dc(spo2_min_dc),
+      _spo2_min_i_pd_a(spo2_min_i_pd_a),
       _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
       _hr1_dc_tau_s(hr1_dc_tau_s),
@@ -755,9 +763,9 @@ void INCUNEST_AFE4490::setSpO2Range(float min_pct, float max_pct) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2MinDC(float counts) {
+void INCUNEST_AFE4490::setSpO2MinIPdA(float amps) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_min_dc = counts;
+    _spo2_min_i_pd_a = amps;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -924,7 +932,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_ema_var_tau_s     = _spo2_ema_var_tau_s;
     cfg.spo2_min              = _spo2_min;
     cfg.spo2_max              = _spo2_max;
-    cfg.spo2_min_dc           = _spo2_min_dc;
+    cfg.spo2_min_i_pd_a       = _spo2_min_i_pd_a;
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
     cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
     cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
@@ -1300,19 +1308,20 @@ bool INCUNEST_AFE4490::_hgac_gate_ok() const {
         && _hgac_invalid_ema.mean <= hgac_gate_invalid_frac_max;
 }
 
-// Atomic "change RF + rescale SpO2 EMA + arm settling" primitive.
+// Atomic "change RF + arm settling" primitive.
 // CONTRACT: only ever called from _update_hgac() (i.e. from inside _process_sample(),
 // under _state_mutex) — never call this directly from application code or another task.
+// EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): no longer rescales the
+// SpO2 EmaChannel here — SpO2 now consumes as.ot_led1/ot_led2 (gain-invariant by
+// construction: v_tia_diff/RF cancels), so an RF change no longer creates a discontinuity in
+// its input. See incunest_afe4490_spec.md §5.1/§5.8.
 void INCUNEST_AFE4490::_hgac_descend_rf(HgacColor color, AFE4490RF new_rf) {
     const AFE4490RF old_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
     if (new_rf == old_rf) return;
-    const float k = kAFE_RF_OHM[(int)new_rf] / kAFE_RF_OHM[(int)old_rf];
     if (color == HgacColor::IR) {
         setTIAGainLED1(new_rf);   // takes _spi_mutex internally; safe nested under caller's _state_mutex
-        _spo2_ch_ir_ema.rescale(k);
     } else {
         setTIAGainLED2(new_rf);
-        _spo2_ch_red_ema.rescale(k);
     }
     // Arm HW_SETTLING for the analog front-end to re-settle after the gain step — first real
     // producer of RSQM_DIAG_HW_SETTLING (previously dead code, see incunest_afe4490.h comment).
@@ -1791,14 +1800,15 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     _current_data.led1_sub = led1_sub;
     _current_data.led2_sub = led2_sub;
 
-    // SpO2 uses ambient-corrected channels (unfiltered, spec §1.3)
+    // SpO2 uses OT (gain-invariant, EXPERIMENT — see spec §5.1/§5.8); HR1 still uses the
+    // ambient-corrected raw channel (unfiltered, spec §1.3).
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
-    { uint64_t _t = esp_timer_get_time(); _update_spo2(led1_sub, led2_sub); _ts_spo2.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2, as.i_pd_led1, as.i_pd_led2); _ts_spo2.update(esp_timer_get_time() - _t); }
     { uint64_t _t = esp_timer_get_time(); _update_hr1(led1_sub);              _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
-    _update_spo2(led1_sub, led2_sub);
+    _update_spo2(as.ot_led1, as.ot_led2, as.i_pd_led1, as.i_pd_led2);
     _update_hr1(led1_sub);
 #endif
 
@@ -1924,10 +1934,15 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // SpO2 = a - b * R
 // led1_sub  : IR  signal ambient-corrected (led1 - aled1)
 // led2_sub : RED signal ambient-corrected (led2 - aled2)
-void INCUNEST_AFE4490::_update_spo2(int32_t led1_sub, int32_t led2_sub) {
-    float ir  = (float)led1_sub;
-    float red = (float)led2_sub;
-
+// EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs — see spec §5.1/§5.8):
+// ot_ir/ot_red replace the raw ambient-corrected counts (led1_sub/led2_sub) used before this
+// experiment. OT = (i_pd_led − i_pd_aled) / I_LED is gain-invariant by construction (a linear
+// rescaling of led_sub by 1/(2·RF·I_LED)) — an RF change no longer creates a discontinuity in
+// this input, so HGAC's _hgac_descend_rf() no longer needs to rescale this EmaChannel by k.
+// i_pd_ir/i_pd_red (absolute magnitude, Amps) drive the no-finger gate — NOT the OT ratio
+// itself, which becomes noisy/undefined precisely when signal is near-zero (both numerator
+// and denominator of OT tiny) — exactly when a reliable no-finger check matters most.
+void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red) {
     // DC extraction + AC² power estimation via EmaChannel (one call per channel):
     //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 2.0 s
     //   Step 2 — AC: d = x − mean                           DC-subtraction high-pass
@@ -1935,26 +1950,27 @@ void INCUNEST_AFE4490::_update_spo2(int32_t led1_sub, int32_t led2_sub) {
     //                      to isolate the pulsatile band more precisely and reject motion artefacts
     //   Step 3 — AC²: var += α_var × (d² − var)            EMA of AC², τ = 6.0 s (ISO 80601-2-61:2026 JJ.2 d)
     //                NOTE: future alternative — BPF-filtered AC² for a PI closer to spectral PI
-    _spo2_ch_ir_ema.update(ir);
-    _spo2_ch_red_ema.update(red);
+    _spo2_ch_ir_ema.update(ot_ir);
+    _spo2_ch_red_ema.update(ot_red);
 
     // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup)
-    // PI = sqrt(E[AC²]) / DC × 100
-    _current_data.pi = (_spo2_ch_ir_ema.mean > 1.0f)
+    // PI = sqrt(E[AC²]) / DC × 100 — a pure ratio, numerically identical whether DC/AC are
+    // expressed in OT or in raw counts (both scale by the same constant within one channel).
+    _current_data.pi = (_spo2_ch_ir_ema.mean > spo2_ot_div_eps)
                        ? (sqrtf(_spo2_ch_ir_ema.var) / _spo2_ch_ir_ema.mean) * 100.0f
                        : -1.0f;
 
     _spo2_sample_count++;
 
-    // Skip during warmup or if DC is too low (no finger)
+    // Skip during warmup or if there's no finger (absolute i_pd magnitude, see rationale above)
     if (_spo2_sample_count < _spo2_warmup_samples ||
-        _spo2_ch_ir_ema.mean < _spo2_min_dc || _spo2_ch_red_ema.mean < _spo2_min_dc) {
+        fabsf(i_pd_ir) < _spo2_min_i_pd_a || fabsf(i_pd_red) < _spo2_min_i_pd_a) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
 
     // ── DC (current EMA method) ───────────────────────────────────────────────
-    // DC = slow IIR low-pass of raw signal (mean of EmaChannel, τ = 1.6 s).
+    // DC = slow IIR low-pass of OT (mean of EmaChannel, τ = 1.6 s).
     // NOTE: future alternative — median over a sliding window (more robust to motion).
     float dc_ir  = _spo2_ch_ir_ema.mean;
     float dc_red = _spo2_ch_red_ema.mean;
@@ -1968,8 +1984,9 @@ void INCUNEST_AFE4490::_update_spo2(int32_t led1_sub, int32_t led2_sub) {
     float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
     float ac_red = sqrtf(_spo2_ch_red_ema.var);
 
-    // Avoid division by near-zero
-    if (dc_ir < 1.0f || dc_red < 1.0f || ac_ir < 1.0f) {
+    // Avoid division by near-zero (numerical guard, not a physiological gate — the no-finger
+    // case is already excluded above via absolute i_pd magnitude)
+    if (dc_ir < spo2_ot_div_eps || dc_red < spo2_ot_div_eps || ac_ir < spo2_ot_div_eps) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }

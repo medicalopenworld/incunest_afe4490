@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.37 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.38-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.37"
+#define INCUNEST_AFE4490_VERSION "0.38-experiment"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -466,7 +466,10 @@ struct AFE4490Config {
     float             spo2_ema_var_tau_s;          // EMA variance (AC²) time constant [s]
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
-    float             spo2_min_dc;               // no-finger DC threshold [ADC counts]
+    // No-finger gate: absolute i_pd magnitude (Amps), NOT a threshold on the OT ratio itself —
+    // OT becomes noisy/undefined precisely when signal is near-zero (EXPERIMENT: OT-domain
+    // input, see §5.1/§5.8). Needs HW calibration (placeholder default).
+    float             spo2_min_i_pd_a;           // no-finger threshold [A]
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     // HR1 algorithm parameters
@@ -552,7 +555,7 @@ public:
     void setSpO2EmaMeanTauS(float tau_s);                      // EMA mean (DC) time constant; triggers recalc
     void setSpO2EmaVarTauS(float tau_s);                       // EMA variance (AC²) time constant; triggers recalc
     void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
-    void setSpO2MinDC(float counts);                           // no-finger DC threshold [ADC counts]
+    void setSpO2MinIPdA(float amps);                           // no-finger threshold: absolute i_pd magnitude [A]
     void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
 
     // HR1 algorithm setters
@@ -720,13 +723,6 @@ private:
         // Zero mean, var and count; keeps α unchanged (no need to re-init after reset).
         void reset() { mean = 0.0f; var = 0.0f; count = 0; }
 
-        // Exact rescale for a gain change by factor k (e.g. TIA RF changes ×k): since this
-        // is a linear EMA, mean scales ×k and var (an EMA of squared deviation) scales ×k².
-        // Used by HGAC to keep SpO2's R ratio from being corrupted by an RF step (see
-        // incunest_afe4490_spec.md §5.8) — without this, an RF change would otherwise take
-        // ~3τ_var to reconverge, corrupting R for that whole window.
-        void rescale(float k) { mean *= k; var *= k * k; }
-
         inline void update(float x) {
             mean += _mean_alpha * (x - mean);
             float d = x - mean;
@@ -851,13 +847,20 @@ private:
     bool _hgac_gate_ok() const; // Gate G0 (A6): probe not disconnected, no HW_SETTLING, invalid fraction within bound
     void _hgac_check_descent(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
                               uint32_t& descent_count, bool& alarm_flag);
-    // Atomic "change RF + rescale SpO2 EMA + arm settling" primitive. CONTRACT: only ever
-    // called from _update_hgac() (i.e. from inside _process_sample(), under _state_mutex) —
-    // never call this directly from application code or another task.
+    // Atomic "change RF + arm settling" primitive. CONTRACT: only ever called from
+    // _update_hgac() (i.e. from inside _process_sample(), under _state_mutex) — never call
+    // this directly from application code or another task.
+    // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2 now consumes
+    // as.ot_led1/ot_led2 (gain-invariant by construction — v_tia_diff/RF cancels), so this no
+    // longer rescales the SpO2 EmaChannel by k as it did in the raw-ADC-domain version. See
+    // incunest_afe4490_spec.md §5.1/§5.8.
     void _hgac_descend_rf(HgacColor color, AFE4490RF new_rf);
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
-    void _update_spo2(int32_t led1_sub, int32_t led2_sub);
+    // EXPERIMENT (OT-domain input): ot_ir/ot_red replace led1_sub/led2_sub as the
+    // gain-invariant signal; i_pd_ir/i_pd_red (absolute magnitude) drive the no-finger gate
+    // (see spo2_min_i_pd_a) since the OT ratio itself is unreliable near zero signal.
+    void _update_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red);
     void _update_hr1(int32_t led1_sub);
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
     void _update_hr2(int32_t led1_sub);
@@ -976,7 +979,10 @@ private:
     float             _hr1_dc_alpha;
 
     // ── SpO2 state ──
-    // DC and AC² power for IR and RED channels, tracked via EmaChannel:
+    // DC and AC² power for IR and RED channels, tracked via EmaChannel. EXPERIMENT (OT-domain
+    // input, branch experiment/ot-domain-inputs): x is now OT (as.ot_led1/ot_led2), gain-
+    // invariant by construction, instead of the raw ambient-corrected counts (led1_sub/led2_sub)
+    // used before this experiment. See incunest_afe4490_spec.md §5.1/§5.8.
     //   mean  = DC component (slow IIR low-pass of x)
     //           α_mean = 1 − exp(−1/(τ_mean·fs)),  τ_mean = spo2_ema_mean_tau_s (default 1.6 s)
     //           NOTE: future alternative — bandpass filter for DC tracking
@@ -1039,7 +1045,7 @@ private:
     float    _spo2_ema_var_tau_s;
     float    _spo2_min;
     float    _spo2_max;
-    float    _spo2_min_dc;
+    float    _spo2_min_i_pd_a;
     float    _spo2_pi_sqi_lo;
     float    _spo2_pi_sqi_hi;
     float    _hr1_dc_tau_s;
@@ -1112,7 +1118,9 @@ public:
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 
     // SpO2
-    void  test_feed_spo2(int32_t led1_sub, int32_t led2_sub) { _update_spo2(led1_sub, led2_sub); }
+    void  test_feed_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red) {
+        _update_spo2(ot_ir, ot_red, i_pd_ir, i_pd_red);
+    }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }
     float test_spo2_sqi()                   { return _current_data.spo2_sqi; }
@@ -1130,9 +1138,7 @@ public:
     AFE4490RF test_hgac_rf_led1() const { return _afe_tia_rf_led1; }
     AFE4490RF test_hgac_rf_led2() const { return _afe_tia_rf_led2; }
     bool test_hgac_alarm_gain_floor() const { return _hgac_alarm_gain_floor_led1 || _hgac_alarm_gain_floor_led2; }
-    // Isolated access to the atomic RF+rescale primitive, bypassing the full sample
-    // pipeline (test_feed_sample() would also drive _update_spo2()'s own EMA update in the
-    // same call, contaminating an exact-rescale assertion).
+    // Isolated access to the RF-change primitive, bypassing the full sample pipeline.
     void test_hgac_descend_rf_led1(AFE4490RF new_rf) { _hgac_descend_rf(HgacColor::IR, new_rf); }
     void test_hgac_descend_rf_led2(AFE4490RF new_rf) { _hgac_descend_rf(HgacColor::RED, new_rf); }
     uint32_t test_diag_code() const { return _current_data.diag_code; }

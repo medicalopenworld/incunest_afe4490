@@ -607,6 +607,51 @@ Overridable in `incunest_afe4490.h` before compilation:
 ## 5. Algorithms
 
 ### 5.1 SpO2
+
+**EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input domain changed from
+raw ambient-corrected counts to OT.** `_update_spo2()` now consumes `as.ot_led1`/`as.ot_led2`
+(optical transmittance, §3c) instead of `led1_sub`/`led2_sub`. Rationale: `OT = (i_pd_led −
+i_pd_aled) / I_LED` is a linear rescaling of `led_sub` by `1/(2·RF·I_LED)` — since the real
+photocurrent does not change instantaneously when RF/ILED change, OT (and `i_pd`) is
+**gain-invariant by construction**. An RF change (HGAC, §5.8) no longer creates a
+discontinuity in SpO2's input, so `_hgac_descend_rf()` no longer needs to rescale the SpO2
+`EmaChannel` by k (removed; see §5.8, `EmaChannel::rescale()` deleted as dead code) — R is
+never corrupted by a gain step, without the reactive rescale mechanism HGAC Phase 1 used.
+This also decouples HGAC's actuation rate from any future change to how PI/SpO2 are
+estimated (see "future alternative" notes below) — a rescale-by-k trick only works for a
+linear EMA; a more sophisticated estimator might not have one, which would otherwise force
+HGAC to wait out a settling window before actuating again.
+
+**No-finger gate changed to absolute `i_pd` magnitude, NOT the OT ratio.** OT becomes
+noisy/unreliable exactly when signal is near-zero (both `i_pd_led` and `i_pd_aled` tiny) —
+precisely the case a "no finger" check needs to be reliable. New parameter
+`spo2_min_i_pd_a` (Amps, placeholder default `1e-7`, needs HW calibration — same status as
+`rsqm_signal_weak_std`) replaces `spo2_min_dc` (ADC counts). The old `dc_ir/dc_red/ac_ir <
+1.0f` numerical guards (sized for raw-count magnitudes) are replaced by `spo2_ot_div_eps =
+1e-9` (OT magnitudes are ~1e-5, four orders of magnitude above this — a pure
+division-by-near-zero guard, not a physiological threshold).
+
+**Precision note (analyzed, not a concern):** OT magnitudes (~1e-5) are nowhere near
+`float`'s precision floor — `float`'s relative precision (~1.19e-7) is ~100× finer than the
+ADC's own resolution reflected in OT units (~1e-5 relative, i.e. the same information content
+as the raw ADC codes, since OT is a linear transform). The `i_pd_led − i_pd_aled` subtraction
+does not suffer meaningful catastrophic cancellation at the magnitudes involved in this
+system (error many orders of magnitude below the ~2% physiological AC modulation).
+
+**Known limitation (not fixed by OT):** ILED changes still require gating SpO2 invalid during
+settling — ambient current does not scale with ILED (asymmetric residual, tracked separately,
+see the gain-influence analysis referenced from §5.8) — OT's gain-invariance covers RF
+changes, not the ILED/ambient-residual problem.
+
+**pulsenest_lab.py impact (not yet migrated):** the four algorithm-mirror classes there
+(`SpO2TestCalc`, `HR1TestCalc`, `HR2TestCalc`, `HR3TestCalc`) still consume raw counts; `OT_LED1`/
+`OT_LED2` are only transmitted in `$M4` (not the default `$M3`), so keeping the SpO2 mirror in
+sync would either require `$M4` always, or a local OT reconstruction from `led1_sub` + RF/ILED
+config — the latter reintroduces the same gain-change synchronization risk this migration
+removes from the firmware side. Unresolved; tracked outside this spec (project memory).
+
+---
+
 Based on the ratio R of the AC and DC components of the ambient-corrected signals:
 
 ```
@@ -1712,6 +1757,18 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.38-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): SpO2 input      |
+|         | migrated from raw ADC counts to OT.** `_update_spo2()` now takes            |
+|         | `(ot_ir, ot_red, i_pd_ir, i_pd_red)` instead of `(led1_sub, led2_sub)`.      |
+|         | New `spo2_min_i_pd_a` (replaces `spo2_min_dc`) — no-finger gate on          |
+|         | absolute i_pd magnitude, not the OT ratio (unreliable near zero signal).    |
+|         | `_hgac_descend_rf()` no longer rescales the SpO2 EMA — OT is gain-invariant |
+|         | by construction, so `EmaChannel::rescale()` is now dead code (removed).     |
+|         | `library.json` platforms/frameworks unblocked earlier (v0.37) already      |
+|         | covers native testing of this change. Spec §5.1 (rewritten), §14.          |
+|         | Not yet migrated: HR1/HR2/HR3 (still raw-domain, lower priority — see      |
+|         | project memory), `pulsenest_lab.py` mirror classes (impact analyzed, not   |
+|         | resolved — see project memory).                                            |
 | v0.37   | **HGAC Phase 1: RF-only saturation guard + descent + mandatory SpO2 EMA    |
 |         | rescale** (`_update_hgac()`, runs after `_update_rsqm()` in                 |
 |         | `_process_sample()`). New `AFE4490Config` fields `hgac_enable`,             |
