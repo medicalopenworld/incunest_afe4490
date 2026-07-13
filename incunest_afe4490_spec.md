@@ -52,7 +52,7 @@ The AFE4490 produces 6 signals per sample. All are read internally:
     │
     ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA_DIFF, I_PD, OT)  — see §3c
     │       ├─→ _update_rsqm()      (probe state, DiagCode, RSQI)
-    │       └─→ HGAC (future)       (saturation zone control — v_tia_diff, i_pd)
+    │       └─→ _update_hgac()      (saturation guard + RF descent — Phase 1, §5.8)
     │
     ├─→ selected channel (setPPGChannel)
     │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
@@ -566,7 +566,7 @@ struct AFE4490AnalogState {
 | Consumer | Fields used |
 |---|---|
 | `_update_rsqm()` | `ot_led1/ot_led2` + `otLedxValid()` (probe state), `adcSatPos(ALEDx)` (RSQM_DIAG_AMB_SAT), `i_pd_*` (disconnect) |
-| HGAC *(future)* | `v_tia_diff_*`, `i_pd_*`, masks via `anyAdcSat()`/`anyTiaOverFs()` (O1/O2) |
+| `_update_hgac()` (§5.8, Phase 1) | `v_tia_diff_led1/led2/aled1/aled2` (guard trip, per gain domain) |
 
 ---
 
@@ -577,6 +577,9 @@ Declared `public` in `incunest_afe4490.h`. Aggregates internal signals not publi
 ```cpp
 struct AFE4490DebugData {
     AFE4490AnalogState analog;  // V_ADC, V_TIA_DIFF, I_PD for all 4 channels
+    AFE4490RF hgac_rf_led1;          // current RF, IR domain — HGAC Phase 1 (§5.8)
+    AFE4490RF hgac_rf_led2;          // current RF, RED domain
+    bool      hgac_alarm_gain_floor; // true if either domain is at RF_10K and still saturating
 };
 ```
 
@@ -584,7 +587,7 @@ struct AFE4490DebugData {
 
 **Queue mechanism:** when `debug=true`, the internal queue stores `DebugQueueItem {AFE4490Data + AFE4490DebugData}` per slot. A single `xQueueReceive` fills both `data` and `dbg` atomically — they always correspond to the same sample. When `debug=false`, queue slots are `sizeof(AFE4490Data)` only — zero RAM/CPU overhead.
 
-**Scalability:** future debug signals (e.g. HGAC internals, RSQM intermediate values) are added as fields of `AFE4490DebugData`. The `getData()` API does not change.
+**Scalability:** future debug signals (e.g. RSQM intermediate values) are added as fields of `AFE4490DebugData`. The `getData()` API does not change.
 
 ---
 
@@ -870,9 +873,15 @@ Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_A
 | 0x4000 | `RSQM_DIAG_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
 | 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
 
+**Bit 16 — HGAC (updated by `_update_hgac()`, see §5.8):**
+
+| Bit | Constant | Condition |
+|---|---|---|
+| 0x10000 | `HGAC_DIAG_GAIN_FLOOR` | Either gain domain is at `RF_10K` and still saturating (debounced) |
+
 Multiple bits may be set simultaneously.
 
-**Anticipatory code (v0.36):** the three `RSQM_DIAG_*` flags currently have **no programmatic consumer** beyond the aggregate `rsqi` gate (`diag_code == 0`, §5.6.4) and human inspection in pulsenest_lab. Their intended consumer is HGAC, which may end up performing its own internal checks and never read them — they may remain unused. `RSQM_DIAG_HW_SETTLING` is currently **unreachable**: nothing sets `_rsqm_settling_countdown > 0` yet (intended producer: HGAC / config changes). These checks are therefore unvalidated in real operation; validating them is part of the HGAC definition-of-done.
+**Update (v0.37):** `RSQM_DIAG_HW_SETTLING` is no longer unreachable — HGAC (§5.8) is its first real producer, arming `_rsqm_settling_countdown` after every RF descent. `RSQM_DIAG_AMB_SAT` and `RSQM_DIAG_SIGNAL_WEAK` still have no programmatic consumer beyond the aggregate `rsqi` gate and human inspection.
 
 #### 5.6.4 RSQI
 
@@ -893,6 +902,115 @@ A dedicated internal FreeRTOS task (`incunest_diag`, low priority) calls `runAfe
 The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `INCUNEST_AFE4490_DIAG_TASK_PRIORITY` (= main task priority − 2).
 
 `runAfeDiagnostics()` remains a public API callable independently from external code (e.g. via `$DIAG?`). Both callers serialise through `_spi_mutex`.
+
+---
+
+### 5.8 HGAC — Hardware Gain Control (Phase 1: RF-only descent)
+
+**Status (v0.37): Phase 1 implemented — RF-only saturation guard with descent, no ascent yet
+(manual recovery). Disabled by default (`hgac_enable = false`).** Runs in `_process_sample()`
+immediately after `_update_rsqm()`, once per sample at 500 Hz. This is the first of a planned
+multi-phase rollout (full design, closed architecturally, in the project's design notes):
+Phase 1 (this), Phase 2 (RF ascent with prediction/hysteresis), Phase 3 (telemetry closure),
+Phase 4 (ILED actuation + thermal envelope), Phases 5-7 (feed-forward, P² estimator, UI —
+optional/deferred).
+
+#### 5.8.1 Saturation guard (single guard, v1)
+
+With Stage 2 frozen at ×1 gain and AMBDAC=0 (v1 defaults), `v_tia_diff == v_adc` — the ADC
+clips before the TIA's own linearity limit, so ADC saturation and TIA-linearity saturation
+collapse into a single guard:
+
+```
+saturating(channel) = v_tia_diff > hgac_v_tia_diff_thr   (default 0.9 V)
+```
+
+Evaluated per gain domain (IR = LED1+ALED1; RED = LED2+ALED2 — the two domains ENSEPGAIN=1
+creates, see §5.6/§11 TIAGAIN/TIA_AMB_GAIN): either the LED phase or its ambient phase
+saturating trips that domain's guard (both share one RF).
+
+#### 5.8.2 Gate G0
+
+```
+gate_ok = (probe_state != PROBE_DISCONNECTED)
+          AND !(diag_code & RSQM_DIAG_HW_SETTLING)
+          AND (invalid_fraction_ema.mean <= hgac_gate_invalid_frac_max)   (default 0.5)
+```
+
+`invalid_fraction_ema` is a dedicated `EmaChannel` fed `1.0` when `!AFE4490AnalogState::allClean()`,
+else `0.0` (window `hgac_gate_window_s`, default 0.2 s) — independent of `probe_state`.
+
+**Deviation from the closed design's literal "gate on PROBE_APPLIED":** gating on
+`probe_state != PROBE_DISCONNECTED` instead. Reason: RSQM's `PROBE_NOT_APPLIED` classifier
+also fires when a channel's optical-transmittance ratio becomes invalid due to clipping
+(`otLedxValid()` requires `CH_CLEAN`) — i.e. exactly the saturation condition HGAC exists to
+correct. Gating on `PROBE_APPLIED` literally would let a severe/fast saturation event flip
+`probe_state` to `NOT_APPLIED` and then block the very RF descent that would clear it (a
+deadlock). `PROBE_DISCONNECTED`'s criterion (all 4 channels near zero, §5.6.2) is structurally
+incompatible with saturation, so excluding only that state avoids the deadlock while still
+blocking HGAC when there is genuinely no probe/cable.
+
+#### 5.8.3 Descent algorithm
+
+Per gain domain, debounced by `hgac_descent_persist_s` (default 0.5 s = 250 samples @ 500 Hz):
+
+1. If not saturating → reset debounce counter and gain-floor alarm flag for that domain.
+2. If saturating and RF is not at the floor (`RF_10K`) → after the debounce window, step RF
+   down one LUT level (`kAFE_RF_OHM`) via `_hgac_descend_rf()`.
+3. If saturating and RF is already at `RF_10K` → after the (same) debounce window, set the
+   domain's gain-floor alarm flag (`HGAC_DIAG_GAIN_FLOOR`, bit 16). No ILED actuation yet
+   (Phase 4) — this is v1's "excessive ambient light" signal.
+
+No ascent in Phase 1 — recovery from a lowered RF is manual (a documented limitation of this
+phase, not an oversight; Phase 2 adds predicted/hysteresis-protected ascent).
+
+#### 5.8.4 Atomic RF change + SpO2 EMA rescale (`_hgac_descend_rf`)
+
+A gain change must not corrupt SpO2's R ratio. `_spo2_ch_ir_ema`/`_spo2_ch_red_ema`
+(`EmaChannel`, §5.1) are linear EMAs, so a gain step by a known factor `k` rescales exactly:
+
+```
+k = kAFE_RF_OHM[new_rf] / kAFE_RF_OHM[old_rf]
+mean ← mean × k          // EmaChannel::rescale(k)
+var  ← var × k²
+```
+
+`_hgac_descend_rf()` performs the register write (via the existing `setTIAGainLED1`/`LED2`
+setters — reused, not duplicated) and the corresponding EMA rescale as one operation, then
+arms `_rsqm_settling_countdown` (≈150 ms, `hgac_settle_time_s`) — the first real producer of
+`RSQM_DIAG_HW_SETTLING` (§5.6.3). **This ordering is mandatory, not an optimization:** without
+it, an RF change would leave the EMA's stale pre-change state in place for ~3×`spo2_ema_var_tau_s`
+(≈18 s), during which R can be corrupted by tens to ~100% (documented in the project's O10/C1
+analysis). There is no shippable intermediate state where automatic RF actuation exists without
+this rescale.
+
+Only applies to RF changes (clean rescale, since RF is linear in the signal chain). ILED
+changes (Phase 4) do NOT get this treatment — ambient current does not scale with ILED
+(asymmetric residual, tracked separately) — so ILED changes must instead gate SpO2 invalid
+during settling, not rescale.
+
+**Concurrency:** `_update_hgac()` and everything it calls take no lock of their own — they
+run from `_process_sample()`, already under `_state_mutex`. `_hgac_descend_rf()` calls
+`setTIAGainLED1/2()`, which take `_spi_mutex` internally; nesting `_spi_mutex` inside the
+caller's `_state_mutex` is safe because no code path acquires `_spi_mutex` first and then
+blocks on `_state_mutex`. **Contract:** the `_hgac_*` actuation primitives must only ever be
+called from `_update_hgac()` — never directly from application code or another task.
+
+#### 5.8.5 Parameters (see §10.9) and telemetry
+
+New `AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_diff_thr`, `hgac_v_tia_diff_ideal`
+(telemetry only in v1), `hgac_descent_persist_s`, `hgac_gate_invalid_frac_max`,
+`hgac_gate_window_s`. `$SET`/`$LCFG` wiring in PulseNest's `src/main.cpp`. `$M4` gained
+`HGAC_RF1,HGAC_RF2,HGAC_ALARM` (current RF per domain + combined gain-floor alarm), sourced
+from new `AFE4490DebugData` fields `hgac_rf_led1`/`hgac_rf_led2`/`hgac_alarm_gain_floor`
+(§3d), populated alongside `analog` in `_process_sample()`.
+
+#### 5.8.6 Known limitation carried into Phase 1 verification
+
+The `HGAC_DIAG_GAIN_FLOOR` bit and `AFE4490Data::diag_code` are refreshed at the end of
+`_update_hgac()` (`_current_data.diag_code = _diag_code`) specifically because `_update_rsqm()`
+(which runs first) already snapshots the pre-HGAC `_diag_code` into `_current_data` — without
+this second refresh, HGAC's bit would lag the published frame by exactly one sample.
 
 ---
 
@@ -1362,6 +1480,22 @@ These factors belong to the test protocol, clinical validation documentation, an
 
 ---
 
+### 10.9 HGAC parameters (Phase 1: RF-only descent)
+
+See §5.8 for algorithm description.
+
+| Parameter | API | Default | Range | Effect |
+|---|---|---|---|---|
+| Master enable | `setHgacEnable()` | `false` | true / false | HGAC never actuates while disabled — safe default until bench-validated |
+| Saturation guard threshold | `setHgacVTiaDiffThr()` | 0.9 V | — | `v_tia_diff` above this trips the descent guard for that domain |
+| Ideal operating point | — (config field only) | 0.6 V | — | Telemetry only in v1 — not consumed by the descent logic yet |
+| Descent persistence | `setHgacDescentPersistS()` | 0.5 s (250 samples @ 500 Hz) | 0.0–10.0 | Debounce before a descent step or gain-floor alarm — urgent path (O8.1) |
+| Gate G0 invalid-fraction ceiling | `setHgacGateInvalidFracMax()` | 0.5 | 0.0–1.0 | Max allowed fraction of non-`allClean()` samples (independent of `probe_state`) before Gate G0 blocks |
+| Gate invalid-fraction window | — (config field only) | 0.2 s | — | `EmaChannel` window for the invalid-fraction estimator |
+| Settling time (fixed, not `$SET`-tunable) | `hgac_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; coarse diagnostic window, distinct from the sub-sample-period `_compute_settle_margin()` used for CF auto-selection |
+
+---
+
 ## 11. AFE4490 chip register configuration
 
 This section documents the exact value of each AFE4490 register written by the library during initialisation, compared against the three reference sources analysed.
@@ -1578,6 +1712,23 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.37   | **HGAC Phase 1: RF-only saturation guard + descent + mandatory SpO2 EMA    |
+|         | rescale** (`_update_hgac()`, runs after `_update_rsqm()` in                 |
+|         | `_process_sample()`). New `AFE4490Config` fields `hgac_enable`,             |
+|         | `hgac_v_tia_diff_thr`, `hgac_v_tia_diff_ideal`, `hgac_descent_persist_s`,   |
+|         | `hgac_gate_invalid_frac_max`, `hgac_gate_window_s` (promoted from the       |
+|         | former fixed `hgac_v_tia_diff_thr/ideal` constexpr in the .cpp anonymous    |
+|         | namespace). New bit `HGAC_DIAG_GAIN_FLOOR` (0x10000). First real producer  |
+|         | of `RSQM_DIAG_HW_SETTLING` (previously unreachable). `EmaChannel::rescale()`|
+|         | added. Gate G0 implemented as `probe_state != PROBE_DISCONNECTED` (not     |
+|         | literally `== PROBE_APPLIED` as in the original design axiom — avoids a    |
+|         | deadlock where saturation-induced OT invalidity would block the descent    |
+|         | that clears it). No ascent yet (manual recovery) — disabled by default.    |
+|         | `AFE4490DebugData` gained `hgac_rf_led1/led2`/`hgac_alarm_gain_floor`.      |
+|         | New unit tests `test/test_hgac/test_hgac.cpp`. Include-hygiene fix:        |
+|         | added missing `<cstring>`/`<cmath>` to the non-OFFLINE branch (the plain    |
+|         | `UNIT_TEST`/native path lacked them; real Arduino.h happened to provide    |
+|         | them transitively). Spec §5.8 (new), §3d, §5.6.3, §10.9 (new), §14.        |
 | v0.36   | DiagCode RSQM flags renamed `RSQM_*` → `RSQM_DIAG_*` (symmetric with        |
 |         | `AFE_DIAG_*`; avoids collision with operative `rsqm_*` config params).      |
 |         | Documented as ANTICIPATORY CODE: no programmatic consumer beyond the        |

@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.36 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.37 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -91,8 +91,9 @@ namespace {
     // Physical thresholds (fs = V_OD(fs) 1.0 V, empirical lin 1.8 V) live in
     // AFE4490AnalogState (kVTiaDiffFs / kVTiaDiffLin) since v0.35 — physics belongs to
     // the reconstruction layer; only HGAC actuation POLICY stays here.
-    static constexpr float hgac_v_tia_diff_thr   = 0.9f;  // V — HGAC actuation threshold: reduce ILED/RF before reaching kVTiaDiffFs
-    static constexpr float hgac_v_tia_diff_ideal = 0.6f;  // V — Ideal Operating Point, diff (Fig. 135, §9.2.2)
+    // hgac_v_tia_diff_thr/ideal are now runtime-tunable AFE4490Config fields (promoted
+    // from fixed constexpr here in Phase 1 — see incunest_afe4490.h private defaults,
+    // matching the rsqm_* pattern) so their defaults live in the header, not here.
     // Empirical hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-
     // subtraction; independent of RF and AMBDAC; IncuNest 16.A sweep 2026-07-08).
     // Reserved for future use if HGAC ever needs the physical clip:
@@ -298,6 +299,12 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _rsqm_led2_sub_ema{},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0),
+      _hgac_descent_min_samples(0),
+      _hgac_descent_count_led1(0),
+      _hgac_descent_count_led2(0),
+      _hgac_invalid_ema{},
+      _hgac_alarm_gain_floor_led1(false),
+      _hgac_alarm_gain_floor_led2(false),
       _debug_enabled(false)
 {
     // Quantize initial LED currents to the DAC grid (range already set in init list)
@@ -846,6 +853,32 @@ void INCUNEST_AFE4490::setRsqmEmaTau(float mean_tau_s, float var_tau_s) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+// ── HGAC setters (Phase 1: RF-only descent) ───────────────────────────────────
+void INCUNEST_AFE4490::setHgacEnable(bool en) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    hgac_enable = en;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHgacVTiaDiffThr(float v) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    hgac_v_tia_diff_thr = v;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHgacDescentPersistS(float s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    hgac_descent_persist_s = s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHgacGateInvalidFracMax(float v) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    hgac_gate_invalid_frac_max = v;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 // ── getConfig() ───────────────────────────────────────────────────────────────
 AFE4490Config INCUNEST_AFE4490::getConfig() {
     AFE4490Config cfg;
@@ -909,6 +942,12 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.rsqm_probe_state_min_s   = rsqm_probe_state_min_s;
     cfg.rsqm_ema_mean_tau_s      = rsqm_ema_mean_tau_s;
     cfg.rsqm_ema_var_tau_s       = rsqm_ema_var_tau_s;
+    cfg.hgac_enable                 = hgac_enable;
+    cfg.hgac_v_tia_diff_thr          = hgac_v_tia_diff_thr;
+    cfg.hgac_v_tia_diff_ideal        = hgac_v_tia_diff_ideal;
+    cfg.hgac_descent_persist_s       = hgac_descent_persist_s;
+    cfg.hgac_gate_invalid_frac_max   = hgac_gate_invalid_frac_max;
+    cfg.hgac_gate_window_s           = hgac_gate_window_s;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
 #endif
@@ -1049,6 +1088,11 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _rsqm_led2_sub_ema.reset();
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
+    _hgac_descent_count_led1 = 0;
+    _hgac_descent_count_led2 = 0;
+    _hgac_invalid_ema.reset();
+    _hgac_alarm_gain_floor_led1 = false;
+    _hgac_alarm_gain_floor_led2 = false;
     _current_data = AFE4490Data{};
     // Precompute Hann window — needed for HR3 FFT (moved here from begin() to support INCUNEST_OFFLINE)
     for (int i = 0; i < hr3_buf_len; i++)
@@ -1234,6 +1278,107 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
     _current_data.rsqi        = (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED && _diag_code == 0) ? 1 : 0;
     _current_data.diag_code   = _diag_code;
     _current_data.probe_state = _rsqm_probe_state;
+}
+
+// ── HGAC (Hardware Gain Control) ──────────────────────────────────────────────
+// Phase 1: saturation guard (A3) + RF-only descent + mandatory SpO2 EMA rescale.
+// No ascent yet (recovery is manual) — documented limitation of this phase, not an
+// oversight. See incunest_afe4490_spec.md §5.8 for the full design.
+
+bool INCUNEST_AFE4490::_hgac_gate_ok() const {
+    // Gate G0 (A6) as actually implemented: gated on "!= PROBE_DISCONNECTED" rather than
+    // the literal "== PROBE_APPLIED" from the closed design axiom. Reason: RSQM's
+    // PROBE_NOT_APPLIED classifier also fires when a channel's optical-transmittance ratio
+    // becomes invalid due to clipping (otLed1Valid()/otLed2Valid() require CH_CLEAN) — i.e.
+    // exactly the saturation condition HGAC exists to correct. Gating on PROBE_APPLIED
+    // literally would let a fast/severe saturation event flip probe_state to NOT_APPLIED
+    // and then block the very RF descent that would clear it (a deadlock). PROBE_DISCONNECTED's
+    // criterion (all 4 channels near zero) is structurally incompatible with saturation, so
+    // excluding only that state is safe and avoids the deadlock.
+    return _rsqm_probe_state != ProbeState::PROBE_DISCONNECTED
+        && !(_diag_code & RSQM_DIAG_HW_SETTLING)
+        && _hgac_invalid_ema.mean <= hgac_gate_invalid_frac_max;
+}
+
+// Atomic "change RF + rescale SpO2 EMA + arm settling" primitive.
+// CONTRACT: only ever called from _update_hgac() (i.e. from inside _process_sample(),
+// under _state_mutex) — never call this directly from application code or another task.
+void INCUNEST_AFE4490::_hgac_descend_rf(HgacColor color, AFE4490RF new_rf) {
+    const AFE4490RF old_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
+    if (new_rf == old_rf) return;
+    const float k = kAFE_RF_OHM[(int)new_rf] / kAFE_RF_OHM[(int)old_rf];
+    if (color == HgacColor::IR) {
+        setTIAGainLED1(new_rf);   // takes _spi_mutex internally; safe nested under caller's _state_mutex
+        _spo2_ch_ir_ema.rescale(k);
+    } else {
+        setTIAGainLED2(new_rf);
+        _spo2_ch_red_ema.rescale(k);
+    }
+    // Arm HW_SETTLING for the analog front-end to re-settle after the gain step — first real
+    // producer of RSQM_DIAG_HW_SETTLING (previously dead code, see incunest_afe4490.h comment).
+    // hgac_settle_time_s is a coarse, sample-granularity diagnostic window — NOT the same as
+    // _compute_settle_margin() (a sub-sample-period AFECLK-count budget used only for CF
+    // auto-selection within one PRP cycle; using it directly here would be a unit mismatch).
+    _rsqm_settling_countdown = (uint32_t)roundf(hgac_settle_time_s * (float)_afe_sample_rate_hz);
+}
+
+// One saturation-guard channel pair (LED phase + its ambient phase share one RF domain,
+// A4/O10) → debounced descent by one LUT step, or the gain-floor alarm if already at RF_10K.
+void INCUNEST_AFE4490::_hgac_check_descent(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
+                                            uint32_t& descent_count, bool& alarm_flag) {
+    const bool saturating = (v_tia_diff_led  > hgac_v_tia_diff_thr) ||
+                             (v_tia_diff_aled > hgac_v_tia_diff_thr);
+    if (!saturating) {
+        descent_count = 0;
+        alarm_flag    = false;
+        return;
+    }
+
+    const AFE4490RF cur_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
+    if (cur_rf == AFE4490RF::RF_10K) {
+        // O8.1 debounce still applies before alarming, to avoid a one-sample blip alarming.
+        // Counter is capped at the threshold (not left to grow unbounded while saturated).
+        if (descent_count < _hgac_descent_min_samples) ++descent_count;
+        if (descent_count >= _hgac_descent_min_samples) alarm_flag = true;
+        return;
+    }
+
+    if (++descent_count < _hgac_descent_min_samples) return;
+    descent_count = 0;
+    alarm_flag    = false;
+    // R4: land one step below the largest RF that fits. Re-evaluated every sample via the
+    // debounce above, so a still-saturating signal keeps stepping down one level at a time
+    // (Phase 1 scope; analytic feed-forward to the final target is Phase 5, R5).
+    _hgac_descend_rf(color, (AFE4490RF)((int)cur_rf - 1));
+}
+
+void INCUNEST_AFE4490::_update_hgac(const AFE4490AnalogState& as) {
+    if (!hgac_enable) return;
+
+    // Gate G0 invalid-fraction estimator — independent of probe_state (see _hgac_gate_ok()).
+    _hgac_invalid_ema.update(as.allClean() ? 0.0f : 1.0f);
+
+    if (!_hgac_gate_ok()) {
+        // Do not accumulate descent debounce while gated off — avoids a stale counter
+        // firing immediately once the gate reopens.
+        _hgac_descent_count_led1 = 0;
+        _hgac_descent_count_led2 = 0;
+        return;
+    }
+
+    _hgac_check_descent(HgacColor::IR, as.v_tia_diff_led1, as.v_tia_diff_aled1,
+                        _hgac_descent_count_led1, _hgac_alarm_gain_floor_led1);
+    _hgac_check_descent(HgacColor::RED, as.v_tia_diff_led2, as.v_tia_diff_aled2,
+                        _hgac_descent_count_led2, _hgac_alarm_gain_floor_led2);
+
+    // _update_rsqm() (which runs before this) already copied the pre-HGAC _diag_code into
+    // _current_data.diag_code — refresh it here so HGAC's bit is visible in the same
+    // sample's published frame, not lagged by one sample.
+    if (_hgac_alarm_gain_floor_led1 || _hgac_alarm_gain_floor_led2)
+        _diag_code |= HGAC_DIAG_GAIN_FLOOR;
+    else
+        _diag_code &= ~HGAC_DIAG_GAIN_FLOOR;
+    _current_data.diag_code = _diag_code;
 }
 
 // ── SPI primitives ────────────────────────────────────────────────────────────
@@ -1432,6 +1577,9 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
     _rsqm_led1_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
     _rsqm_led2_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
+    _hgac_descent_min_samples = (uint32_t)roundf(hgac_descent_persist_s * fs);
+    if (_hgac_descent_min_samples < 1) _hgac_descent_min_samples = 1;
+    _hgac_invalid_ema.init(hgac_gate_window_s, hgac_gate_window_s, fs);
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
     _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
@@ -1619,6 +1767,9 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
     _update_rsqm(led1, led2, aled1, aled2, led1_sub, led2_sub, as);
 
+    // HGAC runs next — Phase 1: RF-only saturation guard + descent (see incunest_afe4490_spec.md §5.8)
+    _update_hgac(as);
+
     // Select PPG source
     float raw_ppg;
     switch (_ppgdisp_channel) {
@@ -1679,7 +1830,10 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #endif
 
     // Update debug snapshot — always called under _state_mutex (held by _task_body() caller).
-    _debug_data.analog = as;
+    _debug_data.analog                = as;
+    _debug_data.hgac_rf_led1          = _afe_tia_rf_led1;
+    _debug_data.hgac_rf_led2          = _afe_tia_rf_led2;
+    _debug_data.hgac_alarm_gain_floor = _hgac_alarm_gain_floor_led1 || _hgac_alarm_gain_floor_led2;
 
     // Push to queue; if full, drop oldest to keep most recent.
     // Debug mode: push combined DebugQueueItem for atomic getData(data,dbg) access.
