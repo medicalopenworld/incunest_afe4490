@@ -689,6 +689,13 @@ PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2
 
 ### 5.2 HR1 — Peak detection
 
+**EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input changed to OT.**
+`_update_hr1()` now takes `as.ot_led1` (float) instead of `led1_sub` (int32_t raw
+ambient-corrected counts) — same rationale as SpO2 (§5.1): gain-invariant by construction.
+Unlike SpO2, HR1 is peak-**timing** based, not an amplitude ratio — `_hr1_running_max` and
+the `0.6×running_max` threshold are self-relative, so a uniform gain scale does not change
+peak timing and no threshold recalibration was needed (pure domain/type change).
+
 **Processing chain:**
 1. **DC removal:** IIR low-pass filter (τ = 1.6 s) estimates DC; subtracted from raw signal. Signal is negated for conventional PPG polarity (peaks up).
 2. **Low-pass filter:** moving average with cutoff ~5 Hz (`len = fs / (2 × 5)`; at 500 Hz → 50 samples). Capped at 64 samples max.
@@ -732,6 +739,12 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 ### 5.3 HR2 — Autocorrelation
 Independent second HR algorithm running in parallel with HR1 on the same `led1_aled1` signal.
 
+**EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input changed to OT** —
+same rationale as §5.1/§5.2. Autocorrelation is normalised (divides by its own `acorr0`), so
+a uniform gain scale does not change the result. The near-zero-energy guard (`acorr0 < 1.0f`
+in raw-count units) was recalibrated to `acorr0 < hr2_ot_energy_eps` (1e-16, OT-scale sum of
+~400 squared samples) — a pure division-by-near-zero guard, not a physiological threshold.
+
 **Processing chain:**
 1. Biquad bandpass filter 0.5–5 Hz at 500 Hz (eliminates DC, high-frequency noise, and acts as anti-aliasing)
 2. Decimate by factor 10 → effective rate 50 Hz
@@ -764,6 +777,12 @@ The unbiased correction factor `N/(N−τ)` compensates for the finite-window ef
 A value close to 1 means the signal is strongly periodic at the detected RR period. `hr2_min_corr = 0.5` acts as the minimum threshold below which no peak is reported and SQI is forced to 0. If the buffer is not yet full or no valid peak is found, SQI = 0.
 
 ### 5.4 HR3 — FFT + Harmonic Product Spectrum
+
+**EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input changed to OT** —
+same rationale as §5.1-5.3. SQI is a ratio of HPS values (same power units, cancels scale),
+so a uniform gain scale does not change the result — pure domain/type change, no threshold
+recalibration needed.
+
 
 Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_aled1`.
 
@@ -1757,6 +1776,16 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.39-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): HR1/HR2/HR3     |
+|         | input migrated to OT**, completing the migration started in v0.38 (SpO2).   |
+|         | `_update_hr1/hr2/hr3()` and their fast-path helpers now take `float`        |
+|         | (`as.ot_led1`) instead of `int32_t led1_sub`. HR1 (peak timing) and HR3     |
+|         | (HPS ratio) needed no threshold recalibration — pure domain/type change.    |
+|         | HR2's near-zero-energy guard (`acorr0 < 1.0f`) recalibrated to              |
+|         | `acorr0 < hr2_ot_energy_eps` (1e-16) for OT-scale magnitudes. All 3 test    |
+|         | suites rewritten with OT-realistic magnitudes (previously still used raw   |
+|         | count-scale values that happened to pass by coincidence, since all three   |
+|         | algorithms are scale-invariant). Spec §5.2/§5.3/§5.4, §14.                  |
 | v0.38-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): SpO2 input      |
 |         | migrated from raw ADC counts to OT.** `_update_spo2()` now takes            |
 |         | `(ot_ir, ot_red, i_pd_ir, i_pd_red)` instead of `(led1_sub, led2_sub)`.      |

@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.38-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.39-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -74,6 +74,12 @@ namespace {
 
     // ── HR2 ───────────────────────────────────────────────────────────────────
     constexpr float    hr2_min_corr        = 0.5f;     // normalised autocorrelation threshold for SQI=1
+    // EXPERIMENT (OT-domain input): acorr0 (sum of ~400 squared bandpass-filtered OT samples,
+    // each ~1e-6 typical AC amplitude) is now ~1e-10 for a real signal, not ~1e9 as in the raw
+    // ADC-count domain. This is a pure near-zero-energy guard (rejects a flat/disconnected
+    // signal before dividing by acorr0), not a calibrated physiological threshold — picked
+    // conservatively low (real signal energy is many orders of magnitude above it).
+    constexpr float    hr2_ot_energy_eps  = 1e-16f;
 
     // ── HR3 ───────────────────────────────────────────────────────────────────
     constexpr int      hr3_decim_factor    = 10;       // 500 Hz → 50 Hz effective sample rate
@@ -1800,20 +1806,20 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     _current_data.led1_sub = led1_sub;
     _current_data.led2_sub = led2_sub;
 
-    // SpO2 uses OT (gain-invariant, EXPERIMENT — see spec §5.1/§5.8); HR1 still uses the
-    // ambient-corrected raw channel (unfiltered, spec §1.3).
+    // SpO2/HR1/HR2/HR3 all use OT (gain-invariant, EXPERIMENT — see spec §5.1/§5.8) instead of
+    // the raw ambient-corrected counts (led1_sub) used before this experiment.
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
     { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2, as.i_pd_led1, as.i_pd_led2); _ts_spo2.update(esp_timer_get_time() - _t); }
-    { uint64_t _t = esp_timer_get_time(); _update_hr1(led1_sub);              _ts_hr1.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_hr1(as.ot_led1);            _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
     _update_spo2(as.ot_led1, as.ot_led2, as.i_pd_led1, as.i_pd_led2);
-    _update_hr1(led1_sub);
+    _update_hr1(as.ot_led1);
 #endif
 
     // HR2 fast path: filter + decimate + buffer; trigger Task B when interval fires
-    if (_update_hr2_sample(led1_sub)) {
+    if (_update_hr2_sample(as.ot_led1)) {
         if (!_hr2_computing) {
             _linearize_hr2();
             _hr2_computing = true;
@@ -1827,7 +1833,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #endif
 
     // HR3 fast path: LP filter + decimate + buffer; trigger Task C when interval fires
-    if (_update_hr3_sample(led1_sub)) {
+    if (_update_hr3_sample(as.ot_led1)) {
         if (!_hr3_computing) {
             _linearize_hr3();
             _hr3_computing = true;
@@ -2017,11 +2023,10 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, float i_pd_ir, fl
 // Adaptive-threshold peak detection on filtered PPG.
 // Threshold = 0.6 × running_max; refractory = _hr1_refractory_samples.
 // HR reported from average of 5 consecutive RR intervals.
-void INCUNEST_AFE4490::_update_hr1(int32_t led1_sub) {
+void INCUNEST_AFE4490::_update_hr1(float ir) {
     _hr1_sample_idx++;
 
     // DC removal: IIR estimator (tau = hr1_dc_tau_s), then negate for conventional PPG polarity (peaks up)
-    float ir = (float)led1_sub;
     _hr1_dc = _hr1_dc_alpha * _hr1_dc + (1.0f - _hr1_dc_alpha) * ir;
     // Apply dedicated MA low-pass filter (5 Hz cutoff, independent of PPG display filter)
     float raw = -(ir - _hr1_dc);
@@ -2087,8 +2092,7 @@ void INCUNEST_AFE4490::_update_hr1(int32_t led1_sub) {
 
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
-bool INCUNEST_AFE4490::_update_hr2_sample(int32_t led1_sub) {
-    float ir = (float)led1_sub;
+bool INCUNEST_AFE4490::_update_hr2_sample(float ir) {
     float filtered = -_hr2_bpf.process(ir);
 
     _hr2_decim_counter++;
@@ -2118,7 +2122,7 @@ void INCUNEST_AFE4490::_linearize_hr2() {
 void INCUNEST_AFE4490::_compute_hr2() {
     float acorr0 = 0.0f;
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
-    if (acorr0 < 1.0f) { _hr2_result_sqi = 0.0f; return; }
+    if (acorr0 < hr2_ot_energy_eps) { _hr2_result_sqi = 0.0f; return; }
 
     float fs2     = (float)_afe_sample_rate_hz / (float)hr2_decim_factor;
     int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * fs2);
@@ -2171,8 +2175,8 @@ void INCUNEST_AFE4490::_compute_hr2() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr2(int32_t led1_sub) {
-    if (!_update_hr2_sample(led1_sub)) return;
+void INCUNEST_AFE4490::_update_hr2(float ir) {
+    if (!_update_hr2_sample(ir)) return;
     _linearize_hr2();
     _compute_hr2();
     if (_hr2_result_sqi > 0.0f) _current_data.hr2 = _hr2_result;
@@ -2183,8 +2187,7 @@ void INCUNEST_AFE4490::_update_hr2(int32_t led1_sub) {
 
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
-bool INCUNEST_AFE4490::_update_hr3_sample(int32_t led1_sub) {
-    float ir = (float)led1_sub;
+bool INCUNEST_AFE4490::_update_hr3_sample(float ir) {
     float filtered = -_hr3_bpf.process(ir);  // negate: peaks up
 
     _hr3_decim_counter++;
@@ -2325,8 +2328,8 @@ void INCUNEST_AFE4490::_compute_hr3() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr3(int32_t led1_sub) {
-    if (!_update_hr3_sample(led1_sub)) return;
+void INCUNEST_AFE4490::_update_hr3(float ir) {
+    if (!_update_hr3_sample(ir)) return;
     _linearize_hr3();
     _compute_hr3();
     if (_hr3_result_sqi > 0.0f) _current_data.hr3 = _hr3_result;

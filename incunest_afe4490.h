@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.38-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.39-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.38-experiment"
+#define INCUNEST_AFE4490_VERSION "0.39-experiment"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -861,19 +861,25 @@ private:
     // gain-invariant signal; i_pd_ir/i_pd_red (absolute magnitude) drive the no-finger gate
     // (see spo2_min_i_pd_a) since the OT ratio itself is unreliable near zero signal.
     void _update_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red);
-    void _update_hr1(int32_t led1_sub);
+    // EXPERIMENT (OT-domain input): ir is now as.ot_led1 (float, gain-invariant) instead of
+    // led1_sub (int32_t raw ambient-corrected counts). HR1/HR2/HR3 are periodicity/timing-based
+    // (peak timing, autocorrelation lag, FFT dominant frequency) — a uniform gain scale does
+    // not change their result in steady state (unlike SpO2's amplitude ratio R), so this is a
+    // pure type/domain change, no threshold recalibration needed for HR1/HR3. HR2's acorr0
+    // near-zero guard was recalibrated for OT magnitudes (see hr2_ot_energy_eps).
+    void _update_hr1(float ir);
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
-    void _update_hr2(int32_t led1_sub);
-    void _update_hr3(int32_t led1_sub);
+    void _update_hr2(float ir);
+    void _update_hr3(float ir);
     void _reset_algorithms();
 
     // HR2 async split: fast per-sample path + linearise + compute
-    bool _update_hr2_sample(int32_t led1_sub); // filter+decimate+buffer; returns true when interval fires
+    bool _update_hr2_sample(float ir); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr2();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
     void _compute_hr2();                          // autocorr on _hr2_seg → _hr2_result/_hr2_result_sqi
 
     // HR3 async split
-    bool _update_hr3_sample(int32_t led1_sub); // filter+decimate+buffer; returns true when interval fires
+    bool _update_hr3_sample(float ir); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr3();                        // DC+Hann into _hr3_fft (call under _state_mutex)
     void _compute_hr3();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
 
@@ -1103,17 +1109,17 @@ public:
     using TestBiquadFilter = BiquadFilter;
 
     // HR1
-    void  test_feed_hr1(int32_t led1_sub) { _update_hr1(led1_sub); }
+    void  test_feed_hr1(float ot_ir) { _update_hr1(ot_ir); }
     float test_hr1()                        { return _current_data.hr1; }
     float test_hr1_sqi()                    { return _current_data.hr1_sqi; }
 
     // HR2
-    void  test_feed_hr2(int32_t led1_sub) { _update_hr2(led1_sub); }
+    void  test_feed_hr2(float ot_ir) { _update_hr2(ot_ir); }
     float test_hr2()                        { return _current_data.hr2; }
     float test_hr2_sqi()                    { return _current_data.hr2_sqi; }
 
     // HR3
-    void  test_feed_hr3(int32_t led1_sub) { _update_hr3(led1_sub); }
+    void  test_feed_hr3(float ot_ir) { _update_hr3(ot_ir); }
     float test_hr3()                        { return _current_data.hr3; }
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 
