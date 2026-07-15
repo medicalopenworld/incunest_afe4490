@@ -52,13 +52,23 @@ namespace {
     constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
     // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2's DC/AC now
     // live in OT units (~1e-5 typical, dimensionless A/A) instead of ADC counts (~1e5).
-    // spo2_min_i_pd_a is the no-finger gate — on absolute i_pd magnitude, NOT the OT ratio
-    // itself (OT is unreliable near zero signal: numerator and denominator both tiny).
-    // Placeholder value, needs HW calibration (same status as rsqm_signal_weak_std).
-    constexpr float    spo2_min_i_pd_a     = 1e-7f;    // A — no-finger threshold (absolute i_pd)
-    // Numerical guard only (not a physiological threshold): avoids dividing by a near-zero
-    // OT value in the R/PI ratio. Four orders of magnitude below typical OT DC (~1e-5).
-    constexpr float    spo2_ot_div_eps     = 1e-9f;
+    // spo2_min_ot_dc replaces the absolute-i_pd "no-finger" gate (spo2_min_i_pd_a, removed —
+    // analysis showed it rarely detected "no finger" at all: a transmittance probe with no
+    // finger typically shows HIGH OT, not low i_pd, since light passes largely unobstructed;
+    // what it actually caught overlapped with RSQM's own disconnected classification, just
+    // faster/uncalibrated). Applied ONLY to DC (dc_ir/dc_red): DC should not legitimately
+    // collapse near zero while a probe is genuinely present, so a physiologically-motivated
+    // floor here is a real "is there a signal at all" check.
+    // Rationale for an absolute-magnitude DC check at all: PI = RMS_AC/DC is a RATIO — when
+    // both AC and DC are dominated by noise (no real signal), the ratio can look deceptively
+    // "valid" by chance. Only an absolute-magnitude check on DC can catch that.
+    // Placeholder value (one order of magnitude below typical OT DC ~1e-5), needs HW
+    // calibration (same status as rsqm_signal_weak_std).
+    constexpr float    spo2_min_ot_dc      = 1e-6f;    // A/A — OT DC floor: below this, no real signal
+    // Numerical guard only (NOT physiological — AC legitimately gets very small at low PI,
+    // e.g. PI=0.5% on DC~1.4e-5 gives AC~7e-8): avoids dividing by a near-zero AC value in R.
+    // Kept far below any real AC so it only ever trips on true near-zero/numerical noise.
+    constexpr float    spo2_ac_div_eps     = 1e-9f;
     // SQI: Perfusion Index thresholds (Nellcor/Masimo clinical reference).
     // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
     constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
@@ -298,7 +308,6 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_ema_var_tau_s(spo2_ema_var_tau_s),
       _spo2_min(spo2_min),
       _spo2_max(spo2_max),
-      _spo2_min_i_pd_a(spo2_min_i_pd_a),
       _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
       _hr1_dc_tau_s(hr1_dc_tau_s),
@@ -769,12 +778,6 @@ void INCUNEST_AFE4490::setSpO2Range(float min_pct, float max_pct) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2MinIPdA(float amps) {
-    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_min_i_pd_a = amps;
-    if (_initialized) xSemaphoreGive(_state_mutex);
-}
-
 void INCUNEST_AFE4490::setSpO2PiSqiThresholds(float lo_pct, float hi_pct) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _spo2_pi_sqi_lo = lo_pct;
@@ -938,7 +941,6 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_ema_var_tau_s     = _spo2_ema_var_tau_s;
     cfg.spo2_min              = _spo2_min;
     cfg.spo2_max              = _spo2_max;
-    cfg.spo2_min_i_pd_a       = _spo2_min_i_pd_a;
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
     cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
     cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
@@ -1810,11 +1812,11 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // the raw ambient-corrected counts (led1_sub) used before this experiment.
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
-    { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2, as.i_pd_led1, as.i_pd_led2); _ts_spo2.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2); _ts_spo2.update(esp_timer_get_time() - _t); }
     { uint64_t _t = esp_timer_get_time(); _update_hr1(as.ot_led1);            _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
-    _update_spo2(as.ot_led1, as.ot_led2, as.i_pd_led1, as.i_pd_led2);
+    _update_spo2(as.ot_led1, as.ot_led2);
     _update_hr1(as.ot_led1);
 #endif
 
@@ -1945,10 +1947,7 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // experiment. OT = (i_pd_led − i_pd_aled) / I_LED is gain-invariant by construction (a linear
 // rescaling of led_sub by 1/(2·RF·I_LED)) — an RF change no longer creates a discontinuity in
 // this input, so HGAC's _hgac_descend_rf() no longer needs to rescale this EmaChannel by k.
-// i_pd_ir/i_pd_red (absolute magnitude, Amps) drive the no-finger gate — NOT the OT ratio
-// itself, which becomes noisy/undefined precisely when signal is near-zero (both numerator
-// and denominator of OT tiny) — exactly when a reliable no-finger check matters most.
-void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red) {
+void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red) {
     // DC extraction + AC² power estimation via EmaChannel (one call per channel):
     //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 2.0 s
     //   Step 2 — AC: d = x − mean                           DC-subtraction high-pass
@@ -1962,15 +1961,14 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, float i_pd_ir, fl
     // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup)
     // PI = sqrt(E[AC²]) / DC × 100 — a pure ratio, numerically identical whether DC/AC are
     // expressed in OT or in raw counts (both scale by the same constant within one channel).
-    _current_data.pi = (_spo2_ch_ir_ema.mean > spo2_ot_div_eps)
+    _current_data.pi = (_spo2_ch_ir_ema.mean > spo2_min_ot_dc)
                        ? (sqrtf(_spo2_ch_ir_ema.var) / _spo2_ch_ir_ema.mean) * 100.0f
                        : -1.0f;
 
     _spo2_sample_count++;
 
-    // Skip during warmup or if there's no finger (absolute i_pd magnitude, see rationale above)
-    if (_spo2_sample_count < _spo2_warmup_samples ||
-        fabsf(i_pd_ir) < _spo2_min_i_pd_a || fabsf(i_pd_red) < _spo2_min_i_pd_a) {
+    // Skip during warmup
+    if (_spo2_sample_count < _spo2_warmup_samples) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }
@@ -1990,9 +1988,10 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, float i_pd_ir, fl
     float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
     float ac_red = sqrtf(_spo2_ch_red_ema.var);
 
-    // Avoid division by near-zero (numerical guard, not a physiological gate — the no-finger
-    // case is already excluded above via absolute i_pd magnitude)
-    if (dc_ir < spo2_ot_div_eps || dc_red < spo2_ot_div_eps || ac_ir < spo2_ot_div_eps) {
+    // DC no-signal floor (see spo2_min_ot_dc rationale above) + AC division-safety guard
+    // (spo2_ac_div_eps — AC legitimately gets tiny at low PI, NOT a physiological threshold).
+    // Only ac_ir is an actual divisor in R below (ac_red is a numerator-only multiplicand).
+    if (dc_ir < spo2_min_ot_dc || dc_red < spo2_min_ot_dc || ac_ir < spo2_ac_div_eps) {
         _current_data.spo2_sqi = 0.0f;
         return;
     }

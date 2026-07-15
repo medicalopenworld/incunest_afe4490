@@ -622,14 +622,30 @@ estimated (see "future alternative" notes below) — a rescale-by-k trick only w
 linear EMA; a more sophisticated estimator might not have one, which would otherwise force
 HGAC to wait out a settling window before actuating again.
 
-**No-finger gate changed to absolute `i_pd` magnitude, NOT the OT ratio.** OT becomes
-noisy/unreliable exactly when signal is near-zero (both `i_pd_led` and `i_pd_aled` tiny) —
-precisely the case a "no finger" check needs to be reliable. New parameter
-`spo2_min_i_pd_a` (Amps, placeholder default `1e-7`, needs HW calibration — same status as
-`rsqm_signal_weak_std`) replaces `spo2_min_dc` (ADC counts). The old `dc_ir/dc_red/ac_ir <
-1.0f` numerical guards (sized for raw-count magnitudes) are replaced by `spo2_ot_div_eps =
-1e-9` (OT magnitudes are ~1e-5, four orders of magnitude above this — a pure
-division-by-near-zero guard, not a physiological threshold).
+**No-signal gate: single absolute floor on OT DC, not a separate i_pd-based gate.**
+An earlier version of this migration added `spo2_min_i_pd_a` (Amps), gating on absolute
+`i_pd_ir`/`i_pd_red` magnitude, replacing `spo2_min_dc` (ADC counts) 1:1. **Removed after
+further analysis (2026-07-15):** for a transmittance probe, "no finger" typically shows
+**high** OT (light passes largely unobstructed), not low `i_pd` — so that gate rarely caught
+an actual no-finger condition; what it did catch overlapped with RSQM's own `PROBE_DISCONNECTED`
+classification (all 4 `i_pd` channels + `led_sub` near the TIA bias floor), just with a
+narrower/uncalibrated criterion and no debounce. Removing it also removed `i_pd_ir`/`i_pd_red`
+from `_update_spo2()`'s signature — it now takes only `(ot_ir, ot_red)`.
+
+Replaced by `spo2_min_ot_dc` (A/A, placeholder default `1e-6`, needs HW calibration — same
+status as `rsqm_signal_weak_std`), applied **only to `dc_ir`/`dc_red`** (the EMA-smoothed OT
+DC): DC should not legitimately collapse near zero while a probe is genuinely present, so an
+absolute floor there is a real "is there a signal at all" check — `PI = RMS_AC/DC` is a ratio,
+and a ratio of two noise-dominated quantities can look deceptively "valid" by chance, so a
+ratio-based check alone cannot reliably catch a fully-collapsed signal.
+
+The AC side keeps a separate, purely numerical guard: `spo2_ac_div_eps = 1e-9`, applied only
+to `ac_ir` (the only actual divisor in `R` besides `dc_red` — `ac_red` is a numerator-only
+multiplicand). This must stay far below any real AC value because AC legitimately gets very
+small at low PI (e.g. PI=0.5% on a typical DC of 1.4e-5 gives AC≈7e-8) — conflating this with
+the DC floor above would wrongly invalidate valid low-perfusion signals (caught in practice
+during this change: using one shared 1e-6 threshold for both DC *and* AC failed 4/7 native
+`test_spo2` cases before the two roles were split back apart).
 
 **Precision note (analyzed, not a concern):** OT magnitudes (~1e-5) are nowhere near
 `float`'s precision floor — `float`'s relative precision (~1.19e-7) is ~100× finer than the
@@ -643,12 +659,12 @@ settling — ambient current does not scale with ILED (asymmetric residual, trac
 see the gain-influence analysis referenced from §5.8) — OT's gain-invariance covers RF
 changes, not the ILED/ambient-residual problem.
 
-**pulsenest_lab.py impact (not yet migrated):** the four algorithm-mirror classes there
-(`SpO2TestCalc`, `HR1TestCalc`, `HR2TestCalc`, `HR3TestCalc`) still consume raw counts; `OT_LED1`/
-`OT_LED2` are only transmitted in `$M4` (not the default `$M3`), so keeping the SpO2 mirror in
-sync would either require `$M4` always, or a local OT reconstruction from `led1_sub` + RF/ILED
-config — the latter reintroduces the same gain-change synchronization risk this migration
-removes from the firmware side. Unresolved; tracked outside this spec (project memory).
+**pulsenest_lab.py impact — migrated (2026-07-15, lab v1.19):** the four algorithm-mirror
+classes (`SpO2TestCalc`, `HR1TestCalc`, `HR2TestCalc`, `HR3TestCalc`) now consume OT too,
+requiring frame mode `$M4` (`OT_LED1`/`OT_LED2` are not transmitted in `$M1`/`$M2`/`$M3`) —
+tracked in `pulsenest_lab_spec.md` (v1.19 changelog), not reconstructed locally from
+`led1_sub` + RF/ILED config. `SpO2TestCalc` mirrors the `spo2_min_ot_dc`/`spo2_ac_div_eps`
+split above (no `i_pd_ir`/`i_pd_red` parameters).
 
 ---
 
@@ -1776,6 +1792,18 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.40-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): removed the        |
+|         | `spo2_min_i_pd_a` "no-finger" gate added in v0.38.** Analysis (2026-07-15)  |
+|         | showed it rarely detected an actual no-finger condition (a transmittance    |
+|         | probe with no finger shows HIGH OT, not low i_pd) and mostly duplicated,    |
+|         | with a weaker/uncalibrated criterion, RSQM's own `PROBE_DISCONNECTED`.      |
+|         | `_update_spo2()` signature simplified to `(ot_ir, ot_red)` — no more        |
+|         | `i_pd_ir`/`i_pd_red`. Replaced by `spo2_min_ot_dc` (A/A, `1e-6` placeholder)|
+|         | applied only to `dc_ir`/`dc_red`; the AC side keeps a separate purely      |
+|         | numerical guard `spo2_ac_div_eps` (`1e-9`, on `ac_ir` only) — conflating   |
+|         | the two into one shared threshold was tried first and broke 4/7           |
+|         | `test_spo2` cases (AC legitimately gets tiny at low PI). `setSpO2MinIPdA()`|
+|         | removed; `spo2_min_i_pd_a` removed from `AFE4490Config`. Spec §5.1, §14.   |
 | v0.39-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): HR1/HR2/HR3     |
 |         | input migrated to OT**, completing the migration started in v0.38 (SpO2).   |
 |         | `_update_hr1/hr2/hr3()` and their fast-path helpers now take `float`        |

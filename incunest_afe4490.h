@@ -466,10 +466,6 @@ struct AFE4490Config {
     float             spo2_ema_var_tau_s;          // EMA variance (AC²) time constant [s]
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
-    // No-finger gate: absolute i_pd magnitude (Amps), NOT a threshold on the OT ratio itself —
-    // OT becomes noisy/undefined precisely when signal is near-zero (EXPERIMENT: OT-domain
-    // input, see §5.1/§5.8). Needs HW calibration (placeholder default).
-    float             spo2_min_i_pd_a;           // no-finger threshold [A]
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     // HR1 algorithm parameters
@@ -555,7 +551,6 @@ public:
     void setSpO2EmaMeanTauS(float tau_s);                      // EMA mean (DC) time constant; triggers recalc
     void setSpO2EmaVarTauS(float tau_s);                       // EMA variance (AC²) time constant; triggers recalc
     void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
-    void setSpO2MinIPdA(float amps);                           // no-finger threshold: absolute i_pd magnitude [A]
     void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
 
     // HR1 algorithm setters
@@ -858,9 +853,9 @@ private:
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
     // EXPERIMENT (OT-domain input): ot_ir/ot_red replace led1_sub/led2_sub as the
-    // gain-invariant signal; i_pd_ir/i_pd_red (absolute magnitude) drive the no-finger gate
-    // (see spo2_min_i_pd_a) since the OT ratio itself is unreliable near zero signal.
-    void _update_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red);
+    // gain-invariant signal. No-signal detection is an absolute-magnitude floor on the
+    // resulting OT DC (spo2_min_ot_dc), not a separate i_pd-based gate — see incunest_afe4490.cpp.
+    void _update_spo2(float ot_ir, float ot_red);
     // EXPERIMENT (OT-domain input): ir is now as.ot_led1 (float, gain-invariant) instead of
     // led1_sub (int32_t raw ambient-corrected counts). HR1/HR2/HR3 are periodicity/timing-based
     // (peak timing, autocorrelation lag, FFT dominant frequency) — a uniform gain scale does
@@ -1051,7 +1046,6 @@ private:
     float    _spo2_ema_var_tau_s;
     float    _spo2_min;
     float    _spo2_max;
-    float    _spo2_min_i_pd_a;
     float    _spo2_pi_sqi_lo;
     float    _spo2_pi_sqi_hi;
     float    _hr1_dc_tau_s;
@@ -1124,8 +1118,8 @@ public:
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 
     // SpO2
-    void  test_feed_spo2(float ot_ir, float ot_red, float i_pd_ir, float i_pd_red) {
-        _update_spo2(ot_ir, ot_red, i_pd_ir, i_pd_red);
+    void  test_feed_spo2(float ot_ir, float ot_red) {
+        _update_spo2(ot_ir, ot_red);
     }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }
