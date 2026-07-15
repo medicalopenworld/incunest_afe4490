@@ -862,19 +862,24 @@ private:
     // not change their result in steady state (unlike SpO2's amplitude ratio R), so this is a
     // pure type/domain change, no threshold recalibration needed for HR1/HR3. HR2's acorr0
     // near-zero guard was recalibrated for OT magnitudes (see hr2_ot_energy_eps).
-    void _update_hr1(float ir);
+    // probe_state (RSQM's classification, consumed only — see spec §5.1/§5.2 for the design,
+    // mirrored here from SpO2 v0.41): while != PROBE_APPLIED, internal state resets every
+    // sample (idempotent, no stored "previous state") and hr/hr_sqi become NaN/0.
+    void _update_hr1(float ir, ProbeState probe_state);
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
-    void _update_hr2(float ir);
-    void _update_hr3(float ir);
+    void _update_hr2(float ir, ProbeState probe_state);
+    void _update_hr3(float ir, ProbeState probe_state);
     void _reset_algorithms();
 
-    // HR2 async split: fast per-sample path + linearise + compute
-    bool _update_hr2_sample(float ir); // filter+decimate+buffer; returns true when interval fires
+    // HR2 async split: fast per-sample path + linearise + compute. probe_state gate lives in
+    // the fast path (shared by both the production call site and the sync test wrapper above):
+    // while not applied, resets fast-path state and never triggers the slow path (Task B).
+    bool _update_hr2_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr2();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
     void _compute_hr2();                          // autocorr on _hr2_seg → _hr2_result/_hr2_result_sqi
 
-    // HR3 async split
-    bool _update_hr3_sample(float ir); // filter+decimate+buffer; returns true when interval fires
+    // HR3 async split (same probe_state gate placement as HR2 above)
+    bool _update_hr3_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
     void _linearize_hr3();                        // DC+Hann into _hr3_fft (call under _state_mutex)
     void _compute_hr3();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
 
@@ -1104,17 +1109,17 @@ public:
     using TestBiquadFilter = BiquadFilter;
 
     // HR1
-    void  test_feed_hr1(float ot_ir) { _update_hr1(ot_ir); }
+    void  test_feed_hr1(float ot_ir, ProbeState probe_state) { _update_hr1(ot_ir, probe_state); }
     float test_hr1()                        { return _current_data.hr1; }
     float test_hr1_sqi()                    { return _current_data.hr1_sqi; }
 
     // HR2
-    void  test_feed_hr2(float ot_ir) { _update_hr2(ot_ir); }
+    void  test_feed_hr2(float ot_ir, ProbeState probe_state) { _update_hr2(ot_ir, probe_state); }
     float test_hr2()                        { return _current_data.hr2; }
     float test_hr2_sqi()                    { return _current_data.hr2_sqi; }
 
     // HR3
-    void  test_feed_hr3(float ot_ir) { _update_hr3(ot_ir); }
+    void  test_feed_hr3(float ot_ir, ProbeState probe_state) { _update_hr3(ot_ir, probe_state); }
     float test_hr3()                        { return _current_data.hr3; }
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 

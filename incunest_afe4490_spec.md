@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.36
+# incunest_afe4490 — Specification v0.42
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -732,6 +732,14 @@ Unlike SpO2, HR1 is peak-**timing** based, not an amplitude ratio — `_hr1_runn
 the `0.6×running_max` threshold are self-relative, so a uniform gain scale does not change
 peak timing and no threshold recalibration was needed (pure domain/type change).
 
+**v0.42: `_update_hr1(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 design
+(§5.1): presence detection stays RSQM's exclusive job, `probe_state` is consumed but never
+computed here. While `probe_state != PROBE_APPLIED`, all internal state (DC filter, running
+max, threshold-crossing flag, peak/interval indices, RR interval buffer, moving-average
+buffer) resets **every sample** (idempotent, no stored "previous probe_state" needed), and
+`hr1`/`hr1_sqi` are forced to `NaN`/`0`. Once `PROBE_APPLIED` resumes, HR1 naturally needs 5
+fresh RR intervals before reporting again, same as any cold start.
+
 **Processing chain:**
 1. **DC removal:** IIR low-pass filter (τ = 1.6 s) estimates DC; subtracted from raw signal. Signal is negated for conventional PPG polarity (peaks up).
 2. **Low-pass filter:** moving average with cutoff ~5 Hz (`len = fs / (2 × 5)`; at 500 Hz → 50 samples). Capped at 64 samples max.
@@ -781,6 +789,14 @@ a uniform gain scale does not change the result. The near-zero-energy guard (`ac
 in raw-count units) was recalibrated to `acorr0 < hr2_ot_energy_eps` (1e-16, OT-scale sum of
 ~400 squared samples) — a pure division-by-near-zero guard, not a physiological threshold.
 
+**v0.42: `_update_hr2_sample(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 /
+HR1 v0.42 design (§5.1/§5.2). The `probe_state` gate lives in the **fast path** (shared by
+both the production call site and the synchronous test wrapper `_update_hr2()`): while
+`probe_state != PROBE_APPLIED`, the bandpass filter and circular buffer reset **every
+sample**, `hr2`/`hr2_sqi` are forced to `NaN`/`0`, and the slow autocorrelation path (Task B)
+is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fresh (8 s at
+50 Hz) before HR2 reports again.
+
 **Processing chain:**
 1. Biquad bandpass filter 0.5–5 Hz at 500 Hz (eliminates DC, high-frequency noise, and acts as anti-aliasing)
 2. Decimate by factor 10 → effective rate 50 Hz
@@ -819,6 +835,12 @@ same rationale as §5.1-5.3. SQI is a ratio of HPS values (same power units, can
 so a uniform gain scale does not change the result — pure domain/type change, no threshold
 recalibration needed.
 
+**v0.42: `_update_hr3_sample(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 /
+HR1/HR2 v0.42 design (§5.1-5.3). Same fast-path gate placement as HR2: while
+`probe_state != PROBE_APPLIED`, the low-pass filter and circular buffer reset **every
+sample**, `hr3`/`hr3_sqi` are forced to `NaN`/`0`, and the slow FFT/HPS path (Task C) is
+never signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fresh (10.24 s at 50 Hz)
+before HR3 reports again.
 
 Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_aled1`.
 
@@ -1812,6 +1834,28 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.42-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): same `probe_state`  |
+|         | design as v0.41's SpO2 applied to HR1/HR2/HR3.** `_update_hr1(float ir,    |
+|         | ProbeState probe_state)`, `_update_hr2_sample(...)`, `_update_hr3_sample(  |
+|         | ...)` all gained the `probe_state` parameter — consumed, never computed.  |
+|         | While `probe_state != PROBE_APPLIED`: all internal state (HR1's DC filter/ |
+|         | running max/threshold flag/peak+interval indices/RR buffer/MA buffer;     |
+|         | HR2's bandpass filter + circular buffer; HR3's low-pass filter + circular  |
+|         | buffer) resets every sample (idempotent, same pattern as SpO2 — no stored |
+|         | "previous state" needed), and `hr1/hr2/hr3` + their `_sqi` fields are     |
+|         | forced to `NaN`/`0`, unifying the sentinel across all 4 algorithms. For   |
+|         | HR2/HR3 the gate lives in the fast per-sample path (shared by the         |
+|         | production call site and the sync test wrapper), so the slow autocorr/FFT |
+|         | task (Task B/C) is never signalled while not applied. Test wrappers       |
+|         | `test_feed_hr1/hr2/hr3()` gained the `probe_state` parameter. New tests   |
+|         | `test_hr1/hr2/hr3_not_applied_resets` (reset + fresh-buffer/interval-count |
+|         | on reapply). `pulsenest_lab.py` mirrors: `HR1TestCalc`/`HR2TestCalc`/      |
+|         | `HR3TestCalc.update()` all gained `probe_state`, resetting + returning    |
+|         | `NaN`/`0` identically; all call sites (offline CSV loaders, live feeds,   |
+|         | `PPGMonitor`) updated — the unrelated `HRFFTCalc`/`self.hr3_calc`         |
+|         | (HR3LAB diagnostic window) deliberately left untouched (separate class,  |
+|         | no inheritance, out of scope). Verified: 36/36 native tests (test_biquad  |
+|         | pre-existing unrelated failure), `py_compile` clean. Spec §5.2-§5.4, §14. |
 | v0.41-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): presence detection  |
 |         | fully delegated to RSQM — `spo2_min_ot_dc` removed too.** `_update_spo2()`  |
 |         | gained a third parameter, `ProbeState probe_state` (RSQM's classification, |

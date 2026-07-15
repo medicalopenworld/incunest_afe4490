@@ -1807,15 +1807,15 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
     { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2, _rsqm_probe_state); _ts_spo2.update(esp_timer_get_time() - _t); }
-    { uint64_t _t = esp_timer_get_time(); _update_hr1(as.ot_led1);            _ts_hr1.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_hr1(as.ot_led1, _rsqm_probe_state);            _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
     _update_spo2(as.ot_led1, as.ot_led2, _rsqm_probe_state);
-    _update_hr1(as.ot_led1);
+    _update_hr1(as.ot_led1, _rsqm_probe_state);
 #endif
 
     // HR2 fast path: filter + decimate + buffer; trigger Task B when interval fires
-    if (_update_hr2_sample(as.ot_led1)) {
+    if (_update_hr2_sample(as.ot_led1, _rsqm_probe_state)) {
         if (!_hr2_computing) {
             _linearize_hr2();
             _hr2_computing = true;
@@ -1829,7 +1829,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #endif
 
     // HR3 fast path: LP filter + decimate + buffer; trigger Task C when interval fires
-    if (_update_hr3_sample(as.ot_led1)) {
+    if (_update_hr3_sample(as.ot_led1, _rsqm_probe_state)) {
         if (!_hr3_computing) {
             _linearize_hr3();
             _hr3_computing = true;
@@ -2042,7 +2042,28 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, ProbeState probe_
 // Adaptive-threshold peak detection on filtered PPG.
 // Threshold = 0.6 × running_max; refractory = _hr1_refractory_samples.
 // HR reported from average of 5 consecutive RR intervals.
-void INCUNEST_AFE4490::_update_hr1(float ir) {
+// probe_state: RSQM's classification, consumed only (mirrors SpO2 v0.41 — see spec §5.1/§5.2).
+void INCUNEST_AFE4490::_update_hr1(float ir, ProbeState probe_state) {
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        // Reset every sample while not applied (idempotent — no stored "previous state"
+        // needed, fully self-contained). Also resets the MA buffer, which the original
+        // _reset_algorithms() omitted — a stale MA buffer would otherwise briefly bias the
+        // peak-detection filter right after re-application.
+        _hr1_dc                = 0.0f;
+        _hr1_running_max       = 0.0f;
+        _hr1_ppg_above_thresh  = false;
+        _hr1_last_peak_idx     = 0;
+        _hr1_sample_idx        = 0;
+        _hr1_interval_count    = 0;
+        memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
+        memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
+        _hr1_ma_sum = 0.0f;
+        _hr1_ma_idx = 0;
+        _current_data.hr1     = NAN;
+        _current_data.hr1_sqi = 0.0f;
+        return;
+    }
+
     _hr1_sample_idx++;
 
     // DC removal: IIR estimator (tau = hr1_dc_tau_s), then negate for conventional PPG polarity (peaks up)
@@ -2079,6 +2100,7 @@ void INCUNEST_AFE4490::_update_hr1(float ir) {
 
     // Need 5 intervals for a stable estimate
     if (_hr1_interval_count < 5) {
+        _current_data.hr1     = NAN;
         _current_data.hr1_sqi = 0.0f;
         return;
     }
@@ -2103,6 +2125,7 @@ void INCUNEST_AFE4490::_update_hr1(float ir) {
         float sqi = 1.0f - cv / _hr1_sqi_cv_max;
         _current_data.hr1_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
+        _current_data.hr1     = NAN;
         _current_data.hr1_sqi = 0.0f;
     }
 }
@@ -2111,7 +2134,20 @@ void INCUNEST_AFE4490::_update_hr1(float ir) {
 
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
-bool INCUNEST_AFE4490::_update_hr2_sample(float ir) {
+// probe_state gate lives here (shared by the production call site and the sync test
+// wrapper _update_hr2()): while not applied, resets fast-path state every sample
+// (idempotent) and never triggers the slow path (Task B never even gets signalled).
+bool INCUNEST_AFE4490::_update_hr2_sample(float ir, ProbeState probe_state) {
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        _hr2_bpf.reset();
+        _hr2_buf_idx = 0; _hr2_buf_count = 0;
+        _hr2_decim_counter = 0; _hr2_update_counter = 0;
+        memset(_hr2_buf, 0, sizeof(_hr2_buf));
+        _current_data.hr2     = NAN;
+        _current_data.hr2_sqi = 0.0f;
+        return false;
+    }
+
     float filtered = -_hr2_bpf.process(ir);
 
     _hr2_decim_counter++;
@@ -2194,11 +2230,11 @@ void INCUNEST_AFE4490::_compute_hr2() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr2(float ir) {
-    if (!_update_hr2_sample(ir)) return;
+void INCUNEST_AFE4490::_update_hr2(float ir, ProbeState probe_state) {
+    if (!_update_hr2_sample(ir, probe_state)) return;
     _linearize_hr2();
     _compute_hr2();
-    if (_hr2_result_sqi > 0.0f) _current_data.hr2 = _hr2_result;
+    _current_data.hr2     = (_hr2_result_sqi > 0.0f) ? _hr2_result : NAN;
     _current_data.hr2_sqi = _hr2_result_sqi;
 }
 
@@ -2206,7 +2242,20 @@ void INCUNEST_AFE4490::_update_hr2(float ir) {
 
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
-bool INCUNEST_AFE4490::_update_hr3_sample(float ir) {
+// probe_state gate lives here (shared by the production call site and the sync test
+// wrapper _update_hr3()): while not applied, resets fast-path state every sample
+// (idempotent) and never triggers the slow path (Task C never even gets signalled).
+bool INCUNEST_AFE4490::_update_hr3_sample(float ir, ProbeState probe_state) {
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        _hr3_bpf.reset();
+        _hr3_buf_idx = 0; _hr3_buf_count = 0;
+        _hr3_decim_counter = 0; _hr3_update_counter = 0;
+        memset(_hr3_buf, 0, sizeof(_hr3_buf));
+        _current_data.hr3     = NAN;
+        _current_data.hr3_sqi = 0.0f;
+        return false;
+    }
+
     float filtered = -_hr3_bpf.process(ir);  // negate: peaks up
 
     _hr3_decim_counter++;
@@ -2347,11 +2396,11 @@ void INCUNEST_AFE4490::_compute_hr3() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr3(float ir) {
-    if (!_update_hr3_sample(ir)) return;
+void INCUNEST_AFE4490::_update_hr3(float ir, ProbeState probe_state) {
+    if (!_update_hr3_sample(ir, probe_state)) return;
     _linearize_hr3();
     _compute_hr3();
-    if (_hr3_result_sqi > 0.0f) _current_data.hr3 = _hr3_result;
+    _current_data.hr3     = (_hr3_result_sqi > 0.0f) ? _hr3_result : NAN;
     _current_data.hr3_sqi = _hr3_result_sqi;
 }
 
@@ -2377,7 +2426,7 @@ void INCUNEST_AFE4490::_hr2_task_body() {
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
-        if (_hr2_result_sqi > 0.0f) _current_data.hr2 = _hr2_result;
+        _current_data.hr2     = (_hr2_result_sqi > 0.0f) ? _hr2_result : NAN;
         _current_data.hr2_sqi = _hr2_result_sqi;
         xSemaphoreGive(_state_mutex);
 
@@ -2408,7 +2457,7 @@ void INCUNEST_AFE4490::_hr3_task_body() {
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
-        if (_hr3_result_sqi > 0.0f) _current_data.hr3 = _hr3_result;
+        _current_data.hr3     = (_hr3_result_sqi > 0.0f) ? _hr3_result : NAN;
         _current_data.hr3_sqi = _hr3_result_sqi;
         xSemaphoreGive(_state_mutex);
 
