@@ -622,30 +622,49 @@ estimated (see "future alternative" notes below) — a rescale-by-k trick only w
 linear EMA; a more sophisticated estimator might not have one, which would otherwise force
 HGAC to wait out a settling window before actuating again.
 
-**No-signal gate: single absolute floor on OT DC, not a separate i_pd-based gate.**
-An earlier version of this migration added `spo2_min_i_pd_a` (Amps), gating on absolute
-`i_pd_ir`/`i_pd_red` magnitude, replacing `spo2_min_dc` (ADC counts) 1:1. **Removed after
-further analysis (2026-07-15):** for a transmittance probe, "no finger" typically shows
-**high** OT (light passes largely unobstructed), not low `i_pd` — so that gate rarely caught
-an actual no-finger condition; what it did catch overlapped with RSQM's own `PROBE_DISCONNECTED`
-classification (all 4 `i_pd` channels + `led_sub` near the TIA bias floor), just with a
-narrower/uncalibrated criterion and no debounce. Removing it also removed `i_pd_ir`/`i_pd_red`
-from `_update_spo2()`'s signature — it now takes only `(ot_ir, ot_red)`.
+**Presence detection: delegated entirely to RSQM (`ProbeState`), not computed by SpO2.**
+This migration tried two self-contained "no-finger"/"no-signal" mechanisms inside
+`_update_spo2()` in turn — `spo2_min_i_pd_a` (Amps, on absolute `i_pd_ir`/`i_pd_red`
+magnitude, v0.38) and then `spo2_min_ot_dc` (A/A, on `dc_ir`/`dc_red`, v0.40) — both removed.
+For a transmittance probe, "no finger" typically shows **high** OT (light passes largely
+unobstructed), not low `i_pd`/DC — so both gates rarely caught an actual no-finger condition;
+what they did catch overlapped with RSQM's own `PROBE_DISCONNECTED`/`PROBE_NOT_APPLIED`
+classification, just with a narrower/uncalibrated criterion and no debounce. Having SpO2
+(and, in principle, HR1/HR2/HR3) each maintain their own copy of "is there a probe/finger"
+detection duplicates RSQM's one job across N places with N different, uncoordinated
+thresholds — architecturally wrong even before considering whether any single one of them
+works correctly.
 
-Replaced by `spo2_min_ot_dc` (A/A, placeholder default `1e-6`, needs HW calibration — same
-status as `rsqm_signal_weak_std`), applied **only to `dc_ir`/`dc_red`** (the EMA-smoothed OT
-DC): DC should not legitimately collapse near zero while a probe is genuinely present, so an
-absolute floor there is a real "is there a signal at all" check — `PI = RMS_AC/DC` is a ratio,
-and a ratio of two noise-dominated quantities can look deceptively "valid" by chance, so a
-ratio-based check alone cannot reliably catch a fully-collapsed signal.
+**v0.41: `_update_spo2(float ot_ir, float ot_red, ProbeState probe_state)`** — a third
+parameter, RSQM's classification, consumed but never computed here. While
+`probe_state != PROBE_APPLIED` (covers both `PROBE_NOT_APPLIED` and `PROBE_DISCONNECTED`
+identically — same treatment RSQI already gives them): both EMAs are reset **every sample**
+(idempotent, not just once on the transition edge — needs no stored "previous probe_state",
+keeping the function's only internal memory as `_spo2_ch_ir_ema`/`_spo2_ch_red_ema`, nothing
+else reads or writes them), and `pi`/`spo2`/`spo2_r` are forced to `NaN`. Warmup restarts
+naturally once `PROBE_APPLIED` resumes, via `ir_ema.count` (see below) starting from 0.
 
-The AC side keeps a separate, purely numerical guard: `spo2_ac_div_eps = 1e-9`, applied only
-to `ac_ir` (the only actual divisor in `R` besides `dc_red` — `ac_red` is a numerator-only
-multiplicand). This must stay far below any real AC value because AC legitimately gets very
-small at low PI (e.g. PI=0.5% on a typical DC of 1.4e-5 gives AC≈7e-8) — conflating this with
-the DC floor above would wrongly invalidate valid low-perfusion signals (caught in practice
-during this change: using one shared 1e-6 threshold for both DC *and* AC failed 4/7 native
-`test_spo2` cases before the two roles were split back apart).
+What remains inside `_update_spo2()` is **only** a division-safety guard,
+`spo2_div_eps = 1e-9` — purely numerical (not physiological), applied to the actual divisors:
+`dc_ir` (divisor in the PI calc) and `dc_red`/`ac_ir` (divisors in R; `ac_red` is a
+numerator-only multiplicand, doesn't need guarding). A single shared epsilon is safe here
+specifically *because* presence detection moved to `probe_state` — the earlier attempt to
+also use this same kind of threshold as a physiological floor (`spo2_min_ot_dc`, `1e-6`) broke
+4/7 native `test_spo2` cases once tried alongside AC (AC legitimately gets very small at low
+PI, e.g. PI=0.5% on typical DC gives AC≈7e-8 — far below a physiologically-motivated floor,
+but nowhere near the purely numerical `1e-9`).
+
+**Output contract, now uniform:** `sqi==0.0f` always implies `pi==spo2==spo2_r==NaN` — across
+warmup, `probe_state != PROBE_APPLIED`, and the division guard alike. `NaN` replaces the
+earlier `-1.0f` sentinel (used only for `pi`'s near-zero-mean case, and only for `spo2` at the
+wire-formatting layer in `main.cpp` — `spo2_r`/`pi` were never masked there at all, so a stale
+value would previously have traveled over `$M3`/`$M4` unmasked). `NaN` fails safe: any
+consumer that forgets to check `sqi` and instead compares or averages the value gets a
+comparison that's always false (e.g. a naive `spo2 < 70` alarm never fires on `NaN`) or a
+propagated `NaN` — not a plausible-looking, alarm-triggering number the way `-1.0f` could be.
+
+`_spo2_sample_count` removed — `EmaChannel::count` (already incremented every `.update()`
+call, in lockstep with the old separate counter) is used directly for the warmup check.
 
 **Precision note (analyzed, not a concern):** OT magnitudes (~1e-5) are nowhere near
 `float`'s precision floor — `float`'s relative precision (~1.19e-7) is ~100× finer than the
@@ -659,12 +678,13 @@ settling — ambient current does not scale with ILED (asymmetric residual, trac
 see the gain-influence analysis referenced from §5.8) — OT's gain-invariance covers RF
 changes, not the ILED/ambient-residual problem.
 
-**pulsenest_lab.py impact — migrated (2026-07-15, lab v1.19):** the four algorithm-mirror
-classes (`SpO2TestCalc`, `HR1TestCalc`, `HR2TestCalc`, `HR3TestCalc`) now consume OT too,
-requiring frame mode `$M4` (`OT_LED1`/`OT_LED2` are not transmitted in `$M1`/`$M2`/`$M3`) —
-tracked in `pulsenest_lab_spec.md` (v1.19 changelog), not reconstructed locally from
-`led1_sub` + RF/ILED config. `SpO2TestCalc` mirrors the `spo2_min_ot_dc`/`spo2_ac_div_eps`
-split above (no `i_pd_ir`/`i_pd_red` parameters).
+**pulsenest_lab.py impact — migrated (2026-07-15, lab v1.19; updated for v0.41 in lab
+v1.23):** the four algorithm-mirror classes (`SpO2TestCalc`, `HR1TestCalc`, `HR2TestCalc`,
+`HR3TestCalc`) now consume OT too, requiring frame mode `$M4` (`OT_LED1`/`OT_LED2` are not
+transmitted in `$M1`/`$M2`/`$M3`) — tracked in `pulsenest_lab_spec.md` (v1.19/v1.23
+changelog), not reconstructed locally from `led1_sub` + RF/ILED config. `SpO2TestCalc` mirrors
+the v0.41 design: `update(ot_ir, ot_red, probe_state, fs)`, `ProbeState` consumed from the
+already-parsed `ProbeState` column, `spo2_div_eps` (single numerical guard), `NaN` sentinel.
 
 ---
 
@@ -1792,6 +1812,27 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.41-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): presence detection  |
+|         | fully delegated to RSQM — `spo2_min_ot_dc` removed too.** `_update_spo2()`  |
+|         | gained a third parameter, `ProbeState probe_state` (RSQM's classification, |
+|         | consumed — never computed internally). While `probe_state != PROBE_APPLIED`|
+|         | (covers both `PROBE_NOT_APPLIED` and `PROBE_DISCONNECTED`): both EMAs are  |
+|         | reset every sample (idempotent — no stored "previous state" needed; warmup |
+|         | restarts naturally via `ir_ema.count` once `PROBE_APPLIED` resumes), and   |
+|         | `pi`/`spo2`/`spo2_r` are set to `NaN` (not `-1.0f` — a forgotten `sqi`      |
+|         | check on `NaN` fails safe: comparisons are always false, so e.g. a naive   |
+|         | `spo2 < 70` alarm never fires on `NaN`, whereas it would on `-1.0f`).       |
+|         | `spo2_min_ot_dc`/`spo2_ac_div_eps` collapsed into one `spo2_div_eps`        |
+|         | (`1e-9`), a purely numerical division-safety guard on the actual divisors  |
+|         | (`dc_ir` for PI, `dc_red`/`ac_ir` for R) — not physiological, since that's  |
+|         | now `probe_state`'s job. `_spo2_sample_count` removed (redundant with      |
+|         | `EmaChannel::count`, always incremented in lockstep). Output contract now  |
+|         | uniform: `sqi==0 ⟹ pi==spo2==spo2_r==NaN`, across warmup, not-applied, and |
+|         | the division guard alike (previously only the near-zero-mean PI branch    |
+|         | used a sentinel; the rest left outputs stale). Verified: 7/7 `test_spo2`   |
+|         | (new `test_spo2_not_applied_resets` covers reset + fresh-warmup-on-reapply)|
+|         | + 33/33 other native tests, ESP32-S3 build (16.4 KB RAM / 828 KB flash).   |
+|         | Spec §5.1, §14.                                                            |
 | v0.40-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): removed the        |
 |         | `spo2_min_i_pd_a` "no-finger" gate added in v0.38.** Analysis (2026-07-15)  |
 |         | showed it rarely detected an actual no-finger condition (a transmittance    |

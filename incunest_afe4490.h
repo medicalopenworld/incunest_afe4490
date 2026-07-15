@@ -853,9 +853,9 @@ private:
 
     // Algorithms — synchronous (used by unit tests and SpO2/HR1)
     // EXPERIMENT (OT-domain input): ot_ir/ot_red replace led1_sub/led2_sub as the
-    // gain-invariant signal. No-signal detection is an absolute-magnitude floor on the
-    // resulting OT DC (spo2_min_ot_dc), not a separate i_pd-based gate — see incunest_afe4490.cpp.
-    void _update_spo2(float ot_ir, float ot_red);
+    // gain-invariant signal. probe_state is consumed (RSQM's classification), never computed
+    // here — see incunest_afe4490.cpp for the reset-on-not-applied / division-safety design.
+    void _update_spo2(float ot_ir, float ot_red, ProbeState probe_state);
     // EXPERIMENT (OT-domain input): ir is now as.ot_led1 (float, gain-invariant) instead of
     // led1_sub (int32_t raw ambient-corrected counts). HR1/HR2/HR3 are periodicity/timing-based
     // (peak timing, autocorrelation lag, FFT dominant frequency) — a uniform gain scale does
@@ -990,11 +990,12 @@ private:
     //   var   = AC power estimate = E[(x − mean)²] = EMA of AC²
     //           α_var  = 1 − exp(−1/(τ_var·fs)),   τ_var  = spo2_ema_var_tau_s  (default 1.0 s)
     //           NOTE: future alternative — bandpass-filtered AC² instead of DC-subtraction AC²
-    //   count = unused by SpO2 (sample counting done via _spo2_sample_count)
+    //   count = sample count used directly for warmup (ir_ema/red_ema always updated
+    //           together, so either's count works — no separate _spo2_sample_count needed).
+    //           Naturally restarts warmup after a reset (see _update_spo2() in the .cpp).
     //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
-    uint32_t _spo2_sample_count;
     float    _spo2_a;
     float    _spo2_b;
 
@@ -1118,8 +1119,8 @@ public:
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 
     // SpO2
-    void  test_feed_spo2(float ot_ir, float ot_red) {
-        _update_spo2(ot_ir, ot_red);
+    void  test_feed_spo2(float ot_ir, float ot_red, ProbeState probe_state) {
+        _update_spo2(ot_ir, ot_red, probe_state);
     }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }

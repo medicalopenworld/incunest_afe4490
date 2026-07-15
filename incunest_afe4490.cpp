@@ -52,23 +52,19 @@ namespace {
     constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
     // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2's DC/AC now
     // live in OT units (~1e-5 typical, dimensionless A/A) instead of ADC counts (~1e5).
-    // spo2_min_ot_dc replaces the absolute-i_pd "no-finger" gate (spo2_min_i_pd_a, removed —
-    // analysis showed it rarely detected "no finger" at all: a transmittance probe with no
-    // finger typically shows HIGH OT, not low i_pd, since light passes largely unobstructed;
-    // what it actually caught overlapped with RSQM's own disconnected classification, just
-    // faster/uncalibrated). Applied ONLY to DC (dc_ir/dc_red): DC should not legitimately
-    // collapse near zero while a probe is genuinely present, so a physiologically-motivated
-    // floor here is a real "is there a signal at all" check.
-    // Rationale for an absolute-magnitude DC check at all: PI = RMS_AC/DC is a RATIO — when
-    // both AC and DC are dominated by noise (no real signal), the ratio can look deceptively
-    // "valid" by chance. Only an absolute-magnitude check on DC can catch that.
-    // Placeholder value (one order of magnitude below typical OT DC ~1e-5), needs HW
-    // calibration (same status as rsqm_signal_weak_std).
-    constexpr float    spo2_min_ot_dc      = 1e-6f;    // A/A — OT DC floor: below this, no real signal
-    // Numerical guard only (NOT physiological — AC legitimately gets very small at low PI,
-    // e.g. PI=0.5% on DC~1.4e-5 gives AC~7e-8): avoids dividing by a near-zero AC value in R.
-    // Kept far below any real AC so it only ever trips on true near-zero/numerical noise.
-    constexpr float    spo2_ac_div_eps     = 1e-9f;
+    // Presence detection (is there a real signal / finger applied?) is RSQM's responsibility
+    // alone (ProbeState, passed in) — _update_spo2() consumes it, does not compute its own.
+    // This removes two earlier mechanisms that both tried to do RSQM's job from inside SpO2:
+    // the absolute-i_pd "no-finger" gate (spo2_min_i_pd_a — rarely caught an actual no-finger
+    // condition: a transmittance probe with no finger shows HIGH OT, not low i_pd) and the
+    // absolute-OT-DC "no-signal floor" (spo2_min_ot_dc — same duplication, just on a
+    // different quantity). Both removed.
+    // spo2_div_eps is what remains: a single, purely numerical division-safety guard (NOT a
+    // physiological threshold) on the actual divisors in the code below — dc_ir (PI calc) and
+    // dc_red/ac_ir (R calc). Kept far below any real operating value (~1e-5 DC, ~1e-8 AC at
+    // the lowest valid PI) so it only ever trips on true near-zero/numerical noise, e.g. right
+    // after an EmaChannel reset.
+    constexpr float    spo2_div_eps        = 1e-9f;    // A/A — division-safety guard only
     // SQI: Perfusion Index thresholds (Nellcor/Masimo clinical reference).
     // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
     constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
@@ -293,7 +289,6 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
-      _spo2_sample_count(0),
       _spo2_a(spo2_a_default), _spo2_b(spo2_b_default),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
@@ -1080,7 +1075,6 @@ void INCUNEST_AFE4490::_diag_task_trampoline(void* pv) {
 void INCUNEST_AFE4490::_reset_algorithms() {
     _spo2_ch_ir_ema.reset();
     _spo2_ch_red_ema.reset();
-    _spo2_sample_count = 0;
     _hr1_dc                    = 0.0f;
     _hr1_running_max           = 0.0f;
     _hr1_ppg_above_thresh   = false;
@@ -1812,11 +1806,11 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // the raw ambient-corrected counts (led1_sub) used before this experiment.
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
-    { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2); _ts_spo2.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2, _rsqm_probe_state); _ts_spo2.update(esp_timer_get_time() - _t); }
     { uint64_t _t = esp_timer_get_time(); _update_hr1(as.ot_led1);            _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
-    _update_spo2(as.ot_led1, as.ot_led2);
+    _update_spo2(as.ot_led1, as.ot_led2, _rsqm_probe_state);
     _update_hr1(as.ot_led1);
 #endif
 
@@ -1940,14 +1934,35 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // ── SpO2 algorithm ────────────────────────────────────────────────────────────
 // R = (AC_rms_RED / DC_RED) / (AC_rms_IR / DC_IR)
 // SpO2 = a - b * R
-// led1_sub  : IR  signal ambient-corrected (led1 - aled1)
-// led2_sub : RED signal ambient-corrected (led2 - aled2)
 // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs — see spec §5.1/§5.8):
 // ot_ir/ot_red replace the raw ambient-corrected counts (led1_sub/led2_sub) used before this
 // experiment. OT = (i_pd_led − i_pd_aled) / I_LED is gain-invariant by construction (a linear
 // rescaling of led_sub by 1/(2·RF·I_LED)) — an RF change no longer creates a discontinuity in
 // this input, so HGAC's _hgac_descend_rf() no longer needs to rescale this EmaChannel by k.
-void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red) {
+//
+// probe_state is RSQM's classification, consumed here — this function never computes its own
+// presence detection (see spo2_div_eps rationale above §). Encapsulation: only this function
+// reads/writes _spo2_ch_ir_ema/_spo2_ch_red_ema; nothing outside resets or feeds them.
+//
+// Output contract: sqi==0.0f always implies pi==spo2==spo2_r==NAN (invalid, never stale) —
+// unified across warmup, not-applied, and the division-safety guard below. NAN (not a
+// sentinel like -1.0f) fails safe: any consumer that forgets to check sqi and instead
+// compares/averages a NAN value gets a comparison that is always false / a propagated NAN,
+// rather than a plausible-looking-but-wrong number that could trigger a false alarm.
+void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, ProbeState probe_state) {
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        // Reset every sample while not applied (idempotent — cheap, no stored "previous
+        // probe_state" needed): the EMAs are already clean the instant probe_state returns
+        // to APPLIED, so warmup restarts naturally via ir_ema.count below.
+        _spo2_ch_ir_ema.reset();
+        _spo2_ch_red_ema.reset();
+        _current_data.pi       = NAN;
+        _current_data.spo2     = NAN;
+        _current_data.spo2_r   = NAN;
+        _current_data.spo2_sqi = 0.0f;
+        return;
+    }
+
     // DC extraction + AC² power estimation via EmaChannel (one call per channel):
     //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 2.0 s
     //   Step 2 — AC: d = x − mean                           DC-subtraction high-pass
@@ -1959,16 +1974,18 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red) {
     _spo2_ch_red_ema.update(ot_red);
 
     // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup)
-    // PI = sqrt(E[AC²]) / DC × 100 — a pure ratio, numerically identical whether DC/AC are
-    // expressed in OT or in raw counts (both scale by the same constant within one channel).
-    _current_data.pi = (_spo2_ch_ir_ema.mean > spo2_min_ot_dc)
+    // PI = sqrt(E[AC²]) / DC — a pure ratio, numerically identical whether DC/AC are expressed
+    // in OT or in raw counts. Guard is division-safety only (spo2_div_eps), not physiological.
+    _current_data.pi = (_spo2_ch_ir_ema.mean > spo2_div_eps)
                        ? (sqrtf(_spo2_ch_ir_ema.var) / _spo2_ch_ir_ema.mean) * 100.0f
-                       : -1.0f;
+                       : NAN;
 
-    _spo2_sample_count++;
-
-    // Skip during warmup
-    if (_spo2_sample_count < _spo2_warmup_samples) {
+    // Skip during warmup. Sample count comes directly from the EMA itself (ir_ema.count) —
+    // ir_ema/red_ema are always updated together above, so either's count works; no separate
+    // _spo2_sample_count needed. Naturally restarts after the reset-on-not-applied above.
+    if (_spo2_ch_ir_ema.count < _spo2_warmup_samples) {
+        _current_data.spo2   = NAN;
+        _current_data.spo2_r = NAN;
         _current_data.spo2_sqi = 0.0f;
         return;
     }
@@ -1988,10 +2005,12 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red) {
     float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
     float ac_red = sqrtf(_spo2_ch_red_ema.var);
 
-    // DC no-signal floor (see spo2_min_ot_dc rationale above) + AC division-safety guard
-    // (spo2_ac_div_eps — AC legitimately gets tiny at low PI, NOT a physiological threshold).
-    // Only ac_ir is an actual divisor in R below (ac_red is a numerator-only multiplicand).
-    if (dc_ir < spo2_min_ot_dc || dc_red < spo2_min_ot_dc || ac_ir < spo2_ac_div_eps) {
+    // Division-safety guard only (spo2_div_eps, NOT physiological — presence detection is
+    // probe_state's job above). dc_red and ac_ir are the actual divisors in R below (dc_ir is
+    // already guarded above for the PI calc; ac_red is a numerator-only multiplicand in R).
+    if (dc_red < spo2_div_eps || ac_ir < spo2_div_eps) {
+        _current_data.spo2   = NAN;
+        _current_data.spo2_r = NAN;
         _current_data.spo2_sqi = 0.0f;
         return;
     }
@@ -2009,11 +2028,12 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red) {
     if (spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
         _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
-        // PI < spo2_pi_sqi_lo → SQI = 0 (no finger or very weak signal).
-        // PI ≥ spo2_pi_sqi_hi → SQI = 1 (full quality, per Nellcor/Masimo thresholds).
+        // PI < spo2_pi_sqi_lo → SQI = 0 (very weak signal). PI ≥ spo2_pi_sqi_hi → SQI = 1
+        // (full quality, per Nellcor/Masimo thresholds).
         float sqi = (_current_data.pi - _spo2_pi_sqi_lo) / (_spo2_pi_sqi_hi - _spo2_pi_sqi_lo);
         _current_data.spo2_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
+        _current_data.spo2   = NAN;
         _current_data.spo2_sqi = 0.0f;
     }
 }
