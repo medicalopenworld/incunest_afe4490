@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.42
+# incunest_afe4490 — Specification v0.43
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -51,8 +51,8 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 4 raw ADC codes (led1, led2, aled1, aled2)  +  2 SW-subtracted (led1_sub, led2_sub)
     │
     ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA_DIFF, I_PD, OT)  — see §3c
-    │       ├─→ _update_rsqm()      (probe state, DiagCode, RSQI)
-    │       └─→ _update_hgac()      (saturation guard + RF descent — Phase 1, §5.8)
+    │       ├─→ _rsqm_update()      (probe state, DiagCode, RSQI)
+    │       └─→ _hgac_update()      (saturation guard + RF descent — Phase 1, §5.8)
     │
     ├─→ selected channel (setPPGChannel)
     │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
@@ -92,7 +92,7 @@ struct AFE4490Data {
     float   hr2_sqi;    // HR2 Signal Quality Index [0–1]: normalised autocorrelation at dominant lag; 0=no periodicity, 1=perfect
     float   hr3;        // HR3 (FFT + HPS) in bpm
     float   hr3_sqi;    // HR3 Signal Quality Index [0–1]: spectral concentration at peak; 0=diffuse spectrum, 1=dominant tone
-    // RSQM outputs (filled every sample by _update_rsqm)
+    // RSQM outputs (filled every sample by _rsqm_update)
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
     uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SIGNAL_WEAK | RSQM_DIAG_HW_SETTLING | ...
     ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, or PROBE_APPLIED
@@ -407,7 +407,7 @@ constexpr uint32_t AFE_DIAG_LED1SC_ALM      = 0x00000800UL;  // bit 11 — LED1 
 constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — common-mode voltage out of range
 constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
 //
-// Bits 13+: RSQM software checks — updated continuously at 500 Hz by _update_rsqm()
+// Bits 13+: RSQM software checks — updated continuously at 500 Hz by _rsqm_update()
 constexpr uint32_t RSQM_DIAG_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
 constexpr uint32_t RSQM_DIAG_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
 constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
@@ -559,14 +559,14 @@ struct AFE4490AnalogState {
 
 **ADC rail characterization (IncuNest 16.A, 2026-07-10, via AMBDAC over-cancellation):** the empirical rails are NOT the datasheet code limits (±2^21). Positive rail = **+2096921**, constant and identical on all 4 channels. Negative rail = **−2096919**, constant on LED1/LED2; ALED1/ALED2 do not pin — their published codes oscillate down to ~−2096810 (approximate interval, limited observation time), because ADC averaging mixes clipped and non-clipped conversions within the window. Detection thresholds therefore carry a **guard band of ~220 counts** (2× the worst observed ALED-to-rail distance of 109 counts) inside the rail, applied to both polarities since the averaging mechanism is sign-independent. A legitimate code within 220 counts of the rail (0.01% of range) is functionally saturated anyway, so false positives are not a practical concern. Note: an exact comparison against the assumed symmetric rail −2096921 would never have triggered (`adc_sat_neg` dead flag) — found empirically.
 
-**OT (optical transmittance)** is stored in the struct since v0.35 (was previously computed inside `_update_rsqm()`). Formula: `ot_ledx = (i_pd_ledx − i_pd_aledx) / ILEDx_A` [A/A]. Value-always; validity via `otLedxValid()` (both source channels must be `CH_CLEAN` — OT is a ratio of two measurements). The former `rsqm_ot_saturated = 100.0` sentinel and `rsqm_adc_positive_sat` constant are removed.
+**OT (optical transmittance)** is stored in the struct since v0.35 (was previously computed inside `_rsqm_update()`). Formula: `ot_ledx = (i_pd_ledx − i_pd_aledx) / ILEDx_A` [A/A]. Value-always; validity via `otLedxValid()` (both source channels must be `CH_CLEAN` — OT is a ratio of two measurements). The former `rsqm_ot_saturated = 100.0` sentinel and `rsqm_adc_positive_sat` constant are removed.
 
 ### Consumers
 
 | Consumer | Fields used |
 |---|---|
-| `_update_rsqm()` | `ot_led1/ot_led2` + `otLedxValid()` (probe state), `adcSatPos(ALEDx)` (RSQM_DIAG_AMB_SAT), `i_pd_*` (disconnect) |
-| `_update_hgac()` (§5.8, Phase 1) | `v_tia_diff_led1/led2/aled1/aled2` (guard trip, per gain domain) |
+| `_rsqm_update()` | `ot_led1/ot_led2` + `otLedxValid()` (probe state), `adcSatPos(ALEDx)` (RSQM_DIAG_AMB_SAT), `i_pd_*` (disconnect) |
+| `_hgac_update()` (§5.8, Phase 1) | `v_tia_diff_led1/led2/aled1/aled2` (guard trip, per gain domain) |
 
 ---
 
@@ -609,7 +609,7 @@ Overridable in `incunest_afe4490.h` before compilation:
 ### 5.1 SpO2
 
 **EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input domain changed from
-raw ambient-corrected counts to OT.** `_update_spo2()` now consumes `as.ot_led1`/`as.ot_led2`
+raw ambient-corrected counts to OT.** `_spo2_update()` now consumes `as.ot_led1`/`as.ot_led2`
 (optical transmittance, §3c) instead of `led1_sub`/`led2_sub`. Rationale: `OT = (i_pd_led −
 i_pd_aled) / I_LED` is a linear rescaling of `led_sub` by `1/(2·RF·I_LED)` — since the real
 photocurrent does not change instantaneously when RF/ILED change, OT (and `i_pd`) is
@@ -624,7 +624,7 @@ HGAC to wait out a settling window before actuating again.
 
 **Presence detection: delegated entirely to RSQM (`ProbeState`), not computed by SpO2.**
 This migration tried two self-contained "no-finger"/"no-signal" mechanisms inside
-`_update_spo2()` in turn — `spo2_min_i_pd_a` (Amps, on absolute `i_pd_ir`/`i_pd_red`
+`_spo2_update()` in turn — `spo2_min_i_pd_a` (Amps, on absolute `i_pd_ir`/`i_pd_red`
 magnitude, v0.38) and then `spo2_min_ot_dc` (A/A, on `dc_ir`/`dc_red`, v0.40) — both removed.
 For a transmittance probe, "no finger" typically shows **high** OT (light passes largely
 unobstructed), not low `i_pd`/DC — so both gates rarely caught an actual no-finger condition;
@@ -635,7 +635,7 @@ detection duplicates RSQM's one job across N places with N different, uncoordina
 thresholds — architecturally wrong even before considering whether any single one of them
 works correctly.
 
-**v0.41: `_update_spo2(float ot_ir, float ot_red, ProbeState probe_state)`** — a third
+**v0.41: `_spo2_update(float ot_ir, float ot_red, ProbeState probe_state)`** — a third
 parameter, RSQM's classification, consumed but never computed here. While
 `probe_state != PROBE_APPLIED` (covers both `PROBE_NOT_APPLIED` and `PROBE_DISCONNECTED`
 identically — same treatment RSQI already gives them): both EMAs are reset **every sample**
@@ -644,7 +644,7 @@ keeping the function's only internal memory as `_spo2_ch_ir_ema`/`_spo2_ch_red_e
 else reads or writes them), and `pi`/`spo2`/`spo2_r` are forced to `NaN`. Warmup restarts
 naturally once `PROBE_APPLIED` resumes, via `ir_ema.count` (see below) starting from 0.
 
-What remains inside `_update_spo2()` is **only** a division-safety guard,
+What remains inside `_spo2_update()` is **only** a division-safety guard,
 `spo2_div_eps = 1e-9` — purely numerical (not physiological), applied to the actual divisors:
 `dc_ir` (divisor in the PI calc) and `dc_red`/`ac_ir` (divisors in R; `ac_red` is a
 numerator-only multiplicand, doesn't need guarding). A single shared epsilon is safe here
@@ -726,13 +726,13 @@ PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2
 ### 5.2 HR1 — Peak detection
 
 **EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input changed to OT.**
-`_update_hr1()` now takes `as.ot_led1` (float) instead of `led1_sub` (int32_t raw
+`_hr1_update()` now takes `as.ot_led1` (float) instead of `led1_sub` (int32_t raw
 ambient-corrected counts) — same rationale as SpO2 (§5.1): gain-invariant by construction.
 Unlike SpO2, HR1 is peak-**timing** based, not an amplitude ratio — `_hr1_running_max` and
 the `0.6×running_max` threshold are self-relative, so a uniform gain scale does not change
 peak timing and no threshold recalibration was needed (pure domain/type change).
 
-**v0.42: `_update_hr1(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 design
+**v0.42: `_hr1_update(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 design
 (§5.1): presence detection stays RSQM's exclusive job, `probe_state` is consumed but never
 computed here. While `probe_state != PROBE_APPLIED`, all internal state (DC filter, running
 max, threshold-crossing flag, peak/interval indices, RR interval buffer, moving-average
@@ -789,9 +789,9 @@ a uniform gain scale does not change the result. The near-zero-energy guard (`ac
 in raw-count units) was recalibrated to `acorr0 < hr2_ot_energy_eps` (1e-16, OT-scale sum of
 ~400 squared samples) — a pure division-by-near-zero guard, not a physiological threshold.
 
-**v0.42: `_update_hr2_sample(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 /
+**v0.42: `_hr2_update_sample(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 /
 HR1 v0.42 design (§5.1/§5.2). The `probe_state` gate lives in the **fast path** (shared by
-both the production call site and the synchronous test wrapper `_update_hr2()`): while
+both the production call site and the synchronous test wrapper `_hr2_update_for_test()`): while
 `probe_state != PROBE_APPLIED`, the bandpass filter and circular buffer reset **every
 sample**, `hr2`/`hr2_sqi` are forced to `NaN`/`0`, and the slow autocorrelation path (Task B)
 is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fresh (8 s at
@@ -835,7 +835,7 @@ same rationale as §5.1-5.3. SQI is a ratio of HPS values (same power units, can
 so a uniform gain scale does not change the result — pure domain/type change, no threshold
 recalibration needed.
 
-**v0.42: `_update_hr3_sample(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 /
+**v0.42: `_hr3_update_sample(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 /
 HR1/HR2 v0.42 design (§5.1-5.3). Same fast-path gate placement as HR2: while
 `probe_state != PROBE_APPLIED`, the low-pass filter and circular buffer reset **every
 sample**, `hr3`/`hr3_sqi` are forced to `NaN`/`0`, and the slow FFT/HPS path (Task C) is
@@ -949,13 +949,13 @@ Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_S
 OT = (I_PD_LED − I_PD_ALED) / I_LED     [A/A, dimensionless]
 ```
 
-Since v0.35 OT is computed in `_compute_analog_state()` and stored in `AFE4490AnalogState` (`ot_led1`/`ot_led2`, see §3c); `_update_rsqm()` only consumes it. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
+Since v0.35 OT is computed in `_compute_analog_state()` and stored in `AFE4490AnalogState` (`ot_led1`/`ot_led2`, see §3c); `_rsqm_update()` only consumes it. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
 
 OT is the **full electro-optical system ratio** — it combines LED wall-plug efficiency, tissue transmittance, and photodiode responsivity into a single dimensionless number. It is not the tissue optical transmittance alone.
 
 - Explicit saturation policy (v0.35, replaces the former `ot = 100.0` sentinel): a channel is flagged not-applied when `!as.otLedxValid()` (any source channel not `CH_CLEAN`: ADC saturated either rail, or TIA beyond linearity) OR `as.ot_ledx > rsqm_ot_thr`. Rationale: with the probe applied on RSQM-calibrated hardware, saturation is not an expected condition (HGAC will own that case). Note this is stricter than pre-v0.35 (which only checked positive saturation of the LED channel, not ALED).
 - Threshold: `led1_not_applied` OR `led2_not_applied` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*. Default `rsqm_ot_thr = 8.5e-5` — runtime-configurable via `setRsqmOtThr()`.
-- Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_set_probe_state()` instead.
+- Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_rsqm_set_probe_state()` instead.
 
 Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54).
 
@@ -965,7 +965,7 @@ Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_A
 
 **PROBE_APPLIED** — neither of the above.
 
-**State transition debounce (`_set_probe_state`):** any state change requires `_rsqm_probe_state_min_samples` consecutive samples (= `rsqm_probe_state_min_s × fs`, default 0.2 s = 100 samples @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events. Runtime-configurable via `setRsqmProbeStateMinS()`.
+**State transition debounce (`_rsqm_set_probe_state`):** any state change requires `_rsqm_probe_state_min_samples` consecutive samples (= `rsqm_probe_state_min_s × fs`, default 0.2 s = 100 samples @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events. Runtime-configurable via `setRsqmProbeStateMinS()`.
 
 #### 5.6.3 DiagCode
 
@@ -987,7 +987,7 @@ Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_A
 | 0x0800 | `AFE_DIAG_LED1SC_ALM` | LED1 short-circuit |
 | 0x1000 | `AFE_DIAG_COMMON_MODE_ALM` | Common-mode voltage out of range |
 
-**Bits 13+ — RSQM software (updated continuously at 500 Hz by `_update_rsqm()`):**
+**Bits 13+ — RSQM software (updated continuously at 500 Hz by `_rsqm_update()`):**
 
 | Bit | Constant | Condition |
 |---|---|---|
@@ -995,7 +995,7 @@ Estimated values (need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_A
 | 0x4000 | `RSQM_DIAG_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
 | 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
 
-**Bit 16 — HGAC (updated by `_update_hgac()`, see §5.8):**
+**Bit 16 — HGAC (updated by `_hgac_update()`, see §5.8):**
 
 | Bit | Constant | Condition |
 |---|---|---|
@@ -1018,7 +1018,7 @@ rsqi = 0  otherwise
 
 A dedicated internal FreeRTOS task (`incunest_diag`, low priority) calls `runAfeDiagnostics()` autonomously in two situations:
 
-1. **On probe state change** — `_set_probe_state()` sends `xTaskNotify` when a new state is committed. The task wakes immediately and runs diagnostics (regardless of state, including APPLIED).
+1. **On probe state change** — `_rsqm_set_probe_state()` sends `xTaskNotify` when a new state is committed. The task wakes immediately and runs diagnostics (regardless of state, including APPLIED).
 2. **Periodic timeout** — `xTaskNotifyWait` times out every `rsqm_diag_period_ms` (default 5000 ms). Diagnostics run only if `probe_state ≠ PROBE_APPLIED`, to avoid disrupting HR/SpO2 acquisition with the 10 ms blackout window.
 
 The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `INCUNEST_AFE4490_DIAG_TASK_PRIORITY` (= main task priority − 2).
@@ -1031,7 +1031,7 @@ The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `
 
 **Status (v0.37): Phase 1 implemented — RF-only saturation guard with descent, no ascent yet
 (manual recovery). Disabled by default (`hgac_enable = false`).** Runs in `_process_sample()`
-immediately after `_update_rsqm()`, once per sample at 500 Hz. This is the first of a planned
+immediately after `_rsqm_update()`, once per sample at 500 Hz. This is the first of a planned
 multi-phase rollout (full design, closed architecturally, in the project's design notes):
 Phase 1 (this), Phase 2 (RF ascent with prediction/hysteresis), Phase 3 (telemetry closure),
 Phase 4 (ILED actuation + thermal envelope), Phases 5-7 (feed-forward, P² estimator, UI —
@@ -1111,12 +1111,12 @@ changes (Phase 4) do NOT get this treatment — ambient current does not scale w
 (asymmetric residual, tracked separately) — so ILED changes must instead gate SpO2 invalid
 during settling, not rescale.
 
-**Concurrency:** `_update_hgac()` and everything it calls take no lock of their own — they
+**Concurrency:** `_hgac_update()` and everything it calls take no lock of their own — they
 run from `_process_sample()`, already under `_state_mutex`. `_hgac_descend_rf()` calls
 `setTIAGainLED1/2()`, which take `_spi_mutex` internally; nesting `_spi_mutex` inside the
 caller's `_state_mutex` is safe because no code path acquires `_spi_mutex` first and then
 blocks on `_state_mutex`. **Contract:** the `_hgac_*` actuation primitives must only ever be
-called from `_update_hgac()` — never directly from application code or another task.
+called from `_hgac_update()` — never directly from application code or another task.
 
 #### 5.8.5 Parameters (see §10.9) and telemetry
 
@@ -1130,7 +1130,7 @@ from new `AFE4490DebugData` fields `hgac_rf_led1`/`hgac_rf_led2`/`hgac_alarm_gai
 #### 5.8.6 Known limitation carried into Phase 1 verification
 
 The `HGAC_DIAG_GAIN_FLOOR` bit and `AFE4490Data::diag_code` are refreshed at the end of
-`_update_hgac()` (`_current_data.diag_code = _diag_code`) specifically because `_update_rsqm()`
+`_hgac_update()` (`_current_data.diag_code = _diag_code`) specifically because `_rsqm_update()`
 (which runs first) already snapshots the pre-HGAC `_diag_code` into `_current_data` — without
 this second refresh, HGAC's bit would lag the published frame by exactly one sample.
 
@@ -1299,10 +1299,10 @@ $TIMING,hr1_mean,hr1_max,hr2_mean,hr2_max,hr3_mean,hr3_max,
 
 | Field | What is measured |
 |---|---|
-| `hr1_mean/max` | `_update_hr1()` execution time |
-| `hr2_mean/max` | `_update_hr2()` execution time (biquad + autocorr combined) |
-| `hr3_mean/max` | `_update_hr3()` execution time (LP filter + FFT + HPS combined) |
-| `spo2_mean/max` | `_update_spo2()` execution time |
+| `hr1_mean/max` | `_hr1_update()` execution time |
+| `hr2_mean/max` | `_hr2_update_sample()` execution time (fast path: biquad + decimate + buffer; autocorr itself is timed separately by `hr2_compute_mean/max`, Task B) |
+| `hr3_mean/max` | `_hr3_update_sample()` execution time (fast path: LP filter + decimate + buffer; FFT+HPS itself is timed separately by `hr3_compute_mean/max`, Task C) |
+| `spo2_mean/max` | `_spo2_update()` execution time |
 | `cycle_mean/max` | Full sample cycle: SPI burst-read (4 channels) + SW subtraction + `_process_sample()` |
 
 **Budget:** cycle budget = 2000 µs (1 sample period at 500 Hz).
@@ -1347,7 +1347,7 @@ To compile `incunest_afe4490.cpp` without Arduino, SPI, or FreeRTOS, define `INC
 1. Replaces all platform includes with `incunest_afe4490_platform_stub.h` (type stubs only).
 2. Disables `begin()`, `stop()`, `getData()`, the ISR, and all FreeRTOS objects.
 3. Implicitly enables `UNIT_TEST`, exposing `test_feed_*` / `test_hr*` / `test_spo2*` methods.
-4. Keeps all algorithm methods (`_update_hr1`, `_update_hr2`, `_update_hr3`, `_update_spo2`, `_reset_algorithms`, `_recalc_rate_params`, `_biquad_process`) fully functional.
+4. Keeps all algorithm methods (`_hr1_update`, `_hr2_update_for_test`, `_hr3_update_for_test`, `_spo2_update`, `_reset_algorithms`, `_recalc_rate_params`, `_biquad_process`) fully functional.
 
 `INCUNEST_OFFLINE` is never defined in firmware builds. It is only used by the offline runner and any future native unit tests.
 
@@ -1406,7 +1406,7 @@ for each CSV file:
     write summary row to batch_summary.csv
 ```
 
-HR2 and HR3 are driven via `test_feed_hr2()` / `test_feed_hr3()`, which call the synchronous `_update_hr2()` / `_update_hr3()` paths (same computation as the async tasks, without FreeRTOS signalling). Results are available via `test_hr2()`, `test_hr2_sqi()`, etc. after each call.
+HR2 and HR3 are driven via `test_feed_hr2()` / `test_feed_hr3()`, which call the synchronous `_hr2_update_for_test()` / `_hr3_update_for_test()` paths (same computation as the async tasks, without FreeRTOS signalling). Results are available via `test_hr2()`, `test_hr2_sqi()`, etc. after each call.
 
 ### 9.8 Output files
 
@@ -1779,7 +1779,7 @@ Three distinct hardware states are distinguishable from the raw ADC channel patt
 
 **Detection method:** see §5.6. DISCONNECTED is instantaneous; NOT_APPLIED/APPLIED use optical transmittance (single threshold + 50-sample debounce); APPLIED uses 750-sample EMA warmup for RSQM_DIAG_SIGNAL_WEAK.
 
-> These states are computed by RSQM (_update_rsqm) and gate HGAC operation: HGAC must not act in `PROBE_DISCONNECTED` or `PROBE_NOT_APPLIED` states.
+> These states are computed by RSQM (_rsqm_update) and gate HGAC operation: HGAC must not act in `PROBE_DISCONNECTED` or `PROBE_NOT_APPLIED` states.
 
 ---
 
@@ -1834,6 +1834,26 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.43-experiment | **Naming cleanup, no behavior change: `_verb_algorithm()` → `_algorithm_verb()`**|
+|         | across the whole class, matching the prefix convention already used by     |
+|         | every member variable (`_hr2_buf`, `_spo2_a`, `_rsqm_led1_sub_ema`, ...)    |
+|         | and by the HR2/HR3 task methods (`_hr2_task_body`). 15 renames: `_update_rsqm`|
+|         | → `_rsqm_update`; `_update_hgac` → `_hgac_update`; `_update_spo2` →         |
+|         | `_spo2_update`; `_update_hr1` → `_hr1_update`; `_update_hr2_sample` →       |
+|         | `_hr2_update_sample`; `_linearize_hr2` → `_hr2_linearize`; `_compute_hr2`   |
+|         | → `_hr2_compute`; `_update_hr2` (test-only sync wrapper) →                 |
+|         | `_hr2_update_for_test` (name now signals it is never called from           |
+|         | production — see §5.3); `_hr2_calc_sem` → `_hr2_compute_sem` (names the    |
+|         | function it gates, `_hr2_compute()`, instead of a generic "calc"); same    |
+|         | 5 renames mirrored for HR3 (`_update_hr3_sample`/`_linearize_hr3`/         |
+|         | `_compute_hr3`/`_update_hr3`/`_hr3_calc_sem`); `_set_probe_state` →        |
+|         | `_rsqm_set_probe_state` (RSQM's debounce gate — previously had no          |
+|         | algorithm prefix at all). Pure rename: no signatures, semantics, or        |
+|         | timings changed. Verified: 36/36 native tests (`test_biquad` pre-existing  |
+|         | unrelated failure), ESP32-S3 V16 build OK (18.4% RAM / 30.1% flash).       |
+|         | Living spec sections (§1, §3d, §5, §9, §11) updated to the new names;      |
+|         | this table (historical record) keeps the old names as they were at each   |
+|         | past version. Spec §1.3, §3d, §5.1-§5.4, §5.6-§5.8, §9.3/§9.7, §11, §14.  |
 | v0.42-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): same `probe_state`  |
 |         | design as v0.41's SpO2 applied to HR1/HR2/HR3.** `_update_hr1(float ir,    |
 |         | ProbeState probe_state)`, `_update_hr2_sample(...)`, `_update_hr3_sample(  |

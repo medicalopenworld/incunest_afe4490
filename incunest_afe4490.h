@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.39-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.43-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.39-experiment"
+#define INCUNEST_AFE4490_VERSION "0.43-experiment"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -92,7 +92,7 @@ constexpr uint32_t AFE_DIAG_LED1SC_ALM      = 0x00000800UL;  // bit 11 — LED1 
 constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — common-mode voltage out of range
 constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
 //
-// Bits 13+: RSQM software checks — set continuously by _update_rsqm() at 500 Hz.
+// Bits 13+: RSQM software checks — set continuously by _rsqm_update() at 500 Hz.
 // ANTICIPATORY CODE (2026-07-11): these flags currently have NO programmatic consumer
 // beyond the aggregate rsqi gate (diag_code == 0) and human inspection in pulsenest_lab.
 // Their intended consumer is HGAC, which may end up doing its own internal checks and
@@ -102,7 +102,7 @@ constexpr uint32_t RSQM_DIAG_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient 
 constexpr uint32_t RSQM_DIAG_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
 constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 //
-// Bit 16: HGAC (Hardware Gain Control) — set by _update_hgac(), first real producer of
+// Bit 16: HGAC (Hardware Gain Control) — set by _hgac_update(), first real producer of
 // RSQM_DIAG_HW_SETTLING above. HGAC_DIAG_GAIN_FLOOR: RF at the lowest LUT level (10k) and
 // the channel is still saturating — ILED actuation not implemented yet (Phase 1: RF-only
 // descent), so this is HGAC's "excessive ambient light" alarm for v1.
@@ -829,21 +829,21 @@ private:
                                              int32_t aled1, int32_t aled2) const;
 
     // RSQM — runs after _compute_analog_state(); fills rsqi, diag_code, probe_state
-    void _update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
+    void _rsqm_update(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                       int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as);
-    void _set_probe_state(ProbeState requested); // debounce gate: commits state only after _rsqm_probe_state_min_samples consecutive requests
+    void _rsqm_set_probe_state(ProbeState requested); // debounce gate: commits state only after _rsqm_probe_state_min_samples consecutive requests
 
-    // HGAC — runs after _update_rsqm(); Phase 1: RF-only descent (see incunest_afe4490_spec.md §5.8).
+    // HGAC — runs after _rsqm_update(); Phase 1: RF-only descent (see incunest_afe4490_spec.md §5.8).
     // Called from _process_sample(), which already holds _state_mutex — these methods take no
     // lock of their own; _hgac_descend_rf() nests _spi_mutex (via the existing setTIAGainLED1/2()
     // setters) inside the caller's _state_mutex, which is safe because no code path acquires
     // _spi_mutex first and then blocks on _state_mutex.
-    void _update_hgac(const AFE4490AnalogState& as);
+    void _hgac_update(const AFE4490AnalogState& as);
     bool _hgac_gate_ok() const; // Gate G0 (A6): probe not disconnected, no HW_SETTLING, invalid fraction within bound
     void _hgac_check_descent(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
                               uint32_t& descent_count, bool& alarm_flag);
     // Atomic "change RF + arm settling" primitive. CONTRACT: only ever called from
-    // _update_hgac() (i.e. from inside _process_sample(), under _state_mutex) — never call
+    // _hgac_update() (i.e. from inside _process_sample(), under _state_mutex) — never call
     // this directly from application code or another task.
     // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2 now consumes
     // as.ot_led1/ot_led2 (gain-invariant by construction — v_tia_diff/RF cancels), so this no
@@ -855,7 +855,7 @@ private:
     // EXPERIMENT (OT-domain input): ot_ir/ot_red replace led1_sub/led2_sub as the
     // gain-invariant signal. probe_state is consumed (RSQM's classification), never computed
     // here — see incunest_afe4490.cpp for the reset-on-not-applied / division-safety design.
-    void _update_spo2(float ot_ir, float ot_red, ProbeState probe_state);
+    void _spo2_update(float ot_ir, float ot_red, ProbeState probe_state);
     // EXPERIMENT (OT-domain input): ir is now as.ot_led1 (float, gain-invariant) instead of
     // led1_sub (int32_t raw ambient-corrected counts). HR1/HR2/HR3 are periodicity/timing-based
     // (peak timing, autocorrelation lag, FFT dominant frequency) — a uniform gain scale does
@@ -865,23 +865,23 @@ private:
     // probe_state (RSQM's classification, consumed only — see spec §5.1/§5.2 for the design,
     // mirrored here from SpO2 v0.41): while != PROBE_APPLIED, internal state resets every
     // sample (idempotent, no stored "previous state") and hr/hr_sqi become NaN/0.
-    void _update_hr1(float ir, ProbeState probe_state);
+    void _hr1_update(float ir, ProbeState probe_state);
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
-    void _update_hr2(float ir, ProbeState probe_state);
-    void _update_hr3(float ir, ProbeState probe_state);
+    void _hr2_update_for_test(float ir, ProbeState probe_state);
+    void _hr3_update_for_test(float ir, ProbeState probe_state);
     void _reset_algorithms();
 
     // HR2 async split: fast per-sample path + linearise + compute. probe_state gate lives in
     // the fast path (shared by both the production call site and the sync test wrapper above):
     // while not applied, resets fast-path state and never triggers the slow path (Task B).
-    bool _update_hr2_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
-    void _linearize_hr2();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
-    void _compute_hr2();                          // autocorr on _hr2_seg → _hr2_result/_hr2_result_sqi
+    bool _hr2_update_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
+    void _hr2_linearize();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
+    void _hr2_compute();                          // autocorr on _hr2_seg → _hr2_result/_hr2_result_sqi
 
     // HR3 async split (same probe_state gate placement as HR2 above)
-    bool _update_hr3_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
-    void _linearize_hr3();                        // DC+Hann into _hr3_fft (call under _state_mutex)
-    void _compute_hr3();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
+    bool _hr3_update_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
+    void _hr3_linearize();                        // DC+Hann into _hr3_fft (call under _state_mutex)
+    void _hr3_compute();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
 
     // HR2/HR3 async FreeRTOS tasks
 #ifndef INCUNEST_OFFLINE
@@ -915,8 +915,8 @@ private:
     // Task A (_task_body) runs the fast per-sample path and signals Task B/C when
     // the computation window fires. Task B/C run the slow autocorr / FFT+HPS
     // outside the real-time loop, then write results under _state_mutex.
-    SemaphoreHandle_t _hr2_calc_sem;    // given by Task A, taken by Task B
-    SemaphoreHandle_t _hr3_calc_sem;    // given by Task A, taken by Task C
+    SemaphoreHandle_t _hr2_compute_sem;    // given by Task A, taken by Task B
+    SemaphoreHandle_t _hr3_compute_sem;    // given by Task A, taken by Task C
     TaskHandle_t      _hr2_task_handle;
     TaskHandle_t      _hr3_task_handle;
     TaskHandle_t      _diag_task_handle;
@@ -997,7 +997,7 @@ private:
     //           NOTE: future alternative — bandpass-filtered AC² instead of DC-subtraction AC²
     //   count = sample count used directly for warmup (ir_ema/red_ema always updated
     //           together, so either's count works — no separate _spo2_sample_count needed).
-    //           Naturally restarts warmup after a reset (see _update_spo2() in the .cpp).
+    //           Naturally restarts warmup after a reset (see _spo2_update() in the .cpp).
     //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
@@ -1066,7 +1066,7 @@ private:
     // ── RSQM state ────────────────────────────────────────────────────────────
     EmaChannel _rsqm_led1_sub_ema;     // EMA estimator for led1_sub (IR differential)
     EmaChannel _rsqm_led2_sub_ema;     // EMA estimator for led2_sub (RED differential)
-    ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _set_probe_state)
+    ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _rsqm_set_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint32_t       _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
     uint32_t       _rsqm_probe_state_min_samples { 100 };                        // cached from rsqm_probe_state_min_s × fs
@@ -1109,23 +1109,23 @@ public:
     using TestBiquadFilter = BiquadFilter;
 
     // HR1
-    void  test_feed_hr1(float ot_ir, ProbeState probe_state) { _update_hr1(ot_ir, probe_state); }
+    void  test_feed_hr1(float ot_ir, ProbeState probe_state) { _hr1_update(ot_ir, probe_state); }
     float test_hr1()                        { return _current_data.hr1; }
     float test_hr1_sqi()                    { return _current_data.hr1_sqi; }
 
     // HR2
-    void  test_feed_hr2(float ot_ir, ProbeState probe_state) { _update_hr2(ot_ir, probe_state); }
+    void  test_feed_hr2(float ot_ir, ProbeState probe_state) { _hr2_update_for_test(ot_ir, probe_state); }
     float test_hr2()                        { return _current_data.hr2; }
     float test_hr2_sqi()                    { return _current_data.hr2_sqi; }
 
     // HR3
-    void  test_feed_hr3(float ot_ir, ProbeState probe_state) { _update_hr3(ot_ir, probe_state); }
+    void  test_feed_hr3(float ot_ir, ProbeState probe_state) { _hr3_update_for_test(ot_ir, probe_state); }
     float test_hr3()                        { return _current_data.hr3; }
     float test_hr3_sqi()                    { return _current_data.hr3_sqi; }
 
     // SpO2
     void  test_feed_spo2(float ot_ir, float ot_red, ProbeState probe_state) {
-        _update_spo2(ot_ir, ot_red, probe_state);
+        _spo2_update(ot_ir, ot_red, probe_state);
     }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }

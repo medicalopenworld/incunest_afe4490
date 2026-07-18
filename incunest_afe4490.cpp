@@ -53,7 +53,7 @@ namespace {
     // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2's DC/AC now
     // live in OT units (~1e-5 typical, dimensionless A/A) instead of ADC counts (~1e5).
     // Presence detection (is there a real signal / finger applied?) is RSQM's responsibility
-    // alone (ProbeState, passed in) — _update_spo2() consumes it, does not compute its own.
+    // alone (ProbeState, passed in) — _spo2_update() consumes it, does not compute its own.
     // This removes two earlier mechanisms that both tried to do RSQM's job from inside SpO2:
     // the absolute-i_pd "no-finger" gate (spo2_min_i_pd_a — rarely caught an actual no-finger
     // condition: a transmittance probe with no finger shows HIGH OT, not low i_pd) and the
@@ -264,7 +264,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _diag_last_led1(0), _diag_last_led2(0),
       _diag_last_aled1(0), _diag_last_aled2(0),
       _diag_last_led1_sub(0), _diag_last_led2_sub(0),
-      _hr2_calc_sem(nullptr), _hr3_calc_sem(nullptr),
+      _hr2_compute_sem(nullptr), _hr3_compute_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _diag_task_handle(nullptr),
       _hr2_computing(false), _hr3_computing(false),
@@ -348,8 +348,8 @@ INCUNEST_AFE4490::~INCUNEST_AFE4490() {
     if (_hr3_task_handle)  { vTaskDelete(_hr3_task_handle);  _hr3_task_handle  = nullptr; }
     if (_data_queue)       vQueueDelete(_data_queue);
     if (_drdy_sem)         vSemaphoreDelete(_drdy_sem);
-    if (_hr2_calc_sem)     vSemaphoreDelete(_hr2_calc_sem);
-    if (_hr3_calc_sem)     vSemaphoreDelete(_hr3_calc_sem);
+    if (_hr2_compute_sem)     vSemaphoreDelete(_hr2_compute_sem);
+    if (_hr3_compute_sem)     vSemaphoreDelete(_hr3_compute_sem);
     if (_spi_mutex)        vSemaphoreDelete(_spi_mutex);
     if (_state_mutex)      vSemaphoreDelete(_state_mutex);
     if (_g_instance == this) _g_instance = nullptr;
@@ -375,11 +375,11 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
     _spi_mutex   = xSemaphoreCreateMutex();
     _state_mutex = xSemaphoreCreateMutex();
     _data_queue  = xQueueCreate(INCUNEST_AFE4490_QUEUE_SIZE, queue_item_size);
-    _hr2_calc_sem = xSemaphoreCreateBinary();
-    _hr3_calc_sem = xSemaphoreCreateBinary();
+    _hr2_compute_sem = xSemaphoreCreateBinary();
+    _hr3_compute_sem = xSemaphoreCreateBinary();
 
     if (!_drdy_sem || !_spi_mutex || !_state_mutex || !_data_queue ||
-        !_hr2_calc_sem || !_hr3_calc_sem) {
+        !_hr2_compute_sem || !_hr3_compute_sem) {
         ESP_LOGE(TAG, "FreeRTOS object creation failed");
         return;
     }
@@ -1038,8 +1038,8 @@ void INCUNEST_AFE4490::stop() {
     // Delete FreeRTOS objects (mutexes last since we may hold _spi_mutex)
     if (_data_queue)   { vQueueDelete(_data_queue);          _data_queue   = nullptr; }
     if (_drdy_sem)     { vSemaphoreDelete(_drdy_sem);        _drdy_sem     = nullptr; }
-    if (_hr2_calc_sem) { vSemaphoreDelete(_hr2_calc_sem);    _hr2_calc_sem = nullptr; }
-    if (_hr3_calc_sem) { vSemaphoreDelete(_hr3_calc_sem);    _hr3_calc_sem = nullptr; }
+    if (_hr2_compute_sem) { vSemaphoreDelete(_hr2_compute_sem);    _hr2_compute_sem = nullptr; }
+    if (_hr3_compute_sem) { vSemaphoreDelete(_hr3_compute_sem);    _hr3_compute_sem = nullptr; }
     if (_spi_mutex)    { vSemaphoreDelete(_spi_mutex);       _spi_mutex    = nullptr; }
     if (_state_mutex)  { vSemaphoreDelete(_state_mutex);     _state_mutex  = nullptr; }
 
@@ -1051,7 +1051,7 @@ void INCUNEST_AFE4490::stop() {
 
 // ── _diag_task_body() ─────────────────────────────────────────────────────────
 // Runs at low priority. Calls runAfeDiagnostics() on two triggers:
-//   1. xTaskNotify from _set_probe_state() when a state transition is committed.
+//   1. xTaskNotify from _rsqm_set_probe_state() when a state transition is committed.
 //   2. Periodic timeout (rsqm_diag_period_ms) when probe is not APPLIED.
 // In PROBE_APPLIED: timeout expires but no diagnostic is run (blackout would
 // disrupt HR/SpO2 acquisition). State-change notifications still trigger it.
@@ -1111,11 +1111,11 @@ void INCUNEST_AFE4490::_reset_algorithms() {
 
 // ── RSQM ──────────────────────────────────────────────────────────────────────
 
-// _set_probe_state — debounce gate for probe state transitions.
+// _rsqm_set_probe_state — debounce gate for probe state transitions.
 // Commits the requested state to _rsqm_probe_state only after
 // _rsqm_probe_state_min_samples consecutive calls with the same value.
 // Any change in the requested state resets the counter.
-void INCUNEST_AFE4490::_set_probe_state(ProbeState requested) {
+void INCUNEST_AFE4490::_rsqm_set_probe_state(ProbeState requested) {
     if (requested == _rsqm_probe_state_pending) {
         if (++_rsqm_probe_state_count >= _rsqm_probe_state_min_samples) {
             if (requested != _rsqm_probe_state && _diag_task_handle)
@@ -1218,7 +1218,7 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
 // Raw Signal Quality Monitor — runs once per sample at 500 Hz.
 // Updates EMA estimators, classifies ProbeState, computes DiagCode and RSQI.
 // Called at the top of _process_sample() after _compute_analog_state().
-void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
+void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                      int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
     // ── EMA estimators ─────────────────────────────────────────────────────────
     _rsqm_led1_sub_ema.update((float)led1_sub);
@@ -1241,7 +1241,7 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         fabsf((float)led2_sub) < rsqm_disconn_led_sub_thr;
 
     if (disconnected) {
-        _set_probe_state(ProbeState::PROBE_DISCONNECTED);
+        _rsqm_set_probe_state(ProbeState::PROBE_DISCONNECTED);
     } else {
         // OT is computed in _compute_analog_state() (as.ot_led1/ot_led2, A/A);
         // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
@@ -1253,8 +1253,8 @@ void INCUNEST_AFE4490::_update_rsqm(int32_t led1, int32_t led2, int32_t aled1, i
         const bool led2_not_applied = !as.otLed2Valid() || (as.ot_led2 > rsqm_ot_thr);
 
         // OR logic: one bad channel is enough to flag NOT_APPLIED.
-        // Debounce (N=50 samples) in _set_probe_state() replaces the former dual-threshold hysteresis.
-        _set_probe_state((led1_not_applied || led2_not_applied)
+        // Debounce (N=50 samples) in _rsqm_set_probe_state() replaces the former dual-threshold hysteresis.
+        _rsqm_set_probe_state((led1_not_applied || led2_not_applied)
                              ? ProbeState::PROBE_NOT_APPLIED
                              : ProbeState::PROBE_APPLIED);
     }
@@ -1311,7 +1311,7 @@ bool INCUNEST_AFE4490::_hgac_gate_ok() const {
 }
 
 // Atomic "change RF + arm settling" primitive.
-// CONTRACT: only ever called from _update_hgac() (i.e. from inside _process_sample(),
+// CONTRACT: only ever called from _hgac_update() (i.e. from inside _process_sample(),
 // under _state_mutex) — never call this directly from application code or another task.
 // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): no longer rescales the
 // SpO2 EmaChannel here — SpO2 now consumes as.ot_led1/ot_led2 (gain-invariant by
@@ -1363,7 +1363,7 @@ void INCUNEST_AFE4490::_hgac_check_descent(HgacColor color, float v_tia_diff_led
     _hgac_descend_rf(color, (AFE4490RF)((int)cur_rf - 1));
 }
 
-void INCUNEST_AFE4490::_update_hgac(const AFE4490AnalogState& as) {
+void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     if (!hgac_enable) return;
 
     // Gate G0 invalid-fraction estimator — independent of probe_state (see _hgac_gate_ok()).
@@ -1382,7 +1382,7 @@ void INCUNEST_AFE4490::_update_hgac(const AFE4490AnalogState& as) {
     _hgac_check_descent(HgacColor::RED, as.v_tia_diff_led2, as.v_tia_diff_aled2,
                         _hgac_descent_count_led2, _hgac_alarm_gain_floor_led2);
 
-    // _update_rsqm() (which runs before this) already copied the pre-HGAC _diag_code into
+    // _rsqm_update() (which runs before this) already copied the pre-HGAC _diag_code into
     // _current_data.diag_code — refresh it here so HGAC's bit is visible in the same
     // sample's published frame, not lagged by one sample.
     if (_hgac_alarm_gain_floor_led1 || _hgac_alarm_gain_floor_led2)
@@ -1776,10 +1776,10 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     const AFE4490AnalogState as = _compute_analog_state(led1, led2, aled1, aled2);
 
     // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
-    _update_rsqm(led1, led2, aled1, aled2, led1_sub, led2_sub, as);
+    _rsqm_update(led1, led2, aled1, aled2, led1_sub, led2_sub, as);
 
     // HGAC runs next — Phase 1: RF-only saturation guard + descent (see incunest_afe4490_spec.md §5.8)
-    _update_hgac(as);
+    _hgac_update(as);
 
     // Select PPG source
     float raw_ppg;
@@ -1806,20 +1806,20 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // the raw ambient-corrected counts (led1_sub) used before this experiment.
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
-    { uint64_t _t = esp_timer_get_time(); _update_spo2(as.ot_led1, as.ot_led2, _rsqm_probe_state); _ts_spo2.update(esp_timer_get_time() - _t); }
-    { uint64_t _t = esp_timer_get_time(); _update_hr1(as.ot_led1, _rsqm_probe_state);            _ts_hr1.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _spo2_update(as.ot_led1, as.ot_led2, _rsqm_probe_state); _ts_spo2.update(esp_timer_get_time() - _t); }
+    { uint64_t _t = esp_timer_get_time(); _hr1_update(as.ot_led1, _rsqm_probe_state);            _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
-    _update_spo2(as.ot_led1, as.ot_led2, _rsqm_probe_state);
-    _update_hr1(as.ot_led1, _rsqm_probe_state);
+    _spo2_update(as.ot_led1, as.ot_led2, _rsqm_probe_state);
+    _hr1_update(as.ot_led1, _rsqm_probe_state);
 #endif
 
     // HR2 fast path: filter + decimate + buffer; trigger Task B when interval fires
-    if (_update_hr2_sample(as.ot_led1, _rsqm_probe_state)) {
+    if (_hr2_update_sample(as.ot_led1, _rsqm_probe_state)) {
         if (!_hr2_computing) {
-            _linearize_hr2();
+            _hr2_linearize();
             _hr2_computing = true;
-            xSemaphoreGive(_hr2_calc_sem);
+            xSemaphoreGive(_hr2_compute_sem);
         }
     }
 
@@ -1829,11 +1829,11 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #endif
 
     // HR3 fast path: LP filter + decimate + buffer; trigger Task C when interval fires
-    if (_update_hr3_sample(as.ot_led1, _rsqm_probe_state)) {
+    if (_hr3_update_sample(as.ot_led1, _rsqm_probe_state)) {
         if (!_hr3_computing) {
-            _linearize_hr3();
+            _hr3_linearize();
             _hr3_computing = true;
-            xSemaphoreGive(_hr3_calc_sem);
+            xSemaphoreGive(_hr3_compute_sem);
         }
     }
 
@@ -1949,7 +1949,7 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // sentinel like -1.0f) fails safe: any consumer that forgets to check sqi and instead
 // compares/averages a NAN value gets a comparison that is always false / a propagated NAN,
 // rather than a plausible-looking-but-wrong number that could trigger a false alarm.
-void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, ProbeState probe_state) {
+void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         // Reset every sample while not applied (idempotent — cheap, no stored "previous
         // probe_state" needed): the EMAs are already clean the instant probe_state returns
@@ -2043,7 +2043,7 @@ void INCUNEST_AFE4490::_update_spo2(float ot_ir, float ot_red, ProbeState probe_
 // Threshold = 0.6 × running_max; refractory = _hr1_refractory_samples.
 // HR reported from average of 5 consecutive RR intervals.
 // probe_state: RSQM's classification, consumed only (mirrors SpO2 v0.41 — see spec §5.1/§5.2).
-void INCUNEST_AFE4490::_update_hr1(float ir, ProbeState probe_state) {
+void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         // Reset every sample while not applied (idempotent — no stored "previous state"
         // needed, fully self-contained). Also resets the MA buffer, which the original
@@ -2135,9 +2135,9 @@ void INCUNEST_AFE4490::_update_hr1(float ir, ProbeState probe_state) {
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
 // probe_state gate lives here (shared by the production call site and the sync test
-// wrapper _update_hr2()): while not applied, resets fast-path state every sample
+// wrapper _hr2_update_for_test()): while not applied, resets fast-path state every sample
 // (idempotent) and never triggers the slow path (Task B never even gets signalled).
-bool INCUNEST_AFE4490::_update_hr2_sample(float ir, ProbeState probe_state) {
+bool INCUNEST_AFE4490::_hr2_update_sample(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         _hr2_bpf.reset();
         _hr2_buf_idx = 0; _hr2_buf_count = 0;
@@ -2167,14 +2167,14 @@ bool INCUNEST_AFE4490::_update_hr2_sample(float ir, ProbeState probe_state) {
 
 // Linearize circular buffer (oldest → newest) into _hr2_seg.
 // Called under _state_mutex by Task A immediately before signalling Task B.
-void INCUNEST_AFE4490::_linearize_hr2() {
+void INCUNEST_AFE4490::_hr2_linearize() {
     for (int i = 0; i < hr2_buf_len; i++)
         _hr2_seg[i] = _hr2_buf[(_hr2_buf_idx + i) % hr2_buf_len];
 }
 
 // Slow path: autocorrelation on _hr2_seg → _hr2_result / _hr2_result_sqi.
 // Called by Task B. Reads only _hr2_seg (no other shared state written).
-void INCUNEST_AFE4490::_compute_hr2() {
+void INCUNEST_AFE4490::_hr2_compute() {
     float acorr0 = 0.0f;
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
     if (acorr0 < hr2_ot_energy_eps) { _hr2_result_sqi = 0.0f; return; }
@@ -2230,10 +2230,10 @@ void INCUNEST_AFE4490::_compute_hr2() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr2(float ir, ProbeState probe_state) {
-    if (!_update_hr2_sample(ir, probe_state)) return;
-    _linearize_hr2();
-    _compute_hr2();
+void INCUNEST_AFE4490::_hr2_update_for_test(float ir, ProbeState probe_state) {
+    if (!_hr2_update_sample(ir, probe_state)) return;
+    _hr2_linearize();
+    _hr2_compute();
     _current_data.hr2     = (_hr2_result_sqi > 0.0f) ? _hr2_result : NAN;
     _current_data.hr2_sqi = _hr2_result_sqi;
 }
@@ -2243,9 +2243,9 @@ void INCUNEST_AFE4490::_update_hr2(float ir, ProbeState probe_state) {
 // Fast path: called every raw sample from Task A.
 // Returns true when the computation window fires (buffer full, interval elapsed).
 // probe_state gate lives here (shared by the production call site and the sync test
-// wrapper _update_hr3()): while not applied, resets fast-path state every sample
+// wrapper _hr3_update_for_test()): while not applied, resets fast-path state every sample
 // (idempotent) and never triggers the slow path (Task C never even gets signalled).
-bool INCUNEST_AFE4490::_update_hr3_sample(float ir, ProbeState probe_state) {
+bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         _hr3_bpf.reset();
         _hr3_buf_idx = 0; _hr3_buf_count = 0;
@@ -2275,7 +2275,7 @@ bool INCUNEST_AFE4490::_update_hr3_sample(float ir, ProbeState probe_state) {
 
 // Linearize circular buffer + DC removal + Hann window → complex FFT input in _hr3_fft.
 // Called under _state_mutex by Task A immediately before signalling Task C.
-void INCUNEST_AFE4490::_linearize_hr3() {
+void INCUNEST_AFE4490::_hr3_linearize() {
     float mean = 0.0f;
     for (int i = 0; i < hr3_buf_len; i++)
         mean += _hr3_buf[(_hr3_buf_idx + i) % hr3_buf_len];
@@ -2290,7 +2290,7 @@ void INCUNEST_AFE4490::_linearize_hr3() {
 
 // Slow path: FFT + HPS on _hr3_fft → _hr3_result / _hr3_result_sqi.
 // Called by Task C. Reads/writes only _hr3_fft and result floats (no other shared state).
-void INCUNEST_AFE4490::_compute_hr3() {
+void INCUNEST_AFE4490::_hr3_compute() {
     // ── In-place radix-2 DIT FFT ──
     _fft_r2(_hr3_fft, hr3_buf_len);
 
@@ -2396,10 +2396,10 @@ void INCUNEST_AFE4490::_compute_hr3() {
 }
 
 // Synchronous wrapper kept for unit-test compatibility.
-void INCUNEST_AFE4490::_update_hr3(float ir, ProbeState probe_state) {
-    if (!_update_hr3_sample(ir, probe_state)) return;
-    _linearize_hr3();
-    _compute_hr3();
+void INCUNEST_AFE4490::_hr3_update_for_test(float ir, ProbeState probe_state) {
+    if (!_hr3_update_sample(ir, probe_state)) return;
+    _hr3_linearize();
+    _hr3_compute();
     _current_data.hr3     = (_hr3_result_sqi > 0.0f) ? _hr3_result : NAN;
     _current_data.hr3_sqi = _hr3_result_sqi;
 }
@@ -2411,18 +2411,18 @@ void INCUNEST_AFE4490::_hr2_task_trampoline(void* pv) {
     vTaskDelete(nullptr);
 }
 
-// Blocks on _hr2_calc_sem. When signalled by Task A:
+// Blocks on _hr2_compute_sem. When signalled by Task A:
 //   1. Runs autocorrelation on the already-linearized _hr2_seg snapshot.
 //   2. Takes _state_mutex to write results into _current_data.
 //   3. Clears _hr2_computing so Task A knows the slot is free.
 void INCUNEST_AFE4490::_hr2_task_body() {
     for (;;) {
-        xSemaphoreTake(_hr2_calc_sem, portMAX_DELAY);
+        xSemaphoreTake(_hr2_compute_sem, portMAX_DELAY);
 
 #if INCUNEST_TIMING_STATS
-        { uint64_t _t = esp_timer_get_time(); _compute_hr2(); _ts_hr2_compute.update(esp_timer_get_time() - _t); }
+        { uint64_t _t = esp_timer_get_time(); _hr2_compute(); _ts_hr2_compute.update(esp_timer_get_time() - _t); }
 #else
-        _compute_hr2();  // reads _hr2_seg only — no shared-state write
+        _hr2_compute();  // reads _hr2_seg only — no shared-state write
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
@@ -2442,18 +2442,18 @@ void INCUNEST_AFE4490::_hr3_task_trampoline(void* pv) {
     vTaskDelete(nullptr);
 }
 
-// Blocks on _hr3_calc_sem. When signalled by Task A:
+// Blocks on _hr3_compute_sem. When signalled by Task A:
 //   1. Runs FFT + HPS on the already-prepared _hr3_fft buffer.
 //   2. Takes _state_mutex to write results into _current_data.
 //   3. Clears _hr3_computing so Task A knows the slot is free.
 void INCUNEST_AFE4490::_hr3_task_body() {
     for (;;) {
-        xSemaphoreTake(_hr3_calc_sem, portMAX_DELAY);
+        xSemaphoreTake(_hr3_compute_sem, portMAX_DELAY);
 
 #if INCUNEST_TIMING_STATS
-        { uint64_t _t = esp_timer_get_time(); _compute_hr3(); _ts_hr3_compute.update(esp_timer_get_time() - _t); }
+        { uint64_t _t = esp_timer_get_time(); _hr3_compute(); _ts_hr3_compute.update(esp_timer_get_time() - _t); }
 #else
-        _compute_hr3();  // reads/writes _hr3_fft only — no other shared state
+        _hr3_compute();  // reads/writes _hr3_fft only — no other shared state
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
