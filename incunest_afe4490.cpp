@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.39-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.46-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -108,7 +108,7 @@ namespace {
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
     // 2097151 = 2^21-1: per datasheet Table 7, positive full-scale code maps to +1.2 V.
     // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_diff_volt = adc_value * 1.2f / 2097151.0f.
-    // Physical thresholds (fs = V_OD(fs) 1.0 V, empirical lin 1.8 V) live in
+    // Physical thresholds (fs = TIA full-scale differential 1.0 V, empirical lin 1.8 V) live in
     // AFE4490AnalogState (kVTiaDiffFs / kVTiaDiffLin) since v0.35 — physics belongs to
     // the reconstruction layer; only HGAC actuation POLICY stays here.
     // hgac_v_tia_diff_thr/ideal are now runtime-tunable AFE4490Config fields (promoted
@@ -317,10 +317,9 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _rsqm_led2_sub_ema{},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0),
-      _hgac_descent_min_samples(0),
-      _hgac_descent_count_led1(0),
-      _hgac_descent_count_led2(0),
-      _hgac_invalid_ema{},
+      _hgac_tiasat_min_samples(0),
+      _hgac_tiasat_count_led1(0),
+      _hgac_tiasat_count_led2(0),
       _hgac_alarm_gain_floor_led1(false),
       _hgac_alarm_gain_floor_led2(false),
       _debug_enabled(false)
@@ -878,16 +877,10 @@ void INCUNEST_AFE4490::setHgacVTiaDiffThr(float v) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHgacDescentPersistS(float s) {
+void INCUNEST_AFE4490::setHgacTiasatPersistS(float s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    hgac_descent_persist_s = s;
+    hgac_tiasat_persist_s = s;
     _recalc_rate_params();
-    if (_initialized) xSemaphoreGive(_state_mutex);
-}
-
-void INCUNEST_AFE4490::setHgacGateInvalidFracMax(float v) {
-    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    hgac_gate_invalid_frac_max = v;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -956,9 +949,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hgac_enable                 = hgac_enable;
     cfg.hgac_v_tia_diff_thr          = hgac_v_tia_diff_thr;
     cfg.hgac_v_tia_diff_ideal        = hgac_v_tia_diff_ideal;
-    cfg.hgac_descent_persist_s       = hgac_descent_persist_s;
-    cfg.hgac_gate_invalid_frac_max   = hgac_gate_invalid_frac_max;
-    cfg.hgac_gate_window_s           = hgac_gate_window_s;
+    cfg.hgac_tiasat_persist_s        = hgac_tiasat_persist_s;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
 #endif
@@ -1052,15 +1043,18 @@ void INCUNEST_AFE4490::stop() {
 // ── _diag_task_body() ─────────────────────────────────────────────────────────
 // Runs at low priority. Calls runAfeDiagnostics() on two triggers:
 //   1. xTaskNotify from _rsqm_set_probe_state() when a state transition is committed.
-//   2. Periodic timeout (rsqm_diag_period_ms) when probe is not APPLIED.
-// In PROBE_APPLIED: timeout expires but no diagnostic is run (blackout would
-// disrupt HR/SpO2 acquisition). State-change notifications still trigger it.
+//   2. Periodic timeout (rsqm_diag_period_ms) when probe is not APPLIED and not SATURATING.
+// In PROBE_APPLIED or PROBE_SATURATING: timeout expires but no diagnostic is run (blackout
+// would disrupt HR/SpO2 acquisition — and during PROBE_SATURATING specifically, it would also
+// disrupt HGAC's attempt to clear the saturation with a real patient possibly connected).
+// State-change notifications still trigger it regardless of the resulting state.
 void INCUNEST_AFE4490::_diag_task_body() {
     const TickType_t period = pdMS_TO_TICKS(rsqm_diag_period_ms);
     while (true) {
         const bool notified = (xTaskNotifyWait(0, 0, nullptr, period) == pdTRUE);
         (void)notified; // wake reason logged implicitly via probe_state in diag_code
-        if (_rsqm_probe_state != ProbeState::PROBE_APPLIED)
+        if (_rsqm_probe_state != ProbeState::PROBE_APPLIED
+         && _rsqm_probe_state != ProbeState::PROBE_SATURATING)
             runAfeDiagnostics();
     }
 }
@@ -1098,9 +1092,8 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _rsqm_led2_sub_ema.reset();
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
-    _hgac_descent_count_led1 = 0;
-    _hgac_descent_count_led2 = 0;
-    _hgac_invalid_ema.reset();
+    _hgac_tiasat_count_led1 = 0;
+    _hgac_tiasat_count_led2 = 0;
     _hgac_alarm_gain_floor_led1 = false;
     _hgac_alarm_gain_floor_led2 = false;
     _current_data = AFE4490Data{};
@@ -1245,18 +1238,30 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     } else {
         // OT is computed in _compute_analog_state() (as.ot_led1/ot_led2, A/A);
         // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
-        // Explicit RSQM policy (was hidden in the former 100.0 sentinel): an OT whose
-        // source channels are not CH_CLEAN (ADC saturated or TIA beyond linearity) is
-        // treated as NOT_APPLIED — with the probe applied and RSQM-calibrated hardware,
-        // saturation is not an expected condition (HGAC will own that case).
-        const bool led1_not_applied = !as.otLed1Valid() || (as.ot_led1 > rsqm_ot_thr);
-        const bool led2_not_applied = !as.otLed2Valid() || (as.ot_led2 > rsqm_ot_thr);
+        // Two DISTINCT causes, checked separately (2026-07-24 — were previously collapsed
+        // into a single NOT_APPLIED via OR, see spec §5.6.2 changelog):
+        //  (a) channel not CH_VALID_RANGE (ADC saturated or TIA beyond linearity) — the OT value
+        //      itself is not trustworthy here, regardless of what it reads → PROBE_SATURATING.
+        //      This can happen with or without a patient (e.g. an unapplied probe under a
+        //      phototherapy lamp), so it must NOT be folded into "no tissue" (NOT_APPLIED).
+        //  (b) channel is CH_VALID_RANGE but OT reads above threshold — a trustworthy measurement
+        //      that genuinely indicates no tissue in the optical path → PROBE_NOT_APPLIED.
+        const bool led1_saturating = !as.otLed1Valid();
+        const bool led2_saturating = !as.otLed2Valid();
 
-        // OR logic: one bad channel is enough to flag NOT_APPLIED.
-        // Debounce (N=50 samples) in _rsqm_set_probe_state() replaces the former dual-threshold hysteresis.
-        _rsqm_set_probe_state((led1_not_applied || led2_not_applied)
-                             ? ProbeState::PROBE_NOT_APPLIED
-                             : ProbeState::PROBE_APPLIED);
+        // OR logic per cause (one bad channel is enough); saturation takes priority over the
+        // threshold check (a saturated channel's OT value can't be trusted to classify NOT_
+        // APPLIED vs APPLIED in the first place). Debounce (N=50 samples, same for all
+        // transitions) lives in _rsqm_set_probe_state().
+        ProbeState requested;
+        if (led1_saturating || led2_saturating) {
+            requested = ProbeState::PROBE_SATURATING;
+        } else if (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr) {
+            requested = ProbeState::PROBE_NOT_APPLIED;
+        } else {
+            requested = ProbeState::PROBE_APPLIED;
+        }
+        _rsqm_set_probe_state(requested);
     }
 
     // ── DiagCode ───────────────────────────────────────────────────────────────
@@ -1296,18 +1301,21 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
 // oversight. See incunest_afe4490_spec.md §5.8 for the full design.
 
 bool INCUNEST_AFE4490::_hgac_gate_ok() const {
-    // Gate G0 (A6) as actually implemented: gated on "!= PROBE_DISCONNECTED" rather than
-    // the literal "== PROBE_APPLIED" from the closed design axiom. Reason: RSQM's
-    // PROBE_NOT_APPLIED classifier also fires when a channel's optical-transmittance ratio
-    // becomes invalid due to clipping (otLed1Valid()/otLed2Valid() require CH_CLEAN) — i.e.
-    // exactly the saturation condition HGAC exists to correct. Gating on PROBE_APPLIED
-    // literally would let a fast/severe saturation event flip probe_state to NOT_APPLIED
-    // and then block the very RF descent that would clear it (a deadlock). PROBE_DISCONNECTED's
-    // criterion (all 4 channels near zero) is structurally incompatible with saturation, so
-    // excluding only that state is safe and avoids the deadlock.
-    return _rsqm_probe_state != ProbeState::PROBE_DISCONNECTED
-        && !(_diag_code & RSQM_DIAG_HW_SETTLING)
-        && _hgac_invalid_ema.mean <= hgac_gate_invalid_frac_max;
+    // Gate G0 (A6), 2026-07-24: RSQM now reports PROBE_SATURATING as a state distinct from
+    // PROBE_NOT_APPLIED (see enum ProbeState, _rsqm_update()) — a channel that's saturated/
+    // off-spec (!CH_VALID_RANGE) no longer gets folded into "no tissue". This lets the gate go back
+    // to the design axiom's literal intent (act during normal operation) while ALSO acting on
+    // genuine saturation, without the old deadlock: previously, gating on "== PROBE_APPLIED"
+    // would let a saturation event flip probe_state to (the old, overloaded) NOT_APPLIED and
+    // then block the very RF step-down that would clear it. Now saturation has its own state,
+    // so both cases are named explicitly instead of reasoning about which NOT_APPLIED causes
+    // are "safe" to include. Excludes plain PROBE_NOT_APPLIED (probe idle, no patient, not
+    // saturating) — previously included via "!= PROBE_DISCONNECTED", which let HGAC drive RF
+    // down on an unrelated optical event (e.g. a phototherapy lamp) while nobody was connected,
+    // with no ascent (Phase 1) to recover before a real patient arrived.
+    return (_rsqm_probe_state == ProbeState::PROBE_APPLIED
+         || _rsqm_probe_state == ProbeState::PROBE_SATURATING)
+        && !(_diag_code & RSQM_DIAG_HW_SETTLING);
 }
 
 // Atomic "change RF + arm settling" primitive.
@@ -1317,7 +1325,7 @@ bool INCUNEST_AFE4490::_hgac_gate_ok() const {
 // SpO2 EmaChannel here — SpO2 now consumes as.ot_led1/ot_led2 (gain-invariant by
 // construction: v_tia_diff/RF cancels), so an RF change no longer creates a discontinuity in
 // its input. See incunest_afe4490_spec.md §5.1/§5.8.
-void INCUNEST_AFE4490::_hgac_descend_rf(HgacColor color, AFE4490RF new_rf) {
+void INCUNEST_AFE4490::_hgac_step_rf_down(HgacColor color, AFE4490RF new_rf) {
     const AFE4490RF old_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
     if (new_rf == old_rf) return;
     if (color == HgacColor::IR) {
@@ -1334,53 +1342,56 @@ void INCUNEST_AFE4490::_hgac_descend_rf(HgacColor color, AFE4490RF new_rf) {
 }
 
 // One saturation-guard channel pair (LED phase + its ambient phase share one RF domain,
-// A4/O10) → debounced descent by one LUT step, or the gain-floor alarm if already at RF_10K.
-void INCUNEST_AFE4490::_hgac_check_descent(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
-                                            uint32_t& descent_count, bool& alarm_flag) {
-    const bool saturating = (v_tia_diff_led  > hgac_v_tia_diff_thr) ||
-                             (v_tia_diff_aled > hgac_v_tia_diff_thr);
-    if (!saturating) {
-        descent_count = 0;
-        alarm_flag    = false;
+// A4/O10) → debounced TIA-saturation (TIASAT) check: steps RF down one LUT level once TIASAT
+// has persisted long enough, or raises the gain-floor alarm if already at RF_10K.
+void INCUNEST_AFE4490::_hgac_check_tiasat(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
+                                            uint32_t& tiasat_count, bool& alarm_flag) {
+    const bool tiasat = (v_tia_diff_led  > hgac_v_tia_diff_thr) ||
+                        (v_tia_diff_aled > hgac_v_tia_diff_thr);
+    if (!tiasat) {
+        tiasat_count = 0;
+        alarm_flag   = false;
         return;
     }
+
+    // O8.1 debounce: require N consecutive TIASAT samples before acting (either alarming
+    // or stepping down), to avoid a one-sample blip triggering either. Shared by both outcomes
+    // below. Counter is capped at the threshold (not left to grow unbounded while saturated).
+    if (tiasat_count < _hgac_tiasat_min_samples) ++tiasat_count;
+    if (tiasat_count < _hgac_tiasat_min_samples) return;
 
     const AFE4490RF cur_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
     if (cur_rf == AFE4490RF::RF_10K) {
-        // O8.1 debounce still applies before alarming, to avoid a one-sample blip alarming.
-        // Counter is capped at the threshold (not left to grow unbounded while saturated).
-        if (descent_count < _hgac_descent_min_samples) ++descent_count;
-        if (descent_count >= _hgac_descent_min_samples) alarm_flag = true;
+        // Already at the gain floor — nothing left to step down to; raise the alarm instead.
+        // Counter (and alarm) stay latched until TIASAT clears or the RF moves off the
+        // floor — no reset here.
+        alarm_flag = true;
         return;
     }
 
-    if (++descent_count < _hgac_descent_min_samples) return;
-    descent_count = 0;
-    alarm_flag    = false;
     // R4: land one step below the largest RF that fits. Re-evaluated every sample via the
-    // debounce above, so a still-saturating signal keeps stepping down one level at a time
+    // debounce above, so persistent TIASAT keeps stepping down one level at a time
     // (Phase 1 scope; analytic feed-forward to the final target is Phase 5, R5).
-    _hgac_descend_rf(color, (AFE4490RF)((int)cur_rf - 1));
+    tiasat_count = 0;
+    alarm_flag   = false;
+    _hgac_step_rf_down(color, (AFE4490RF)((int)cur_rf - 1));
 }
 
 void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     if (!hgac_enable) return;
 
-    // Gate G0 invalid-fraction estimator — independent of probe_state (see _hgac_gate_ok()).
-    _hgac_invalid_ema.update(as.allClean() ? 0.0f : 1.0f);
-
     if (!_hgac_gate_ok()) {
-        // Do not accumulate descent debounce while gated off — avoids a stale counter
+        // Do not accumulate TIASAT debounce while gated off — avoids a stale counter
         // firing immediately once the gate reopens.
-        _hgac_descent_count_led1 = 0;
-        _hgac_descent_count_led2 = 0;
+        _hgac_tiasat_count_led1 = 0;
+        _hgac_tiasat_count_led2 = 0;
         return;
     }
 
-    _hgac_check_descent(HgacColor::IR, as.v_tia_diff_led1, as.v_tia_diff_aled1,
-                        _hgac_descent_count_led1, _hgac_alarm_gain_floor_led1);
-    _hgac_check_descent(HgacColor::RED, as.v_tia_diff_led2, as.v_tia_diff_aled2,
-                        _hgac_descent_count_led2, _hgac_alarm_gain_floor_led2);
+    _hgac_check_tiasat(HgacColor::IR, as.v_tia_diff_led1, as.v_tia_diff_aled1,
+                        _hgac_tiasat_count_led1, _hgac_alarm_gain_floor_led1);
+    _hgac_check_tiasat(HgacColor::RED, as.v_tia_diff_led2, as.v_tia_diff_aled2,
+                        _hgac_tiasat_count_led2, _hgac_alarm_gain_floor_led2);
 
     // _rsqm_update() (which runs before this) already copied the pre-HGAC _diag_code into
     // _current_data.diag_code — refresh it here so HGAC's bit is visible in the same
@@ -1588,9 +1599,8 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
     _rsqm_led1_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
     _rsqm_led2_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
-    _hgac_descent_min_samples = (uint32_t)roundf(hgac_descent_persist_s * fs);
-    if (_hgac_descent_min_samples < 1) _hgac_descent_min_samples = 1;
-    _hgac_invalid_ema.init(hgac_gate_window_s, hgac_gate_window_s, fs);
+    _hgac_tiasat_min_samples = (uint32_t)roundf(hgac_tiasat_persist_s * fs);
+    if (_hgac_tiasat_min_samples < 1) _hgac_tiasat_min_samples = 1;
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
     _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
@@ -1938,7 +1948,7 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // ot_ir/ot_red replace the raw ambient-corrected counts (led1_sub/led2_sub) used before this
 // experiment. OT = (i_pd_led − i_pd_aled) / I_LED is gain-invariant by construction (a linear
 // rescaling of led_sub by 1/(2·RF·I_LED)) — an RF change no longer creates a discontinuity in
-// this input, so HGAC's _hgac_descend_rf() no longer needs to rescale this EmaChannel by k.
+// this input, so HGAC's _hgac_step_rf_down() no longer needs to rescale this EmaChannel by k.
 //
 // probe_state is RSQM's classification, consumed here — this function never computes its own
 // presence detection (see spo2_div_eps rationale above §). Encapsulation: only this function
