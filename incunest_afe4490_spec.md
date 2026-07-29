@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.46
+# incunest_afe4490 — Specification v0.47
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -112,8 +112,8 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 | Parameter      | Default value                  |
 |----------------|-------------------------------|
 | Sample rate    | 500 Hz                        |
-| LED1 current   | ~19.9 mA (code 34/256 × 150 mA) |
-| LED2 current   | ~19.9 mA (code 34/256 × 150 mA) |
+| LED1 current   | ~49.8 mA (code 85/256 × 150 mA) — preliminary dev-phase default (v0.47) |
+| LED2 current   | ~49.8 mA (code 85/256 × 150 mA) — preliminary dev-phase default (v0.47) |
 | LED range      | 150 mA (TX_REF = 0.75V)       |
 | TIA gain (RF)  | 100 kΩ                        |
 | TIA CF         | auto (see §7.2): 55 pF @ 500 Hz / RF_100K |
@@ -1118,7 +1118,7 @@ step-down exactly when it was most needed. No test ever caught this: the one tes
 exercises the step-down path (`test_hgac_descent_after_persistence`) deliberately used a
 stimulus (`v_tia_diff ≈ 0.973 V`, since changed — see below) that stayed below `kVTiaDiffFs`
 (1.0 V) — i.e. `allValidRange()` stayed `true` throughout — so the EMA clause was never actually
-exercised by continuous TIASAT in practice. `_hgac_gate_ok()`'s own persistence debounce
+exercised by continuous TIASAT in practice. HGAC's own persistence debounce
 inside `_hgac_check_tiasat()` (O8.1) already exists specifically to reject one-sample blips,
 making this upstream smoothing redundant even in the cases where it didn't backfire.
 
@@ -1521,8 +1521,8 @@ Parameters written to chip registers during initialisation. Changing them requir
 
 | Parameter | API | Default | Range | Effect on output |
 |---|---|---|---|---|
-| IR LED current (LED1) | `setLED1Current()` | ~19.9 mA | 0 – LED range max | PPG amplitude on IR channel; drives DC level and AC/DC ratio |
-| RED LED current (LED2) | `setLED2Current()` | ~19.9 mA | 0 – LED range max | PPG amplitude on RED channel; directly affects SpO2 R-ratio |
+| IR LED current (LED1) | `setLED1Current()` | ~49.8 mA | 0 – LED range max | PPG amplitude on IR channel; drives DC level and AC/DC ratio |
+| RED LED current (LED2) | `setLED2Current()` | ~49.8 mA | 0 – LED range max | PPG amplitude on RED channel; directly affects SpO2 R-ratio |
 | LED full-scale range | `setLEDRange()` | 150 mA | 75 or 150 mA (TX_REF=0.75 V) | Scales the 8-bit DAC resolution; affects achievable current values |
 
 > LED currents set the signal amplitude at the photodiode. Too low → low PI, SpO2 SQI=0. Too high → TIA saturation (clipping). The optimal point maximises PI while keeping the ADC output below full-scale.
@@ -1709,7 +1709,7 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | 1 | **t21** ADCRSTSTCT0 — *ADC reset 0 start count* | 0 | Start of period | < t22; ≤ t13 |
 | 2 | **t22** ADCRSTENDCT0 — *ADC reset 0 end count* | 3 | 3-count reset pulse (0.75 µs, −60 dB crosstalk) | > t21; < t13; (t22−t21) ≥ 4 |
 | 3 | **t13** LED2CONVST — *LED2 convert start count* | 4 | 1 count after reset end (t22=3); conversion starts one AFECLK after reset | ≥ t22; ≥ t2+1 (circ.); < t14 |
-| 4 | **t5** ALED2STC — *Sample ambient LED2 start count* | 200 | 200 counts (50 µs) after LED2 OFF for TIA settling; use 400+ at ≥ 50 mA | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs |
+| 4 | **t5** ALED2STC — *Sample ambient LED2 start count* | 400 | 400 counts (100 µs) after LED2 OFF — raised for the 50 mA default (v0.47); was 200 (adequate to ~25 mA) | > t4 (circ.); < t6; both LEDs off in [t5,t6]; RF×CF < (t6−t5)×0.25µs/10 (§8.3.1.1); ≥ t4 + 5×RF×CF/0.25µs |
 | 5 | **t6** ALED2ENDC — *Sample ambient LED2 end count* | 1 998 | Uses full window; closes 2 counts before t9 (LED1 on) | > t5; < t9; ≤ t15 |
 | 6 | **t14** LED2CONVEND — *LED2 convert end count* | 1 999 | 1 count before next reset (t23=2000); conv. window = 1 995 counts | > t13; (t14−t13) ≥ 1 950 (§8.3.1.2) |
 | 7 | **t23** ADCRSTSTCT1 — *ADC reset 1 start count* | 2 000 | Start of phase 2 | < t24; ≤ t15 |
@@ -1723,7 +1723,7 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | 15 | **t25** ADCRSTSTCT2 — *ADC reset 2 start count* | 4 000 | Start of phase 3 | < t26; ≤ t17 |
 | 16 | **t26** ADCRSTENDCT2 — *ADC reset 2 end count* | 4 003 | t25 + 3 counts | > t25; < t17; (t26−t25) ≥ 4 |
 | 17 | **t17** LED1CONVST — *LED1 convert start count* | 4 004 | 1 count after t26=4003 | ≥ t26; ≥ t8+1; < t18 |
-| 18 | **t11** ALED1STC — *Sample ambient LED1 start count* | 4 200 | 200 counts (50 µs) after LED1 OFF for TIA settling; same criterion as t5 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs |
+| 18 | **t11** ALED1STC — *Sample ambient LED1 start count* | 4 400 | 400 counts (100 µs) after LED1 OFF — raised for the 50 mA default (v0.47); same criterion as t5 | > t10; < t12; both LEDs off in [t11,t12]; RF×CF < (t12−t11)×0.25µs/10; ≥ t10 + 5×RF×CF/0.25µs |
 | 19 | **t12** ALED1ENDC — *Sample ambient LED1 end count* | 5 998 | Full window; closes 2 counts before t3 (LED2 on) | > t11; < t3 (circ.); ≤ t19 |
 | 20 | **t18** LED1CONVEND — *LED1 convert end count* | 5 999 | 1 count before t27=6000; conv. window = 1 995 counts | > t17; (t18−t17) ≥ 1 950 |
 | 21 | **t27** ADCRSTSTCT3 — *ADC reset 3 start count* | 6 000 | Start of phase 4 | < t28; ≤ t19 |
@@ -1739,7 +1739,7 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 - Simultaneous events are valid: t9=t23=2000, t10=t16=3999, t3=t27=6000, t4=t20=7999.
 - ADC conversion minimum (§8.3.1.2): ≈ PRPCOUNT/4 − 50 ≈ 1 950 counts. Recommended values give 1 995 counts per channel.
 - RF×CF (§8.3.1.1): with RF=500 KΩ, CF=5 pF → RF×CF=2.5 µs; sample windows ≈ 487 µs → limit=48.7 µs → margin ×19.
-- Ambient settling (t5, t11): 200 counts (50 µs) is adequate up to ~25 mA LED current. At ≥ 50 mA increase to 400+ counts.
+- Ambient settling (t5, t11): **400 counts (100 µs) since v0.47** (for the 50 mA default). Was 200 counts (50 µs), adequate up to ~25 mA. Valid for PRF ≤ ~2 kHz (at higher PRF the ambient sample window q−2 shrinks below the margin — revisit).
 - TIA margin formula: `max(50, floor(LED_window × 0.10))` counts. Also used by auto-CF (§7.2).
 - Historical comparison: TI EVM uses 20% duty cycle + 80-count margins (ALED1CONVEND overflows at 500 Hz); Protocentral uses 0 for reset and sample margins (no settling guard).
 
@@ -1753,18 +1753,18 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | → ENSEPGAIN | 1 | — | 0 | **0** | With 0, both channels use TIAGAIN for the TIA. Simplifies configuration. Enable if independent gain per channel is needed |
 | → Stage2 LED1 | EN, 0 dB | — | disabled | **disabled** | RF=500kΩ provides sufficient gain for typical PPG. Stage2 at 0dB adds no useful gain. Configurable via setter |
 | → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Default at 500 Hz / RF_100K: 55 pF |
-| → RF LED1 | 1 MΩ | — | 500 kΩ | **100 kΩ** | Matched to Medle probe at 20 mA. Lower RF reduces gain but avoids saturation with bright LEDs. Configurable via setTIAGain() |
+| → RF LED1 | 1 MΩ | — | 500 kΩ | **100 kΩ** | Chosen for the earlier 20 mA default. ✅ Verified OK at the 50 mA default (v0.47): measured v_tia_diff < 0.5 V with a finger applied (≪ 1.0 V FS, even below the 0.6 V ideal point) — no saturation, RF_100K adequate. Behaviour with the real neonatal probe/patient (transmittance, perfusion, probe geometry) is uncharacterised — verify v_tia_diff there. Configurable via setTIAGain() |
 | **TIA_AMB_GAIN** | 0x004006 | — | 0x000001 | **0x000000** | With ENSEPGAIN=0, the RF of this register does not affect the main TIA. Relevant for FLTRCNRSEL, AMBDAC and Stage2 |
 | → RF LED2/amb | 1 MΩ | — | 250 kΩ | **100 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
 | → CF LED2/amb | 5 pF | — | 5 pF | **auto (§7.2)** | Same as CF LED1 (ENSEPGAIN=0 shares config) |
 | → Stage2 LED2 | EN, 0 dB | — | disabled | **disabled** | Same criterion as Stage2 LED1 |
 | → FLTRCNRSEL | 500 Hz | — | 500 Hz | **500 Hz** | Controlled by `kAFE_FLTRCNRSEL` (constexpr uint8_t, 0=500 Hz / 1=1000 Hz). Always written explicitly by `_build_tia_amb_gain_led2()`. Determines `kAFE_DIAG_HOLDOFF_MS` (28 ms @ 500 Hz, 16 ms @ 1000 Hz, datasheet p.11). |
 | → AMBDAC | 0 µA | — | 0 µA | **0 µA** | Ambient cancellation handled in hardware (LED1−ALED1VAL, LED2−ALED2VAL). AMBDAC only needed if ambient light saturates TIA before subtraction. Exposable via setter |
-| **LEDCNTRL** | 0x011414 | — | 0x001414 | **0x002222** | RANGE_0 + code 34 + TX_REF=0.75V → ~19.9 mA per LED |
+| **LEDCNTRL** | 0x011414 | — | 0x001414 | **0x005555** | RANGE_0 + code 85 + TX_REF=0.75V → ~49.8 mA per LED (preliminary 50 mA dev default, v0.47) |
 | → LED_RANGE | RANGE_1 | — | RANGE_0 | **RANGE_0** | Consistent with TX_REF=0.75V. FSR=150mA → resolution ~0.6mA/step |
-| → LED1 code | 20 (0x14) | — | 20 (0x14) | **34 (0x22)** | ~19.9 mA: closest DAC code to 20 mA (Medle probe test value). Configurable via setLEDCurrent() |
-| → LED2 code | 20 (0x14) | — | 20 (0x14) | **34 (0x22)** | Same as LED1. In practice red and IR may need independent adjustment |
-| → **Resulting current** | **≈3.9 mA** | — | **≈11.7 mA** | **≈19.9 mA** | EVM uses TX_REF=0.5V + RANGE_1 → 3.9mA; insufficient as a general default |
+| → LED1 code | 20 (0x14) | — | 20 (0x14) | **85 (0x55)** | ~49.8 mA: closest DAC code to the preliminary 50 mA dev default (v0.47). Configurable via setLEDCurrent() |
+| → LED2 code | 20 (0x14) | — | 20 (0x14) | **85 (0x55)** | Same as LED1. In practice red and IR may need independent adjustment |
+| → **Resulting current** | **≈3.9 mA** | — | **≈11.7 mA** | **≈49.8 mA** | Preliminary 50 mA dev default (v0.47); was ~19.9 mA in v0.32–v0.46 |
 | **CONTROL2** | 0x020000 | — | 0x000000 | **0x000000** | All fields at reset value |
 | → TX_REF | 0.5 V | 0.75 V (reset) | 0.75 V | **0.75 V** | Datasheet default. Supports up to 150mA with RANGE_0. EVM uses 0.5V due to its supply constraints |
 | → PDN_AFE/RX/TX | all ON | — | all ON | **all ON** | Normal operating mode. PDN only for low-power use |
@@ -1902,6 +1902,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.47-experiment | **Default LED current 20 mA → 50 mA (preliminary, dev-phase).** Both**  |
+|         | `_afe_led1/2_current_mA` = 50.0 → DAC code 85 (0x55), ~49.8 mA. Purpose:    |
+|         | gain field experience at higher drive. Rationale (2026-07-27): the LED      |
+|         | rating is NOT the limit — at the AFE's pulsed ~25 % duty, 50 mA peak sits    |
+|         | ≪ I_FP 100 mA and ~23 mW ≪ Pd, so there is ample margin (datasheet Medle,    |
+|         | reliability-caveated). Side-effects: (a) TIA does NOT saturate — measured   |
+|         | v_tia_diff < 0.5 V, finger, 50 mA/RF_100K (neonatal case uncharacterised); |
+|         | (b) §8 timing note,                                                         |
+|         | ambient settling t5/t11 raised 200→400 counts (100 µs) for the 50 mA drive |
+|         | (longer LED extinction / CF discharge tail); (c) skin-thermal envelope      |
+|         | (ISO ≤41 °C) still uncharacterised. Spec §3/§8 default+timing tables updated.|
+|         | Also: **inlined Gate G0 into `_hgac_update()`** — removed the single-use    |
+|         | `_hgac_gate_ok()` helper so the gate's condition and its consequences (reset |
+|         | TIASAT debounce + return) read together; the design rationale lives here in  |
+|         | §5.8, not in a 12-line code comment. No behaviour change.                    |
 | v0.46-experiment | **Rename `AFE4490ChState` to an increasing-range scale (all suffixed**  |
 |         | `_RANGE`): `CH_CLEAN`→`CH_VALID_RANGE`, `CH_OFF_SPEC`→`CH_EXTENDED_RANGE`,  |
 |         | `CH_CLIPPED`→`CH_CLIPPED_RANGE`; helpers `chClean()`→`chValidRange()` and    |

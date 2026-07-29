@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.46-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.47-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -271,7 +271,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr2_result(0.0f), _hr2_result_sqi(0.0f),
       _hr3_result(0.0f), _hr3_result_sqi(0.0f),
       _afe_sample_rate_hz(500), _afe_adc_averages(8),
-      _afe_led1_current_mA(20.0f), _afe_led2_current_mA(20.0f), _afe_led_range_mA(150),
+      _afe_led1_current_mA(50.0f), _afe_led2_current_mA(50.0f), _afe_led_range_mA(150),
       _afe_sep_tia_en(true),
       _afe_tia_rf_led1(AFE4490RF::RF_100K),
       _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
@@ -1300,24 +1300,6 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
 // No ascent yet (recovery is manual) — documented limitation of this phase, not an
 // oversight. See incunest_afe4490_spec.md §5.8 for the full design.
 
-bool INCUNEST_AFE4490::_hgac_gate_ok() const {
-    // Gate G0 (A6), 2026-07-24: RSQM now reports PROBE_SATURATING as a state distinct from
-    // PROBE_NOT_APPLIED (see enum ProbeState, _rsqm_update()) — a channel that's saturated/
-    // off-spec (!CH_VALID_RANGE) no longer gets folded into "no tissue". This lets the gate go back
-    // to the design axiom's literal intent (act during normal operation) while ALSO acting on
-    // genuine saturation, without the old deadlock: previously, gating on "== PROBE_APPLIED"
-    // would let a saturation event flip probe_state to (the old, overloaded) NOT_APPLIED and
-    // then block the very RF step-down that would clear it. Now saturation has its own state,
-    // so both cases are named explicitly instead of reasoning about which NOT_APPLIED causes
-    // are "safe" to include. Excludes plain PROBE_NOT_APPLIED (probe idle, no patient, not
-    // saturating) — previously included via "!= PROBE_DISCONNECTED", which let HGAC drive RF
-    // down on an unrelated optical event (e.g. a phototherapy lamp) while nobody was connected,
-    // with no ascent (Phase 1) to recover before a real patient arrived.
-    return (_rsqm_probe_state == ProbeState::PROBE_APPLIED
-         || _rsqm_probe_state == ProbeState::PROBE_SATURATING)
-        && !(_diag_code & RSQM_DIAG_HW_SETTLING);
-}
-
 // Atomic "change RF + arm settling" primitive.
 // CONTRACT: only ever called from _hgac_update() (i.e. from inside _process_sample(),
 // under _state_mutex) — never call this directly from application code or another task.
@@ -1380,9 +1362,16 @@ void INCUNEST_AFE4490::_hgac_check_tiasat(HgacColor color, float v_tia_diff_led,
 void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     if (!hgac_enable) return;
 
-    if (!_hgac_gate_ok()) {
-        // Do not accumulate TIASAT debounce while gated off — avoids a stale counter
-        // firing immediately once the gate reopens.
+    // Gate G0 (axiom A6, spec §5.8): act only while the probe is active — APPLIED or
+    // SATURATING (saturation has its own state since 2026-07-24, so a TIASAT event can't flip
+    // to NOT_APPLIED and deadlock the step-down) — and the front-end is not re-settling after
+    // a gain change. Plain NOT_APPLIED/DISCONNECTED (probe idle) is excluded so HGAC doesn't
+    // drive RF down on an unrelated optical event (e.g. a phototherapy lamp) with nobody connected.
+    const bool probe_active = _rsqm_probe_state == ProbeState::PROBE_APPLIED
+                           || _rsqm_probe_state == ProbeState::PROBE_SATURATING;
+    if (!probe_active || (_diag_code & RSQM_DIAG_HW_SETTLING)) {
+        // Don't accumulate TIASAT debounce while gated off — avoids a stale counter firing
+        // the instant the gate reopens.
         _hgac_tiasat_count_led1 = 0;
         _hgac_tiasat_count_led2 = 0;
         return;
@@ -1492,7 +1481,11 @@ void INCUNEST_AFE4490::_apply_timing_regs() {
     // Datasheet Table 2 formulas, PRF = _afe_sample_rate_hz
     // AFECLK = 4 MHz → 1 count = 0.25 µs  (afeclk is in the anonymous namespace)
     const uint32_t tia_margin = _compute_settle_margin();  // TIA settling after LED ON
-    const uint32_t ambient_margin  = 200;  // counts (50 µs) — LED OFF decay before ambient sampling
+    const uint32_t ambient_margin  = 400;  // counts (100 µs) — LED OFF decay before ambient sampling.
+                                           // Raised from 200 (50 µs) for the 50 mA drive default (v0.47):
+                                           // higher current → longer LED extinction / CF discharge tail
+                                           // (see leakage note). Valid for PRF ≤ ~2 kHz (at 500 Hz the
+                                           // ambient sample window is 400..q-2 = 400..1998, still ample).
     const uint32_t adc_reset       = 3;    // counts (0.75 µs → -60 dB crosstalk)
 
     uint32_t phase = afeclk / _afe_sample_rate_hz;

@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.46-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.47-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.46-experiment"
+#define INCUNEST_AFE4490_VERSION "0.47-experiment"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -861,7 +861,6 @@ private:
     // setters) inside the caller's _state_mutex, which is safe because no code path acquires
     // _spi_mutex first and then blocks on _state_mutex.
     void _hgac_update(const AFE4490AnalogState& as);
-    bool _hgac_gate_ok() const; // Gate G0 (A6): probe not disconnected, no HW_SETTLING
     // TIASAT = TIA saturation: the condition (v_tia_diff above the guard on either phase of
     // this color's gain domain), debounced. Decides alarm-vs-step once TIASAT has persisted
     // long enough — the counter/persistence naming tracks the CONDITION, not the action.
