@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.49
+# incunest_afe4490 — Specification v0.50
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -557,7 +557,6 @@ struct AFE4490AnalogState {
     bool otLed1Valid/otLed2Valid() const;      // strict: both source channels CH_VALID_RANGE
     bool anyAdcSat() const;                    // HGAC O1
     bool anyTiaOverFs() const;                 // HGAC O2
-    bool allValidRange() const;
 };
 ```
 
@@ -1904,6 +1903,15 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.50-experiment | **PROBE_SATURATING checks POSITIVE saturation only (`anyPositiveSaturation`).**|
+|         | RSQM's saturation branch changed from `!allValidRange()` to                     |
+|         | `anyPositiveSaturation() = (adc_sat_pos \| tia_over_fs)`. Rationale (Alex): the  |
+|         | probe can only saturate from above (photocurrent unipolar); the ADC only rails  |
+|         | NEGATIVE via AMBDAC (unused in v1, and its neg rail was itself characterised via |
+|         | an AMBDAC sweep), and a negative rail wouldn't be cleared by reducing RF/ILED.   |
+|         | Identical behaviour today (AMBDAC=0 → adc_sat_neg always 0); differs only if     |
+|         | AMBDAC is enabled (layer v2). New helper `anyPositiveSaturation()`;              |
+|         | `allValidRange()` removed. No behaviour change. 36/36 tests, build OK.        |
 | v0.49-experiment | **Rename TIASAT → TIAGUARD + debounce naming; `adc_code` convention.**  |
 |         | The HGAC over-threshold condition was named "TIASAT" (TIA saturation) — it   |
 |         | collided with RSQM's `PROBE_SATURATING` and misled: the guard trips at        |

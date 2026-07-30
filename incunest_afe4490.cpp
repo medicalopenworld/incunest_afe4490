@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.49-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.50-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1242,19 +1242,20 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
         // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
         // Two DISTINCT causes, checked separately (2026-07-24 — were previously collapsed
         // into a single NOT_APPLIED via OR, see spec §5.6.2 changelog):
-        //  (a) channel not CH_VALID_RANGE (ADC saturated or TIA beyond linearity) — the OT value
-        //      itself is not trustworthy here, regardless of what it reads → PROBE_SATURATING.
+        //  (a) a channel saturated from ABOVE (ADC at the positive rail or TIA past FS) — the OT
+        //      value is not trustworthy here, regardless of what it reads → PROBE_SATURATING.
         //      This can happen with or without a patient (e.g. an unapplied probe under a
         //      phototherapy lamp), so it must NOT be folded into "no tissue" (NOT_APPLIED).
-        //  (b) channel is CH_VALID_RANGE but OT reads above threshold — a trustworthy measurement
-        //      that genuinely indicates no tissue in the optical path → PROBE_NOT_APPLIED.
-        // Saturation takes priority over the threshold check below (a channel out of valid
-        // range can't be trusted to classify NOT_APPLIED vs APPLIED in the first place).
-        // Ask the channels' RANGE directly via allValidRange() — not via otLedxValid(), whose
-        // "OT usable" meaning is a separate concern that may evolve independently of "in range".
+        //  (b) channel in range but OT reads above threshold — a trustworthy measurement that
+        //      genuinely indicates no tissue in the optical path → PROBE_NOT_APPLIED.
+        // Saturation takes priority over the threshold check below (a saturated channel can't be
+        // trusted to classify NOT_APPLIED vs APPLIED). Only saturation from ABOVE matters: the
+        // probe saturates only by excess light, and photocurrent is unipolar (v_adc ≥ 0 without
+        // AMBDAC), so we check anyPositiveSaturation() = adc_sat_pos | tia_over_fs. (adc_sat_neg
+        // needs AMBDAC — unused in v1 — and wouldn't be cleared by reducing RF/ILED.)
         // Debounce (N=50 samples, same for all transitions) lives in _rsqm_set_probe_state().
         ProbeState requested;
-        if (!as.allValidRange()) {
+        if (as.anyPositiveSaturation()) {
             requested = ProbeState::PROBE_SATURATING;
         } else if (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr) {
             requested = ProbeState::PROBE_NOT_APPLIED;
