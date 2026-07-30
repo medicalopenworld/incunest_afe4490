@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.47-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.49-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.47-experiment"
+#define INCUNEST_AFE4490_VERSION "0.49-experiment"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -231,7 +231,7 @@ constexpr float kAFE_RI_OHM = 100e3f;
 // ADC full-scale constants — used for code-to-voltage reconstruction
 // (datasheet p.11: ADC full-scale voltage ±1.2 V, 22-bit resolution;
 //  p.43 §8.4.1: 22-bit twos complement output format)
-constexpr float kAFE_ADC_FS_COUNTS = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
+constexpr float kAFE_ADC_FS_CODE = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
 constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
 
 // Low-pass filter corner frequency selection (FLTRCNRSEL bit D15 of TIA_AMB_GAIN, datasheet p.75).
@@ -246,7 +246,7 @@ constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
 /// Computed in _process_sample() before RSQM and HGAC; not stored in AFE4490Data.
 /// Datasheet Eq.2 (p.30):  V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 /// Inversions:
-///   V_ADC      = code / kAFE_ADC_FS_COUNTS × kAFE_ADC_FSR              [V]
+///   V_ADC      = code / kAFE_ADC_FS_CODE × kAFE_ADC_FSR              [V]
 ///   V_TIA_DIFF = 2 × (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri          [V]  (= 2 × I_PD × RF)
 ///   I_PD       = V_TIA_DIFF / (2 × RF_ohm)                             [A]
 /// V_TIA convention: DIFFERENTIAL (datasheet §9.2.2 + Fig. 135: "Ideal Operating Point" =
@@ -280,6 +280,22 @@ enum class AFE4490ChState : uint8_t {
                             // a BOUND, not a measurement (sat pos: real ≥ stored; sat neg: real ≤ stored)
 };
 
+/// ── v_tia_diff operating axis — SINGLE SOURCE OF TRUTH ───────────────────────
+/// Every threshold on the differential TIA output, in ascending order. Edit the values HERE
+/// only; the strict ordering below is an enforced compile-time invariant. Two natures coexist:
+/// PHYSICS (fixed: FS/ADC/LIN — datasheet/silicon/board) and POLICY (HGAC defaults IDEAL/GUARD,
+/// runtime-tunable). NOTE: ADC_SAT_V is the NOMINAL ADC full-scale; the operative saturation flag
+/// is AFE4490AnalogState::kAdcSatPos, an EMPIRICAL rail in adc_code (≈1.199 V), NOT derived from here.
+namespace tia_axis {
+    constexpr float IDEAL_V   = 0.6f;  // ideal operating point (HGAC telemetry)    — POLICY default
+    constexpr float GUARD_V   = 0.9f;  // HGAC acts (reduce RF) above this          — POLICY default, runtime-tunable
+    constexpr float FS_V      = 1.0f;  // TI full-scale guarantee                   — PHYSICS; above → CH_EXTENDED_RANGE
+    constexpr float ADC_SAT_V = 1.2f;  // ADC full-scale ±1.2 V (nominal, see note) — PHYSICS
+    constexpr float LIN_V     = 1.8f;  // empirical TIA linearity limit             — PHYSICS; above → CH_CLIPPED_RANGE
+    static_assert(IDEAL_V < GUARD_V && GUARD_V < FS_V && FS_V < ADC_SAT_V && ADC_SAT_V < LIN_V,
+                  "v_tia_diff axis must stay strictly ascending");
+}
+
 /// Invalidity policy: VALUE-ALWAYS. Every field is always computed from the raw codes,
 /// even when part of the chain is saturated — the validity masks (one bit per channel,
 /// bit index = AFE4490Ch) tell the consumer whether each value is a measurement or a bound.
@@ -289,11 +305,11 @@ enum class AFE4490ChState : uint8_t {
 /// not policy — HGAC actuation thresholds (hgac_v_tia_diff_thr/ideal) live in the controller.
 struct AFE4490AnalogState {
     // ── Physical detection thresholds ────────────────────────────────────────
-    static constexpr float   kVTiaDiffFs  = 1.0f;      // V — TIA full-scale output, differential ("TIA max", Fig. 135; §9.2.2 p.87: "full-scale output of the transimpedance amplifier is ±1 V")
-    static constexpr float   kVTiaDiffLin = 1.8f;      // V — empirical linearity limit (tia_linearity_sweep.py 2026-07-08, IncuNest 16.A)
+    static constexpr float   kVTiaDiffFs  = tia_axis::FS_V;   // V — TIA full-scale, differential (source: tia_axis; "TIA max", Fig.135 §9.2.2 p.87)
+    static constexpr float   kVTiaDiffLin = tia_axis::LIN_V;  // V — empirical linearity limit (source: tia_axis; sweep 2026-07-08, 16.A)
     // ADC saturation thresholds: rails measured empirically via an AMBDAC sweep test
     // on IncuNest 16.A hardware (2026-07-10, driving the ADC into both rails), with a
-    // ~220-count guard band inside the rail. Rails are NOT the datasheet code limits
+    // ~220-code guard band inside the rail. Rails are NOT the datasheet code limits
     // (±2^21): empirical positive rail = +2096921 (constant, all 4 channels);
     // empirical negative rail = -2096919 (constant on LED1/LED2; ALED1/ALED2 publish
     // averaged codes that oscillate down to ~-2096810 without pinning — ADC averaging
@@ -301,9 +317,9 @@ struct AFE4490AnalogState {
     // Guard = 2x the worst observed ALED-to-rail distance
     // (109 counts), applied to BOTH polarities (the averaging mechanism is sign-
     // independent). False positives are impossible in practice: a legitimate code
-    // within 220 counts of the rail (0.01% of range) is functionally saturated anyway.
-    static constexpr int32_t kAdcSatPos   =  2096700;  // counts — positive rail +2096921 minus guard
-    static constexpr int32_t kAdcSatNeg   = -2096700;  // counts — negative rail -2096919 plus guard
+    // within 220 codes of the rail (0.01% of range) is functionally saturated anyway.
+    static constexpr int32_t kAdcSatPos   =  2096700;  // adc_code — positive rail +2096921 minus guard
+    static constexpr int32_t kAdcSatNeg   = -2096700;  // adc_code — negative rail -2096919 plus guard
 
     // ── Values (always computed — see validity masks below) ─────────────────
     float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
@@ -311,7 +327,7 @@ struct AFE4490AnalogState {
     float i_pd_led1,       i_pd_led2,       i_pd_aled1,       i_pd_aled2;        // A
     float ot_led1,         ot_led2;  // A/A — optical transmittance: (i_pd_led − i_pd_aled) / ILEDx_A.
                                      // Full electro-optical system ratio (LED efficiency × tissue ×
-                                     // PD responsivity). Validity: otLed1Valid()/otLed2Valid().
+                                     // PD responsivity). Valid iff both source channels chValidRange().
 
     // ── Validity masks — one uint8_t per failure mode, packing 4 bits (upper 4 unused) ──
     // Each mask has one bit per physical channel, same bit position as AFE4490Ch:
@@ -337,11 +353,6 @@ struct AFE4490AnalogState {
         return AFE4490ChState::CH_VALID_RANGE;
     }
     bool chValidRange(AFE4490Ch ch) const { return chState(ch) == AFE4490ChState::CH_VALID_RANGE; }
-
-    // OT validity is strict (both source channels CH_VALID_RANGE): OT is a ratio of two
-    // measurements — an OFF_SPEC or CLIPPED operand makes the ratio unreliable.
-    bool otLed1Valid() const { return chValidRange(AFE4490Ch::LED1) && chValidRange(AFE4490Ch::ALED1); }
-    bool otLed2Valid() const { return chValidRange(AFE4490Ch::LED2) && chValidRange(AFE4490Ch::ALED2); }
 
     bool anyAdcSat()    const { return (adc_sat_pos | adc_sat_neg) != 0; }              // HGAC O1
     bool anyTiaOverFs() const { return tia_over_fs != 0; }                              // HGAC O2
@@ -506,17 +517,17 @@ struct AFE4490Config {
     float             hr_max_bpm;                // valid output upper bound [bpm]
     // RSQM algorithm parameters
     float             rsqm_ot_thr;               // OT threshold: NOT_APPLIED vs APPLIED [A/A]
-    float             rsqm_signal_weak_std;      // LED1_Sub_std threshold for SIGNAL_WEAK [ADC counts]
-    float             rsqm_disconn_led_sub_thr;  // |led_sub| min for DISCONNECTED detection [ADC counts]
+    float             rsqm_signal_weak_std;      // LED1_Sub_std threshold for SIGNAL_WEAK [adc_code]
+    float             rsqm_disconn_led_sub_thr;  // |led_sub| min for DISCONNECTED detection [adc_code]
     float             rsqm_disconn_i_pd_thr;     // |i_pd| min for DISCONNECTED detection [A]
     float             rsqm_probe_state_min_s;    // debounce time to change probe state [s]
     float             rsqm_ema_mean_tau_s;        // RSQM EMA mean time constant [s]
     float             rsqm_ema_var_tau_s;         // RSQM EMA variance time constant [s]
     // HGAC parameters (Phase 1: RF-only descent — see incunest_afe4490_spec.md §5.8)
     bool              hgac_enable;                    // master enable; false = HGAC never actuates
-    float             hgac_v_tia_diff_thr;            // V — saturation guard (A3): descend RF above this
+    float             hgac_v_tia_diff_thr;            // V — TIA guard (A3): descend RF above this
     float             hgac_v_tia_diff_ideal;          // V — ideal operating point (telemetry only, v1)
-    float             hgac_tiasat_persist_s;          // s — TIA-saturation debounce before acting (urgent path)
+    float             hgac_tiaguard_debounce_min_s;          // s — TIAGUARD debounce before acting (urgent path)
 };
 
 // ── INCUNEST_AFE4490 class ─────────────────────────────────────────────────────────
@@ -592,8 +603,8 @@ public:
 
     // RSQM algorithm setters (callable before or after begin())
     void setRsqmOtThr(float v);                     // OT threshold: NOT_APPLIED vs APPLIED [A/A]
-    void setRsqmSignalWeakStd(float v);             // LED1_Sub_std threshold for SIGNAL_WEAK [ADC counts]
-    void setRsqmDisconnLedSubThr(float v);          // |led_sub| min for DISCONNECTED detection [ADC counts]
+    void setRsqmSignalWeakStd(float v);             // LED1_Sub_std threshold for SIGNAL_WEAK [adc_code]
+    void setRsqmDisconnLedSubThr(float v);          // |led_sub| min for DISCONNECTED detection [adc_code]
     void setRsqmDisconnIPdThr(float v);             // |i_pd| min for DISCONNECTED detection [A]
     void setRsqmProbeStateMinS(float s);            // debounce time to change probe state [s]; triggers recalc
     void setRsqmEmaTau(float mean_tau_s, float var_tau_s); // RSQM EMA time constants [s]; triggers recalc
@@ -601,7 +612,7 @@ public:
     // HGAC setters (callable before or after begin()) — Phase 1: RF-only descent
     void setHgacEnable(bool en);                    // master enable; false = HGAC never actuates
     void setHgacVTiaDiffThr(float v);               // V — saturation guard threshold (A3)
-    void setHgacTiasatPersistS(float s);            // s — TIA-saturation debounce before acting; triggers recalc
+    void setHgacTiaguardDebounceMinS(float s);            // s — TIAGUARD debounce before acting; triggers recalc
 
     /**
      * @brief Retrieves the next available sample from the internal queue (non-blocking).
@@ -793,9 +804,9 @@ private:
     // Defaults promoted from the former file-scope hgac_v_tia_diff_thr/ideal constants
     // (now runtime-tunable, matching the RSQM pattern above).
     bool              hgac_enable                = false; // OFF by default until bench-validated
-    float             hgac_v_tia_diff_thr        = 0.9f;  // V — HGAC actuation threshold (A3); reduce RF before kVTiaDiffFs (1.0V)
-    float             hgac_v_tia_diff_ideal      = 0.6f;  // V — Ideal Operating Point, diff (Fig. 135, §9.2.2); telemetry only in v1
-    float             hgac_tiasat_persist_s      = 0.5f;  // s — O8.1: TIA-saturation response is urgent (~500 ms)
+    float             hgac_v_tia_diff_thr        = tia_axis::GUARD_V;  // V — HGAC actuation (A3); source tia_axis. Runtime-tunable, clamped ≤ FS_V by setter
+    float             hgac_v_tia_diff_ideal      = tia_axis::IDEAL_V;  // V — ideal operating point; source tia_axis (telemetry only, v1)
+    float             hgac_tiaguard_debounce_min_s      = 0.5f;  // s — O8.1: TIAGUARD response is urgent (~500 ms)
     // Fixed (not $SET-tunable in v1, like rsqm_diag_period_ms): approximate analog front-end
     // + downstream settling time after an RF change, used to arm RSQM_DIAG_HW_SETTLING.
     // NOT derived from _compute_settle_margin() (that figure is a sub-sample-period AFECLK-count
@@ -861,11 +872,12 @@ private:
     // setters) inside the caller's _state_mutex, which is safe because no code path acquires
     // _spi_mutex first and then blocks on _state_mutex.
     void _hgac_update(const AFE4490AnalogState& as);
-    // TIASAT = TIA saturation: the condition (v_tia_diff above the guard on either phase of
-    // this color's gain domain), debounced. Decides alarm-vs-step once TIASAT has persisted
-    // long enough — the counter/persistence naming tracks the CONDITION, not the action.
-    void _hgac_check_tiasat(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
-                              uint32_t& tiasat_count, bool& alarm_flag);
+    // TIAGUARD = TIA-guard trip: the condition (v_tia_diff above the guard threshold GUARD_V —
+    // which sits BELOW full-scale, see tia_axis — on either phase of this color's gain domain),
+    // debounced. Decides alarm-vs-step once TIAGUARD has persisted long enough. Debounce naming:
+    // state = debounce_count (samples), threshold = min_samples (see spec §5.8).
+    void _hgac_check_tiaguard(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
+                              uint32_t& debounce_count, bool& alarm_flag);
     // Atomic "change RF + arm settling" primitive. CONTRACT: only ever called from
     // _hgac_update() (i.e. from inside _process_sample(), under _state_mutex) — never call
     // this directly from application code or another task.
@@ -881,7 +893,7 @@ private:
     // here — see incunest_afe4490.cpp for the reset-on-not-applied / division-safety design.
     void _spo2_update(float ot_ir, float ot_red, ProbeState probe_state);
     // EXPERIMENT (OT-domain input): ir is now as.ot_led1 (float, gain-invariant) instead of
-    // led1_sub (int32_t raw ambient-corrected counts). HR1/HR2/HR3 are periodicity/timing-based
+    // led1_sub (int32_t raw ambient-corrected adc_code). HR1/HR2/HR3 are periodicity/timing-based
     // (peak timing, autocorrelation lag, FFT dominant frequency) — a uniform gain scale does
     // not change their result in steady state (unlike SpO2's amplitude ratio R), so this is a
     // pure type/domain change, no threshold recalibration needed for HR1/HR3. HR2's acorr0
@@ -1011,7 +1023,7 @@ private:
     // ── SpO2 state ──
     // DC and AC² power for IR and RED channels, tracked via EmaChannel. EXPERIMENT (OT-domain
     // input, branch experiment/ot-domain-inputs): x is now OT (as.ot_led1/ot_led2), gain-
-    // invariant by construction, instead of the raw ambient-corrected counts (led1_sub/led2_sub)
+    // invariant by construction, instead of the raw ambient-corrected adc_code (led1_sub/led2_sub)
     // used before this experiment. See incunest_afe4490_spec.md §5.1/§5.8.
     //   mean  = DC component (slow IIR low-pass of x)
     //           α_mean = 1 − exp(−1/(τ_mean·fs)),  τ_mean = spo2_ema_mean_tau_s (default 1.6 s)
@@ -1097,9 +1109,9 @@ private:
     uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
 
     // ── HGAC state (Phase 1: RF-only descent) ────────────────────────────────
-    uint32_t   _hgac_tiasat_min_samples;         // cached from hgac_tiasat_persist_s × fs
-    uint32_t   _hgac_tiasat_count_led1 { 0 };    // TIA-saturation debounce counter, IR domain (LED1/ALED1)
-    uint32_t   _hgac_tiasat_count_led2 { 0 };    // TIA-saturation debounce counter, RED domain (LED2/ALED2)
+    uint32_t   _hgac_tiaguard_debounce_min_samples;         // cached from hgac_tiaguard_debounce_min_s × fs
+    uint32_t   _hgac_tiaguard_debounce_count_led1 { 0 };    // TIAGUARD debounce sample count, IR domain (LED1/ALED1)
+    uint32_t   _hgac_tiaguard_debounce_count_led2 { 0 };    // TIAGUARD debounce sample count, RED domain (LED2/ALED2)
     bool       _hgac_alarm_gain_floor_led1 { false }; // IR domain at RF_10K, still saturating
     bool       _hgac_alarm_gain_floor_led2 { false }; // RED domain at RF_10K, still saturating
 
