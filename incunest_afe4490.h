@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.52-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.53-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.52-experiment"
+#define INCUNEST_AFE4490_VERSION "0.53-experiment"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -223,11 +223,46 @@ constexpr float kAFE_RG_GAIN[5] = {
 // Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
 constexpr float kAFE_RI_OHM = 100e3f;
 
-// ADC full-scale constants — used for code-to-voltage reconstruction
-// (datasheet p.11: ADC full-scale voltage ±1.2 V, 22-bit resolution;
-//  p.43 §8.4.1: 22-bit twos complement output format)
-constexpr float kAFE_ADC_FS_CODE = 2097151.0f;  // 2^21 − 1 (positive full-scale code, 22-bit signed ADC)
-constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
+// ── ADC domain — SINGLE SOURCE OF TRUTH ─────────────────────────────────────
+// Signed 22-bit twos-complement converter (datasheet p.11: ±1.2 V FS; p.43 §8.4.1).
+// Code range [−2^21, 2^21−1] ↔ ±FSR. Two natures coexist, kept side by side:
+//   NOMINAL — datasheet / theoretical (Table 7, p.88).
+//   ACTUAL  — empirically MEASURED on IncuNest 16.A (AMBDAC sweep 2026-07-10);
+//             the silicon rails sit ~230 codes short of nominal full scale.
+// 1 LSB = FSR / 2^21 (bipolar twos-complement transfer function): Table 7 rows code=±1 ↔
+// ±1.2/2^21 V and the negative rail −1.2 V ↔ −2^21 (exact). The positive full-scale code
+// +2^21−1 is +1.2 V − 1 LSB, not +1.2 V — Table 7's "+1.2 V ↔ 2^21−1" is a nominal label,
+// the one row inconsistent with the LSB, so it does NOT anchor SCALE.
+namespace adc {
+    // Voltage scale (datasheet)
+    constexpr float   FSR     = 1.2f;            // V — full-scale range (±1.2 V differential)
+    constexpr float   FS_CODE = 2097152.0f;      // 2^21 — full-scale divisor (twos-complement rail = −2^21)
+    constexpr float   SCALE   = FSR / FS_CODE;   // V per code (1 LSB): V_ADC = code × SCALE
+
+    // Code rails — NOMINAL (datasheet twos-complement limits)
+    constexpr int32_t POS_RAIL_NOMINAL =  2097151;   // +2^21−1 (max positive code)
+    constexpr int32_t NEG_RAIL_NOMINAL = -2097152;   // −2^21   (min negative code)
+
+    // Code rails — ACTUAL (measured on 16.A, AMBDAC sweep 2026-07-10; NOT datasheet).
+    // POS constant on all 4 channels; NEG constant on LED1/2, but ALED1/2 publish averaged
+    // codes that oscillate down to ~−2096810 without pinning (ADC averaging mixes clipped and
+    // non-clipped conversions) → NEG is approximate, absorbed by the guard band.
+    constexpr int32_t POS_RAIL_ACTUAL  =  2096921;
+    constexpr int32_t NEG_RAIL_ACTUAL  = -2096919;
+
+    // Operative saturation thresholds — guard band inside the ACTUAL rail. Guard ≈ 2× worst
+    // observed ALED-to-rail distance (~109 codes), sign-independent. False positives are
+    // impossible in practice: a legit code within SAT_GUARD of the rail (0.01% of range) is
+    // functionally saturated anyway.
+    constexpr int32_t SAT_GUARD = 221;                          // codes
+    constexpr int32_t SAT_POS   = POS_RAIL_ACTUAL - SAT_GUARD;  // 2096700
+    constexpr int32_t SAT_NEG   = -SAT_POS;                     // −2096700 (symmetric by choice; NEG_RAIL_ACTUAL is doc-only)
+
+    static_assert(POS_RAIL_ACTUAL < POS_RAIL_NOMINAL &&
+                  NEG_RAIL_ACTUAL > NEG_RAIL_NOMINAL &&
+                  SAT_POS < POS_RAIL_ACTUAL && SAT_NEG > NEG_RAIL_ACTUAL,
+                  "ADC actual rails inside nominal FS; guarded sat inside the actual rail");
+}
 
 // Low-pass filter corner frequency selection (FLTRCNRSEL bit D15 of TIA_AMB_GAIN, datasheet p.75).
 // 0 = 500 Hz (reset default); 1 = 1000 Hz.
@@ -241,7 +276,7 @@ constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
 /// Computed in _process_sample() before RSQM and HGAC; not stored in AFE4490Data.
 /// Datasheet Eq.2 (p.30):  V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 /// Inversions:
-///   V_ADC = code / kAFE_ADC_FS_CODE × kAFE_ADC_FSR       [V]
+///   V_ADC = code × adc::SCALE       [V]  (= code / adc::FS_CODE × adc::FSR)
 ///   V_TIA = 2 × (V_ADC / (2 × RG_ohm) + I_CANCEL_A) × Ri [V]  (= 2 × I_PD × RF)
 ///   I_PD  = V_TIA / (2 × RF_ohm)                         [A]
 /// V_TIA is always the DIFFERENTIAL TIA output (datasheet §9.2.2 + Fig. 135: "Ideal Operating
@@ -279,16 +314,17 @@ enum class AFE4490ChState : uint8_t {
 /// Every threshold on the differential TIA output, in ascending order. Edit the values HERE
 /// only; the strict ordering below is an enforced compile-time invariant. Two natures coexist:
 /// PHYSICS (fixed: FS/ADC/LIN — datasheet/silicon/board) and POLICY (HGAC defaults IDEAL/GUARD,
-/// runtime-tunable). NOTE: ADC_SAT_V is the NOMINAL ADC full-scale; the operative saturation flag
-/// is AFE4490AnalogState::kAdcSatPos, an EMPIRICAL rail in adc_code (≈1.199 V), NOT derived from here.
+/// runtime-tunable). NOTE: the ADC full-scale (adc::FSR, mapped onto this axis at unity gain) is
+/// NOMINAL; the operative saturation flag is adc::SAT_POS, an EMPIRICAL rail in adc_code, NOT this axis.
 namespace tia_axis {
-    constexpr float IDEAL_V   = 0.6f;  // ideal operating point (HGAC telemetry)    — POLICY default
-    constexpr float GUARD_V   = 0.9f;  // HGAC acts (reduce RF) above this          — POLICY default, runtime-tunable
-    constexpr float FS_V      = 1.0f;  // TI full-scale guarantee                   — PHYSICS; above → CH_EXTENDED_RANGE
-    constexpr float ADC_SAT_V = 1.2f;  // ADC full-scale ±1.2 V (nominal, see note) — PHYSICS
-    constexpr float LIN_V     = 1.8f;  // empirical TIA linearity limit             — PHYSICS; above → CH_CLIPPED_RANGE
-    static_assert(IDEAL_V < GUARD_V && GUARD_V < FS_V && FS_V < ADC_SAT_V && ADC_SAT_V < LIN_V,
-                  "v_tia axis must stay strictly ascending");
+    constexpr float IDEAL_V = 0.6f;  // ideal operating point (HGAC telemetry)    — POLICY default
+    constexpr float GUARD_V = 0.9f;  // HGAC acts (reduce RF) above this          — POLICY default, runtime-tunable
+    constexpr float FS_V    = 1.0f;  // TI full-scale guarantee                   — PHYSICS; above → CH_EXTENDED_RANGE
+    constexpr float LIN_V   = 1.8f;  // empirical TIA linearity limit             — PHYSICS; above → CH_CLIPPED_RANGE
+    // ADC saturation (adc::FSR = 1.2 V) is an ADC property, not a v_tia threshold; at unity gain
+    // (V_ADC = V_TIA) it falls on this axis between FS_V and LIN_V, hence it enters the ordering.
+    static_assert(IDEAL_V < GUARD_V && GUARD_V < FS_V && FS_V < adc::FSR && adc::FSR < LIN_V,
+                  "v_tia axis strictly ascending (adc::FSR mapped at unity gain)");
 }
 
 /// Invalidity policy: VALUE-ALWAYS. Every field is always computed from the raw codes,
@@ -299,22 +335,10 @@ namespace tia_axis {
 /// The thresholds below are PHYSICS (datasheet / silicon / per-board characterization),
 /// not policy — HGAC actuation thresholds (hgac_v_tia_thr/ideal) live in the controller.
 struct AFE4490AnalogState {
-    // ── Physical detection thresholds ────────────────────────────────────────
-    // v_tia thresholds (FS_V, LIN_V) live in tia_axis — the single source of
-    // truth; the masks below are computed against tia_axis:: directly, no aliases here.
-    // ADC saturation thresholds: rails measured empirically via an AMBDAC sweep test
-    // on IncuNest 16.A hardware (2026-07-10, driving the ADC into both rails), with a
-    // ~220-code guard band inside the rail. Rails are NOT the datasheet code limits
-    // (±2^21): empirical positive rail = +2096921 (constant, all 4 channels);
-    // empirical negative rail = -2096919 (constant on LED1/LED2; ALED1/ALED2 publish
-    // averaged codes that oscillate down to ~-2096810 without pinning — ADC averaging
-    // mixes clipped and non-clipped conversions).
-    // Guard = 2x the worst observed ALED-to-rail distance
-    // (109 counts), applied to BOTH polarities (the averaging mechanism is sign-
-    // independent). False positives are impossible in practice: a legitimate code
-    // within 220 codes of the rail (0.01% of range) is functionally saturated anyway.
-    static constexpr int32_t kAdcSatPos   =  2096700;  // adc_code — positive rail +2096921 minus guard
-    static constexpr int32_t kAdcSatNeg   = -2096700;  // adc_code — negative rail -2096919 plus guard
+    // ── Detection thresholds — live in namespaces, not here ──────────────────
+    // v_tia thresholds live in tia_axis; ADC saturation rails (SAT_POS/SAT_NEG) live in
+    // namespace adc — both single sources of truth, no aliases in this struct. The masks
+    // below are computed against tia_axis:: and adc:: directly.
 
     // ── Values (always computed — see validity masks below) ─────────────────
     float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
@@ -330,8 +354,8 @@ struct AFE4490AnalogState {
     // A set bit means that channel currently fails this specific check; use the
     // adcSatPos()/adcSatNeg()/tiaOverFs()/tiaOverLin() accessors below rather than
     // testing these masks directly (see the "mandatory access path" note further down).
-    uint8_t adc_sat_pos  = 0;  // ADC code ≥ kAdcSatPos
-    uint8_t adc_sat_neg  = 0;  // ADC code ≤ kAdcSatNeg
+    uint8_t adc_sat_pos  = 0;  // ADC code ≥ adc::SAT_POS
+    uint8_t adc_sat_neg  = 0;  // ADC code ≤ adc::SAT_NEG
     uint8_t tia_over_fs  = 0;  // v_tia > tia_axis::FS_V (photocurrent unipolar → no lower bound)
     uint8_t tia_over_lin = 0;  // v_tia > tia_axis::LIN_V
 
@@ -793,7 +817,7 @@ private:
                                                                  // Widened from 8.5e-5 (2026-07-19): CONTEC MS100 simulator is highly sensitive
                                                                  // to probe placement, frequently reading OT above 8.5e-5 with probe applied.
                                                                  // Still needs empirical calibration with a real neonatal probe/patient.
-    // ADC saturation thresholds live in AFE4490AnalogState (kAdcSatPos/kAdcSatNeg) since v0.35.
+    // ADC saturation thresholds live in namespace adc (SAT_POS/SAT_NEG).
     float             rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_DIAG_SIGNAL_WEAK (needs HW calibration)
     float             rsqm_probe_state_min_s = 0.2f;    // debounce time to change probe state [s] (= 100 samples @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED

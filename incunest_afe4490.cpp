@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.52-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.53-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -103,11 +103,11 @@ namespace {
     // Reference: AFE4490 datasheet Fig. 135 ("AGC Loop"), §9.2.2.
     // TIA differential output range = ±1.0 V; ADC full-scale = ±1.2 V (22-bit).
     // To recover v_tia from an ADC reading at any Stage 2 gain and AMBDAC setting:
-    //   v_tia_volt = (adc_value * 1.2f / 2097151.0f) / rg_gain + ambdac_val * 0.2f
+    //   v_tia_volt = (adc_value * adc::SCALE) / rg_gain + ambdac_val * 0.2f
     // where rg_gain is the linear Stage 2 gain (1/1.5/2/3/4), ambdac_val is AMBDAC[3:0]
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
-    // 2097151 = 2^21-1: per datasheet Table 7, positive full-scale code maps to +1.2 V.
-    // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_volt = adc_value * 1.2f / 2097151.0f.
+    // adc::SCALE = adc::FSR / 2^21 (bipolar twos-complement LSB; see namespace adc in .h).
+    // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_volt = adc_value * adc::SCALE.
     // Physical thresholds (fs = TIA full-scale differential 1.0 V, empirical lin 1.8 V) live in
     // tia_axis (FS_V / LIN_V), the single source of truth, since v0.35 — physics belongs to
     // the reconstruction layer; only HGAC actuation POLICY stays here.
@@ -1118,7 +1118,7 @@ void INCUNEST_AFE4490::_rsqm_request_probe_state(ProbeState requested) {
 // Analog state reconstruction — converts raw ADC codes to physical signal-chain quantities.
 // Datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 // Inverted:
-//   V_ADC      = code / kAFE_ADC_FS_CODE × kAFE_ADC_FSR
+//   V_ADC      = code × adc::SCALE   (= code / adc::FS_CODE × adc::FSR)
 //   V_TIA = 2 × (V_ADC / (2 × RG) + I_CANCEL_A) × Ri   [= 2 × I_PD × RF]
 //   I_PD       = V_TIA / (2 × RF)
 // V_TIA is always the DIFFERENTIAL TIA output (datasheet §9.2.2); the code has no branch value.
@@ -1134,9 +1134,12 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     // ── ADC code → volts ────────────────────────────────────────────────────
     // Datasheet p.11 (Electrical Characteristics, ADC): 22-bit resolution,
     // ADC full-scale voltage ±1.2 V. Datasheet p.43 (§8.4.1): output format
-    // is 22-bit twos complement → code range ±(2^21 − 1).
-    // V_ADC = code / (2^21 − 1) × 1.2 V
-    const float scale = kAFE_ADC_FSR / kAFE_ADC_FS_CODE;
+    // is 22-bit twos complement. Standard bipolar twos-complement transfer
+    // function → 1 LSB = FSR / 2^21, code range [−2^21, +2^21−1] (asymmetric:
+    // negative rail −1.2 V ↔ −2^21 exact; positive code +2^21−1 ↔ +1.2 V − 1 LSB).
+    // Matches Table 7 (p.88) rows code=±1 ↔ ±1.2/2^21 V. See namespace adc in .h.
+    // V_ADC = code × adc::SCALE
+    const float scale = adc::SCALE;
     as.v_adc_led1  = (float)led1  * scale;
     as.v_adc_led2  = (float)led2  * scale;
     as.v_adc_aled1 = (float)aled1 * scale;
@@ -1193,8 +1196,8 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
                               as.v_tia_led2, as.v_tia_aled2 };
     for (int ch = 0; ch < 4; ++ch) {
         const uint8_t bit = (uint8_t)(1u << ch);
-        if (code[ch] >= AFE4490AnalogState::kAdcSatPos)  as.adc_sat_pos  |= bit;
-        if (code[ch] <= AFE4490AnalogState::kAdcSatNeg)  as.adc_sat_neg  |= bit;
+        if (code[ch] >= adc::SAT_POS)  as.adc_sat_pos  |= bit;
+        if (code[ch] <= adc::SAT_NEG)  as.adc_sat_neg  |= bit;
         if (vtd[ch]  >  tia_axis::FS_V)  as.tia_over_fs  |= bit;
         if (vtd[ch]  >  tia_axis::LIN_V) as.tia_over_lin |= bit;
     }

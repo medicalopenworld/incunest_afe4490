@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.52
+# incunest_afe4490 — Specification v0.53
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -447,11 +447,24 @@ constexpr float kAFE_RG_GAIN[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
 // Stage 2 input resistor Ri — fixed by chip design (datasheet p.28)
 constexpr float kAFE_RI_OHM = 100e3f;
 
-// ADC full-scale constants — used for code-to-voltage reconstruction
-// (datasheet p.11: ADC full-scale voltage ±1.2 V, 22-bit resolution;
-//  p.43 §8.4.1: 22-bit twos complement output format)
-constexpr float kAFE_ADC_FS_CODE = 2097151.0f;  // 2^21 − 1 (positive full-scale, 22-bit signed ADC)
-constexpr float kAFE_ADC_FSR       = 1.2f;         // V — ADC full-scale range (±1.2 V differential)
+// ── ADC domain (namespace adc) — SINGLE SOURCE OF TRUTH ─────────────────────
+// Signed 22-bit twos-complement ADC (datasheet p.11: ±1.2 V FS; p.43 §8.4.1).
+// NOMINAL = datasheet; ACTUAL = measured on 16.A (rails ~230 codes short of FS).
+namespace adc {
+    constexpr float   FSR     = 1.2f;            // V — full-scale range (±1.2 V differential)
+    constexpr float   FS_CODE = 2097152.0f;      // 2^21 — full-scale divisor
+    constexpr float   SCALE   = FSR / FS_CODE;   // V per code (1 LSB): V_ADC = code × SCALE
+    constexpr int32_t POS_RAIL_NOMINAL =  2097151;   // +2^21−1 (max positive code)
+    constexpr int32_t NEG_RAIL_NOMINAL = -2097152;   // −2^21   (min negative code)
+    constexpr int32_t POS_RAIL_ACTUAL  =  2096921;   // measured (constant, all 4 channels)
+    constexpr int32_t NEG_RAIL_ACTUAL  = -2096919;   // measured (LED1/2; ALED averaged → approx)
+    constexpr int32_t SAT_GUARD = 221;                          // codes (≈2× worst ALED-to-rail distance)
+    constexpr int32_t SAT_POS   = POS_RAIL_ACTUAL - SAT_GUARD;  // 2096700
+    constexpr int32_t SAT_NEG   = -SAT_POS;                     // −2096700 (symmetric by choice; NEG_RAIL_ACTUAL doc-only)
+    static_assert(POS_RAIL_ACTUAL < POS_RAIL_NOMINAL && NEG_RAIL_ACTUAL > NEG_RAIL_NOMINAL &&
+                  SAT_POS < POS_RAIL_ACTUAL && SAT_NEG > NEG_RAIL_ACTUAL,
+                  "ADC actual rails inside nominal FS; guarded sat inside the actual rail");
+}
 
 // Low-pass filter corner frequency (FLTRCNRSEL bit D15 of TIA_AMB_GAIN, datasheet p.75).
 // 0 = 500 Hz (reset default); 1 = 1000 Hz.
@@ -495,11 +508,20 @@ Datasheet forward equation: `V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG`
 Inverted step by step:
 
 ```
-V_ADC      = code / kAFE_ADC_FS_CODE × kAFE_ADC_FSR           [V]   (datasheet p.11: ±1.2 V FS; p.43: 22-bit twos complement)
+V_ADC      = code × adc::SCALE                             [V]   (= code / adc::FS_CODE × adc::FSR; datasheet p.11: ±1.2 V FS; p.43: 22-bit twos complement)
 V_TIA = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri             [V]   (= 2 × I_PD × RF, differential TIA output)
 I_PD       = V_TIA / (2 × RF)                              [A]   (photodiode current)
 OT         = (I_PD_LED − I_PD_ALED) / I_LED                     [—]   (electro-optical system ratio: LED efficiency × tissue transmittance × PD responsivity)
 ```
+
+**`adc::FS_CODE = 2^21` (2097152), not 2^21−1 (corrected v0.51, 2026-08-03):** the ADC is a
+22-bit bipolar twos-complement converter, so 1 LSB = `adc::FSR / 2^21` and the code range is
+`[−2^21, +2^21−1]` — **asymmetric**. Table 7 (p.88) confirms the LSB via rows `code=+1 ↔ +1.2/2^21 V`,
+`code=−1 ↔ −1.2/2^21 V`, `code=0 ↔ 0 V`, and the negative rail `−1.2 V ↔ −2^21` (exact). The table's
+last row `+1.2 V ↔ +2^21−1` is mutually **incompatible** with those (it implies LSB = 1.2/(2^21−1)):
+it is a nominal label — the max positive code +2^21−1 actually represents `+1.2 V − 1 LSB`. The scale
+is anchored on the consistent four rows (denominator 2^21), not on that last row. Numerical impact of
+the former 2^21−1: ~0.5 ppm — negligible, but the value now matches the datasheet transfer function.
 
 **V_TIA convention (v0.51, 2026-08-03):** the library stores the **differential** TIA output voltage, matching the datasheet numbers literally (§9.2.2 + Fig. 135: "Ideal Operating Point" = 0.6 V, "TIA max (Differential)" = 1.0 V — the datasheet has no symbol named "V_OD"; a prior session's citation of "V_OD(fs)" was corrected 2026-07-21 after rendering the actual PDF). All identifiers use the bare `v_tia` / `V_TIA` name with no `_diff` suffix: the code has no single-ended or per-branch value (each branch would be `v_tia / 2`), so there is nothing to disambiguate from. The earlier "naming rule 4b" that forbade bare `v_tia` and mandated a `_diff`/`_branch` suffix was removed in v0.51. Empirical limits (IncuNest 16.A, `tia_linearity_sweep.py` 2026-07-08): linear up to ~1.8 V diff, hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-subtraction).
 
@@ -530,11 +552,8 @@ enum class AFE4490ChState : uint8_t {
 };
 
 struct AFE4490AnalogState {
-    // Physical detection thresholds (PHYSICS — datasheet/silicon/board characterization, never runtime policy)
-    // v_tia thresholds live in tia_axis (FS_V / LIN_V) — the single source of truth; no aliases here.
-    static constexpr int32_t kAdcSatPos   =  2096700;  // adc_code — positive rail +2096921 minus ~220-code guard
-    static constexpr int32_t kAdcSatNeg   = -2096700;  // adc_code — negative rail −2096919 plus ~220-code guard
-    // Rails measured empirically via an AMBDAC sweep test (IncuNest 16.A, 2026-07-10)
+    // Detection thresholds live in namespaces, not here: v_tia in tia_axis (FS_V/LIN_V),
+    // ADC saturation rails in adc (SAT_POS/SAT_NEG). Both single sources of truth, no aliases.
 
     // Values — ALWAYS computed (value-always policy), even under saturation
     float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
@@ -543,8 +562,8 @@ struct AFE4490AnalogState {
     float ot_led1,         ot_led2;                                              // A/A — (i_pd_led − i_pd_aled)/ILEDx_A
 
     // Validity masks — bit = channel (1 << (uint8_t)AFE4490Ch)
-    uint8_t adc_sat_pos  = 0;  // code ≥ kAdcSatPos
-    uint8_t adc_sat_neg  = 0;  // code ≤ kAdcSatNeg
+    uint8_t adc_sat_pos  = 0;  // code ≥ adc::SAT_POS
+    uint8_t adc_sat_neg  = 0;  // code ≤ adc::SAT_NEG
     uint8_t tia_over_fs  = 0;  // v_tia > tia_axis::FS_V (no lower bound: photocurrent unipolar)
     uint8_t tia_over_lin = 0;  // v_tia > tia_axis::LIN_V
 
@@ -561,7 +580,7 @@ struct AFE4490AnalogState {
 
 **Invalidity policy (value-always, v0.35):** every field is always computed from the raw codes — no NaN, no sentinels. The validity masks tell the consumer whether each value is a *measurement* (`CH_VALID_RANGE`), a probably-correct value outside TI guarantee (`CH_EXTENDED_RANGE`, empirically linear band 1.0–1.8 V diff), or a *bound* (`CH_CLIPPED_RANGE`: ADC sat pos → real ≥ stored; sat neg → real ≤ stored; TIA over lin → TIA compresses). Rationale: an OFF_SPEC value is still the best estimate; a clipped value is an actionable bound for HGAC; and traces remain plottable. Consumers must use the helpers, never the raw masks — packing is per-stage today (option A) but may become per-channel (option B).
 
-**Thresholds — single source of truth (`namespace tia_axis`, v0.48; aliases removed v0.51):** the five ordered `v_tia` thresholds live once in `tia_axis` — `IDEAL_V` 0.6 / `GUARD_V` 0.9 / `FS_V` 1.0 / `ADC_SAT_V` 1.2 / `LIN_V` 1.8 — with a `static_assert` enforcing their strict ascending order at compile time. All consumers reference `tia_axis::` directly (no per-struct aliases): the `tia_over_fs`/`tia_over_lin` masks compare against `tia_axis::FS_V`/`LIN_V`, and HGAC policy (`hgac_v_tia_thr`/`hgac_v_tia_ideal`, runtime-tunable `AFE4490Config` fields) takes its defaults from it, with `setHgacVTiaThr()` clamping to ≤ `FS_V` so the guard stays below the reliable range. `ADC_SAT_V` is nominal — the operative saturation flag `kAdcSatPos` remains the empirical rail in adc_code (≈1.199 V), not derived from the axis.
+**Thresholds — single source of truth (`namespace tia_axis` for v_tia, `namespace adc` for ADC; v0.48, aliases removed v0.51, ADC constants consolidated into `adc`):** the four ordered `v_tia` thresholds live once in `tia_axis` — `IDEAL_V` 0.6 / `GUARD_V` 0.9 / `FS_V` 1.0 / `LIN_V` 1.8 — with a `static_assert` enforcing strict ascending order, including `adc::FSR` (1.2 V, the ADC full-scale mapped onto the v_tia axis at unity gain) between `FS_V` and `LIN_V`. All consumers reference `tia_axis::` / `adc::` directly (no per-struct aliases): the `tia_over_fs`/`tia_over_lin` masks compare against `tia_axis::FS_V`/`LIN_V`, the `adc_sat_pos`/`adc_sat_neg` masks against `adc::SAT_POS`/`SAT_NEG`, and HGAC policy (`hgac_v_tia_thr`/`hgac_v_tia_ideal`, runtime-tunable `AFE4490Config` fields) takes its defaults from `tia_axis`, with `setHgacVTiaThr()` clamping to ≤ `FS_V`. The ADC full-scale (`adc::FSR`) is nominal — the operative saturation flag is `adc::SAT_POS`, an empirical rail in adc_code (`POS_RAIL_ACTUAL − SAT_GUARD`), not derived from the voltage axis.
 
 **`CH_EXTENDED_RANGE` observability is ADC-gated (not the full (1.0, 1.8] band):** `tia_axis::FS_V` (1.0 V) and `tia_axis::LIN_V` (1.8 V) are *TIA* properties — the silicon's extended-linearity band — independent of the downstream chain. What is actually *observable* as `CH_EXTENDED_RANGE` depends on Stage 2 gain and AMBDAC, because `chState()` gives `adcSat` precedence (`CLIPPED > OFF_SPEC`) and the ADC full-scale is only ±1.2 V:
 
@@ -1032,7 +1051,7 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 
 | Bit | Constant | Condition |
 |---|---|---|
-| 0x2000 | `RSQM_DIAG_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `kAdcSatPos` = 2 096 700) |
+| 0x2000 | `RSQM_DIAG_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `adc::SAT_POS` = 2 096 700) |
 | 0x4000 | `RSQM_DIAG_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
 | 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
 
@@ -1898,6 +1917,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.53-experiment | **Consolidate ADC constants into `namespace adc`.**                        |
+|         | `kAFE_ADC_FS_CODE`/`kAFE_ADC_FSR` (file-scope) and `kAdcSatPos`/`kAdcSatNeg`     |
+|         | (`AFE4490AnalogState`) moved to `namespace adc`: `FS_CODE`/`FSR`/`SCALE`, NOMINAL |
+|         | vs ACTUAL code rails, and guarded `SAT_POS`/`SAT_NEG` (guard now explicit).      |
+|         | Removed `tia_axis::ADC_SAT_V` (duplicate 1.2 V) — `tia_axis` references          |
+|         | `adc::FSR`. Internal reorg, no API consumer outside the library.                 |
 | v0.52-experiment | **Rename `v_tia_diff` → `v_tia` (drop the `_diff` suffix).**                |
 |         | All identifiers, config fields (`hgac_v_tia_thr`/`hgac_v_tia_ideal`), the       |
 |         | setter (`setHgacVTiaThr`), comments and CSV column headers (`V_TIA_*`).          |
