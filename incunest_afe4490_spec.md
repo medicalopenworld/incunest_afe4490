@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.50
+# incunest_afe4490 — Specification v0.52
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -50,7 +50,7 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 ```
 4 raw ADC codes (led1, led2, aled1, aled2)  +  2 SW-subtracted (led1_sub, led2_sub)
     │
-    ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA_DIFF, I_PD, OT)  — see §3c
+    ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA, I_PD, OT)  — see §3c
     │       ├─→ _rsqm_update()      (probe state, DiagCode, RSQI)
     │       └─→ _hgac_update()      (TIAGUARD guard + RF step-down — Phase 1, §5.8)
     │
@@ -496,12 +496,12 @@ Inverted step by step:
 
 ```
 V_ADC      = code / kAFE_ADC_FS_CODE × kAFE_ADC_FSR           [V]   (datasheet p.11: ±1.2 V FS; p.43: 22-bit twos complement)
-V_TIA_DIFF = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri             [V]   (= 2 × I_PD × RF, differential TIA output)
-I_PD       = V_TIA_DIFF / (2 × RF)                              [A]   (photodiode current)
+V_TIA = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri             [V]   (= 2 × I_PD × RF, differential TIA output)
+I_PD       = V_TIA / (2 × RF)                              [A]   (photodiode current)
 OT         = (I_PD_LED − I_PD_ALED) / I_LED                     [—]   (electro-optical system ratio: LED efficiency × tissue transmittance × PD responsivity)
 ```
 
-**V_TIA convention (naming rule 4b, 2026-07-08):** the library stores the **differential** TIA output voltage, matching the datasheet numbers literally (§9.2.2 + Fig. 135: "Ideal Operating Point" = 0.6 V, "TIA max (Differential)" = 1.0 V — the datasheet has no symbol named "V_OD"; a prior session's citation of "V_OD(fs)" was corrected 2026-07-21 after rendering the actual PDF). Per-branch value = `v_tia_diff / 2`. The bare name `v_tia` is forbidden — every identifier must carry the `_diff` or `_branch` suffix. Empirical limits (IncuNest 16.A, `tia_linearity_sweep.py` 2026-07-08): linear up to ~1.8 V diff, hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-subtraction).
+**V_TIA convention (v0.51, 2026-08-03):** the library stores the **differential** TIA output voltage, matching the datasheet numbers literally (§9.2.2 + Fig. 135: "Ideal Operating Point" = 0.6 V, "TIA max (Differential)" = 1.0 V — the datasheet has no symbol named "V_OD"; a prior session's citation of "V_OD(fs)" was corrected 2026-07-21 after rendering the actual PDF). All identifiers use the bare `v_tia` / `V_TIA` name with no `_diff` suffix: the code has no single-ended or per-branch value (each branch would be `v_tia / 2`), so there is nothing to disambiguate from. The earlier "naming rule 4b" that forbade bare `v_tia` and mandated a `_diff`/`_branch` suffix was removed in v0.51. Empirical limits (IncuNest 16.A, `tia_linearity_sweep.py` 2026-07-08): linear up to ~1.8 V diff, hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-subtraction).
 
 ### Circuit parameters per channel
 
@@ -524,30 +524,29 @@ enum class AFE4490Ch : uint8_t { LED1 = 0, ALED1 = 1, LED2 = 2, ALED2 = 3 };  //
 
 enum class AFE4490ChState : uint8_t {
     CH_VALID_RANGE    = 0,  // trustworthy measurement
-    CH_EXTENDED_RANGE = 1,  // v_tia_diff in (kVTiaDiffFs, kVTiaDiffLin] = (1.0, 1.8] V: TIA past its ±1 V TI
+    CH_EXTENDED_RANGE = 1,  // v_tia in (tia_axis::FS_V, tia_axis::LIN_V] = (1.0, 1.8] V: TIA past its ±1 V TI
                       // guarantee but empirically linear. TIA property — observability ADC-gated (see below)
     CH_CLIPPED_RANGE  = 2,  // ADC saturated or TIA beyond empirical linearity: value is a BOUND, not a measurement
 };
 
 struct AFE4490AnalogState {
     // Physical detection thresholds (PHYSICS — datasheet/silicon/board characterization, never runtime policy)
-    static constexpr float   kVTiaDiffFs  = 1.0f;      // V — TIA full-scale output, differential ("TIA max", Fig. 135; §9.2.2 p.87)
-    static constexpr float   kVTiaDiffLin = 1.8f;      // V — empirical linearity limit (sweep 2026-07-08, IncuNest 16.A)
+    // v_tia thresholds live in tia_axis (FS_V / LIN_V) — the single source of truth; no aliases here.
     static constexpr int32_t kAdcSatPos   =  2096700;  // adc_code — positive rail +2096921 minus ~220-code guard
     static constexpr int32_t kAdcSatNeg   = -2096700;  // adc_code — negative rail −2096919 plus ~220-code guard
     // Rails measured empirically via an AMBDAC sweep test (IncuNest 16.A, 2026-07-10)
 
     // Values — ALWAYS computed (value-always policy), even under saturation
     float v_adc_led1,      v_adc_led2,      v_adc_aled1,      v_adc_aled2;       // V
-    float v_tia_diff_led1, v_tia_diff_led2, v_tia_diff_aled1, v_tia_diff_aled2;  // V  (= 2 × I_PD × RF)
+    float v_tia_led1, v_tia_led2, v_tia_aled1, v_tia_aled2;  // V  (= 2 × I_PD × RF)
     float i_pd_led1,       i_pd_led2,       i_pd_aled1,       i_pd_aled2;        // A
     float ot_led1,         ot_led2;                                              // A/A — (i_pd_led − i_pd_aled)/ILEDx_A
 
     // Validity masks — bit = channel (1 << (uint8_t)AFE4490Ch)
     uint8_t adc_sat_pos  = 0;  // code ≥ kAdcSatPos
     uint8_t adc_sat_neg  = 0;  // code ≤ kAdcSatNeg
-    uint8_t tia_over_fs  = 0;  // v_tia_diff > kVTiaDiffFs (no lower bound: photocurrent unipolar)
-    uint8_t tia_over_lin = 0;  // v_tia_diff > kVTiaDiffLin
+    uint8_t tia_over_fs  = 0;  // v_tia > tia_axis::FS_V (no lower bound: photocurrent unipolar)
+    uint8_t tia_over_lin = 0;  // v_tia > tia_axis::LIN_V
 
     // Helpers — mandatory access path (mask packing may change without touching consumers)
     bool adcSatPos/adcSatNeg/adcSat(AFE4490Ch) const;
@@ -562,17 +561,17 @@ struct AFE4490AnalogState {
 
 **Invalidity policy (value-always, v0.35):** every field is always computed from the raw codes — no NaN, no sentinels. The validity masks tell the consumer whether each value is a *measurement* (`CH_VALID_RANGE`), a probably-correct value outside TI guarantee (`CH_EXTENDED_RANGE`, empirically linear band 1.0–1.8 V diff), or a *bound* (`CH_CLIPPED_RANGE`: ADC sat pos → real ≥ stored; sat neg → real ≤ stored; TIA over lin → TIA compresses). Rationale: an OFF_SPEC value is still the best estimate; a clipped value is an actionable bound for HGAC; and traces remain plottable. Consumers must use the helpers, never the raw masks — packing is per-stage today (option A) but may become per-channel (option B).
 
-**Thresholds — single source of truth (`namespace tia_axis`, v0.48):** the five ordered `v_tia_diff` thresholds live once in `tia_axis` — `IDEAL_V` 0.6 / `GUARD_V` 0.9 / `FS_V` 1.0 / `ADC_SAT_V` 1.2 / `LIN_V` 1.8 — with a `static_assert` enforcing their strict ascending order at compile time. Physics (`kVTiaDiffFs`/`kVTiaDiffLin`) are `constexpr` derived from it; HGAC policy (`hgac_v_tia_diff_thr`/`hgac_v_tia_diff_ideal`, runtime-tunable `AFE4490Config` fields) takes its defaults from it, and `setHgacVTiaDiffThr()` clamps to ≤ `FS_V` so the guard stays below the reliable range. `ADC_SAT_V` is nominal — the operative saturation flag `kAdcSatPos` remains the empirical rail in adc_code (≈1.199 V), not derived from the axis.
+**Thresholds — single source of truth (`namespace tia_axis`, v0.48; aliases removed v0.51):** the five ordered `v_tia` thresholds live once in `tia_axis` — `IDEAL_V` 0.6 / `GUARD_V` 0.9 / `FS_V` 1.0 / `ADC_SAT_V` 1.2 / `LIN_V` 1.8 — with a `static_assert` enforcing their strict ascending order at compile time. All consumers reference `tia_axis::` directly (no per-struct aliases): the `tia_over_fs`/`tia_over_lin` masks compare against `tia_axis::FS_V`/`LIN_V`, and HGAC policy (`hgac_v_tia_thr`/`hgac_v_tia_ideal`, runtime-tunable `AFE4490Config` fields) takes its defaults from it, with `setHgacVTiaThr()` clamping to ≤ `FS_V` so the guard stays below the reliable range. `ADC_SAT_V` is nominal — the operative saturation flag `kAdcSatPos` remains the empirical rail in adc_code (≈1.199 V), not derived from the axis.
 
-**`CH_EXTENDED_RANGE` observability is ADC-gated (not the full (1.0, 1.8] band):** `kVTiaDiffFs` (1.0 V) and `kVTiaDiffLin` (1.8 V) are *TIA* properties — the silicon's extended-linearity band — independent of the downstream chain. What is actually *observable* as `CH_EXTENDED_RANGE` depends on Stage 2 gain and AMBDAC, because `chState()` gives `adcSat` precedence (`CLIPPED > OFF_SPEC`) and the ADC full-scale is only ±1.2 V:
+**`CH_EXTENDED_RANGE` observability is ADC-gated (not the full (1.0, 1.8] band):** `tia_axis::FS_V` (1.0 V) and `tia_axis::LIN_V` (1.8 V) are *TIA* properties — the silicon's extended-linearity band — independent of the downstream chain. What is actually *observable* as `CH_EXTENDED_RANGE` depends on Stage 2 gain and AMBDAC, because `chState()` gives `adcSat` precedence (`CLIPPED > OFF_SPEC`) and the ADC full-scale is only ±1.2 V:
 
-| Config | Relation | ADC saturates at `v_tia_diff` = | `CH_EXTENDED_RANGE` observable band |
+| Config | Relation | ADC saturates at `v_tia` = | `CH_EXTENDED_RANGE` observable band |
 |---|---|---|---|
-| **Default** (RG = Ri, AMBDAC = 0) | `V_ADC = V_TIA_DIFF` | 1.2 V | (1.0, **1.2**] V |
-| Stage 2 ×2 (6 dB) | `V_ADC = 2·V_TIA_DIFF` | 0.6 V | **∅** (ADC saturates below 1.0 V) |
-| AMBDAC = *k* µA (RG = Ri) | `V_ADC = V_TIA_DIFF − 0.2k` | 1.2 + 0.2k V | extends up; **k ≥ 3 µA** reaches 1.8 V |
+| **Default** (RG = Ri, AMBDAC = 0) | `V_ADC = V_TIA` | 1.2 V | (1.0, **1.2**] V |
+| Stage 2 ×2 (6 dB) | `V_ADC = 2·V_TIA` | 0.6 V | **∅** (ADC saturates below 1.0 V) |
+| AMBDAC = *k* µA (RG = Ri) | `V_ADC = V_TIA − 0.2k` | 1.2 + 0.2k V | extends up; **k ≥ 3 µA** reaches 1.8 V |
 
-With the default configuration `tia_over_lin` (`v_tia_diff > 1.8 V`) can never fire — the reconstructed value is capped at ~1.2 V by ADC saturation, which triggers `CH_CLIPPED_RANGE` via `adcSat` first. The (1.2, 1.8] tail is only reachable by using AMBDAC to shift the ADC window upward (operational use of AMBDAC in the 1.2–1.8 V TIA zone is the deferred "AMBDAC off-spec-zone" task, layer v2).
+With the default configuration `tia_over_lin` (`v_tia > 1.8 V`) can never fire — the reconstructed value is capped at ~1.2 V by ADC saturation, which triggers `CH_CLIPPED_RANGE` via `adcSat` first. The (1.2, 1.8] tail is only reachable by using AMBDAC to shift the ADC window upward (operational use of AMBDAC in the 1.2–1.8 V TIA zone is the deferred "AMBDAC off-spec-zone" task, layer v2).
 
 **ADC rail characterization (IncuNest 16.A, 2026-07-10, via AMBDAC over-cancellation):** the empirical rails are NOT the datasheet code limits (±2^21). Positive rail = **+2096921**, constant and identical on all 4 channels. Negative rail = **−2096919**, constant on LED1/LED2; ALED1/ALED2 do not pin — their published codes oscillate down to ~−2096810 (approximate interval, limited observation time), because ADC averaging mixes clipped and non-clipped conversions within the window. Detection thresholds therefore carry a **guard band of ~220 counts** (2× the worst observed ALED-to-rail distance of 109 counts) inside the rail, applied to both polarities since the averaging mechanism is sign-independent. A legitimate code within 220 counts of the rail (0.01% of range) is functionally saturated anyway, so false positives are not a practical concern. Note: an exact comparison against the assumed symmetric rail −2096921 would never have triggered (`adc_sat_neg` dead flag) — found empirically.
 
@@ -583,7 +582,7 @@ With the default configuration `tia_over_lin` (`v_tia_diff > 1.8 V`) can never f
 | Consumer | Fields used |
 |---|---|
 | `_rsqm_update()` | `ot_led1/ot_led2` + `otLedxValid()` (probe state), `adcSatPos(ALEDx)` (RSQM_DIAG_AMB_SAT), `i_pd_*` (disconnect) |
-| `_hgac_update()` (§5.8, Phase 1) | `v_tia_diff_led1/led2/aled1/aled2` (guard trip, per gain domain) |
+| `_hgac_update()` (§5.8, Phase 1) | `v_tia_led1/led2/aled1/aled2` (guard trip, per gain domain) |
 
 ---
 
@@ -593,10 +592,9 @@ Declared `public` in `incunest_afe4490.h`. Aggregates internal signals not publi
 
 ```cpp
 struct AFE4490DebugData {
-    AFE4490AnalogState analog;  // V_ADC, V_TIA_DIFF, I_PD for all 4 channels
+    AFE4490AnalogState analog;  // V_ADC, V_TIA, I_PD for all 4 channels
     AFE4490RF hgac_rf_led1;          // current RF, IR domain — HGAC Phase 1 (§5.8)
     AFE4490RF hgac_rf_led2;          // current RF, RED domain
-    bool      hgac_alarm_gain_floor; // true if either domain is at RF_10K and still saturating
 };
 ```
 
@@ -997,7 +995,7 @@ Since v0.35 OT is computed in `_compute_analog_state()` and stored in `AFE4490An
 OT is the **full electro-optical system ratio** — it combines LED wall-plug efficiency, tissue transmittance, and photodiode responsivity into a single dimensionless number. It is not the tissue optical transmittance alone.
 
 - Threshold: `as.ot_led1 > rsqm_ot_thr` OR `as.ot_led2 > rsqm_ot_thr` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*. Default `rsqm_ot_thr = 1.0e-4` (v0.44, widened from 8.5e-5) — runtime-configurable via `setRsqmOtThr()`.
-- Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_rsqm_set_probe_state()` instead.
+- Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_rsqm_request_probe_state()` instead.
 - **Until 2026-07-24**, this check also folded in `!as.otLedxValid()` (saturation) via OR — collapsing "channel saturated" and "channel clean but reads high" into the same `PROBE_NOT_APPLIED` value. Split into the dedicated `PROBE_SATURATING` state above (see its rationale).
 
 Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54). First real-HW test (2026-07-19, CONTEC MS100 simulator, probe applied) showed the theoretical APPLIED estimate does not hold in practice: the simulator is highly sensitive to probe placement and OT frequently reads above 8.5e-5 with the probe applied, so `probe_state` never reached APPLIED at that threshold. `rsqm_ot_thr` was widened to 1.0e-4 as a practical mitigation — still not a calibrated value from a real neonatal probe/patient.
@@ -1008,7 +1006,7 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 
 **PROBE_APPLIED** — neither of the above.
 
-**State transition debounce (`_rsqm_set_probe_state`):** any state change requires `_rsqm_probe_state_min_samples` consecutive samples (= `rsqm_probe_state_min_s × fs`, default 0.2 s = 100 samples @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events. Runtime-configurable via `setRsqmProbeStateMinS()`.
+**State transition debounce (`_rsqm_request_probe_state`):** any state change requires `_rsqm_probe_state_min_samples` consecutive samples (= `rsqm_probe_state_min_s × fs`, default 0.2 s = 100 samples @ 500 Hz) with the same requested state before being committed. A single different sample resets the counter. This eliminates false transient states during cable connect/disconnect events. Runtime-configurable via `setRsqmProbeStateMinS()`.
 
 #### 5.6.3 DiagCode
 
@@ -1038,11 +1036,7 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 | 0x4000 | `RSQM_DIAG_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
 | 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
 
-**Bit 16 — HGAC (updated by `_hgac_update()`, see §5.8):**
-
-| Bit | Constant | Condition |
-|---|---|---|
-| 0x10000 | `HGAC_DIAG_GAIN_FLOOR` | Either gain domain is at `RF_10K` and still saturating (debounced) |
+HGAC publishes no DiagCode bit (the former bit 16 `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — no consumer decoded it; the "at RF floor and still saturating" condition is derivable at the point of use as `rf == RF_10K` while TIAGUARD persists, and its actuator, ILED, is Phase 4).
 
 Multiple bits may be set simultaneously.
 
@@ -1059,10 +1053,11 @@ rsqi = 0  otherwise
 
 ### 5.7 Autonomous diagnostics task (`_diag_task_body`)
 
-A dedicated internal FreeRTOS task (`incunest_diag`, low priority) calls `runAfeDiagnostics()` autonomously in two situations:
+A dedicated internal FreeRTOS task (`incunest_diag`, low priority) calls `runAfeDiagnostics()` autonomously on a periodic schedule:
 
-1. **On probe state change** — `_rsqm_set_probe_state()` sends `xTaskNotify` when a new state is committed. The task wakes immediately and runs diagnostics (regardless of state, including APPLIED).
-2. **Periodic timeout** — `xTaskNotifyWait` times out every `rsqm_diag_period_ms` (default 5000 ms). Diagnostics run only if `probe_state ≠ PROBE_APPLIED` AND `probe_state ≠ PROBE_SATURATING` (since 2026-07-24), to avoid disrupting HR/SpO2 acquisition with the 10 ms blackout window — and, for `PROBE_SATURATING` specifically, to avoid disrupting HGAC's attempt to clear the saturation while a real patient may be connected.
+- **Periodic** — the task wakes every `rsqm_diag_period_ms` (default 5000 ms) via `vTaskDelay`. Diagnostics run only in states with no patient confirmed in the optical path: `probe_state == PROBE_DISCONNECTED` OR `probe_state == PROBE_NOT_APPLIED`. `PROBE_APPLIED` and `PROBE_SATURATING` are excluded to avoid disrupting HR/SpO2 acquisition with the 10 ms blackout window — and, for `PROBE_SATURATING` specifically, to avoid disrupting HGAC's attempt to clear the saturation while a real patient may be connected. This is a whitelist by design (since v0.50): any future `ProbeState` defaults to NOT diagnosing, so a new state can never silently interrupt acquisition — it must be added here deliberately. Equivalent to the former `≠ APPLIED AND ≠ SATURATING` blacklist for the four states that exist today.
+
+There is no on-state-change trigger: it only advanced the first post-transition diagnostic by ≤ 5 s while no patient was present (no clinical value) and woke the task pointlessly on transitions into APPLIED/SATURATING. Removed in v0.50 (see §14).
 
 The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `INCUNEST_AFE4490_DIAG_TASK_PRIORITY` (= main task priority − 2).
 
@@ -1073,7 +1068,7 @@ The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `
 ### 5.8 HGAC — Hardware Gain Control (Phase 1: RF-only TIAGUARD response)
 
 **Status (v0.37): Phase 1 implemented — RF-only guard stepping RF down on TIAGUARD
-(`v_tia_diff` above the guard threshold, below full-scale), no ascent yet (manual recovery).
+(`v_tia` above the guard threshold, below full-scale), no ascent yet (manual recovery).
 Disabled by default (`hgac_enable = false`).**
 Runs in `_process_sample()`
 immediately after `_rsqm_update()`, once per sample at 500 Hz. This is the first of a planned
@@ -1084,14 +1079,14 @@ optional/deferred).
 
 #### 5.8.1 TIAGUARD — TIA over-threshold guard (single guard, v1)
 
-With Stage 2 frozen at ×1 gain and AMBDAC=0 (v1 defaults), `v_tia_diff == v_adc` — the ADC
+With Stage 2 frozen at ×1 gain and AMBDAC=0 (v1 defaults), `v_tia == v_adc` — the ADC
 clips before the TIA's own linearity limit, so ADC saturation and TIA-linearity saturation
-collapse into a single guard trip. **TIAGUARD** names this condition — `v_tia_diff` above the
+collapse into a single guard trip. **TIAGUARD** names this condition — `v_tia` above the
 guard threshold (`GUARD_V` = 0.9 V, which sits BELOW full-scale; see `tia_axis`) — not the
 response to it:
 
 ```
-tiaguard(channel) = v_tia_diff > hgac_v_tia_diff_thr   (default 0.9 V)
+tiaguard(channel) = v_tia > hgac_v_tia_thr   (default 0.9 V)
 ```
 
 Evaluated per gain domain (IR = LED1+ALED1; RED = LED2+ALED2 — the two domains ENSEPGAIN=1
@@ -1101,8 +1096,12 @@ saturating trips that domain's guard (both share one RF).
 #### 5.8.2 Gate G0
 
 ```
-gate_ok = (probe_state == PROBE_APPLIED OR probe_state == PROBE_SATURATING)
-          AND !(diag_code & RSQM_DIAG_HW_SETTLING)
+// Implemented as a gate-OFF in _hgac_update() (reset TIAGUARD debounce counters + return):
+gate_off = (probe_state == PROBE_NOT_APPLIED OR probe_state == PROBE_DISCONNECTED)
+           OR (diag_code & RSQM_DIAG_HW_SETTLING)
+// Idle states listed explicitly (not !(APPLIED||SATURATING)): a future ProbeState is NOT
+// gated off here and would let HGAC act — revisit this list when adding a ProbeState.
+// Equivalent today to: gate_ok = (APPLIED OR SATURATING) AND !HW_SETTLING
 ```
 
 **Removed in v0.44c (2026-07-21):** a third clause `invalid_fraction_ema.mean <=
@@ -1117,7 +1116,7 @@ commits an actual RF step — so under *sustained* TIAGUARD the gate closed and 
 TIAGUARD counters (see `_hgac_update()`) before the debounce could ever complete, blocking the
 step-down exactly when it was most needed. No test ever caught this: the one test that
 exercises the step-down path (`test_hgac_descent_after_persistence`) deliberately used a
-stimulus (`v_tia_diff ≈ 0.973 V`, since changed — see below) that stayed below `kVTiaDiffFs`
+stimulus (`v_tia ≈ 0.973 V`, since changed — see below) that stayed below `kVTiaFs`
 (1.0 V) — i.e. `allValidRange()` stayed `true` throughout — so the EMA clause was never actually
 exercised by continuous TIAGUARD in practice. HGAC's own persistence debounce
 inside `_hgac_check_tiaguard()` (O8.1) already exists specifically to reject one-sample blips,
@@ -1147,12 +1146,14 @@ now correctly excluded too.
 
 Per gain domain, debounced by `hgac_tiaguard_debounce_min_s` (default 0.5 s = 250 samples @ 500 Hz):
 
-1. If not TIAGUARD → reset debounce counter and gain-floor alarm flag for that domain.
+1. If not TIAGUARD → reset the debounce counter for that domain.
 2. If TIAGUARD and RF is not at the floor (`RF_10K`) → after the debounce window, step RF
    down one LUT level (`kAFE_RF_OHM`) via `_hgac_step_rf_down()`.
-3. If TIAGUARD and RF is already at `RF_10K` → after the (same) debounce window, set the
-   domain's gain-floor alarm flag (`HGAC_DIAG_GAIN_FLOOR`, bit 16). No ILED actuation yet
-   (Phase 4) — this is v1's "excessive ambient light" signal.
+3. If TIAGUARD and RF is already at `RF_10K` → nothing to do (no further step possible; ILED
+   actuation is Phase 4). The debounce counter stays latched (not reset) so it doesn't
+   retrigger the instant TIAGUARD clears. No DiagCode bit is published (the former
+   `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — see §14; the condition is derivable at the
+   point of use as `rf == RF_10K` while TIAGUARD persists).
 
 No ascent in Phase 1 — recovery from a lowered RF is manual (a documented limitation of this
 phase, not an oversight; Phase 2 adds predicted/hysteresis-protected ascent).
@@ -1170,7 +1171,7 @@ var  ← var × k²
 
 `_hgac_step_rf_down()` performs the register write (via the existing `setTIAGainLED1`/`LED2`
 setters — reused, not duplicated) and the corresponding EMA rescale as one operation, then
-arms `_rsqm_settling_countdown` (≈150 ms, `hgac_settle_time_s`) — the first real producer of
+arms `_rsqm_settling_countdown` (≈150 ms, `afe_settle_time_s`) — the first real producer of
 `RSQM_DIAG_HW_SETTLING` (§5.6.3). **This ordering is mandatory, not an optimization:** without
 it, an RF change would leave the EMA's stale pre-change state in place for ~3×`spo2_ema_var_tau_s`
 (≈18 s), during which R can be corrupted by tens to ~100% (documented in the project's O10/C1
@@ -1191,19 +1192,13 @@ called from `_hgac_update()` — never directly from application code or another
 
 #### 5.8.5 Parameters (see §10.9) and telemetry
 
-`AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_diff_thr`, `hgac_v_tia_diff_ideal`
+`AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_thr`, `hgac_v_tia_ideal`
 (telemetry only in v1), `hgac_tiaguard_debounce_min_s`. `$SET`/`$LCFG` wiring in PulseNest's
 `src/main.cpp`. `$M4` gained
-`HGAC_RF1,HGAC_RF2,HGAC_ALARM` (current RF per domain + combined gain-floor alarm), sourced
-from new `AFE4490DebugData` fields `hgac_rf_led1`/`hgac_rf_led2`/`hgac_alarm_gain_floor`
-(§3d), populated alongside `analog` in `_process_sample()`.
-
-#### 5.8.6 Known limitation carried into Phase 1 verification
-
-The `HGAC_DIAG_GAIN_FLOOR` bit and `AFE4490Data::diag_code` are refreshed at the end of
-`_hgac_update()` (`_current_data.diag_code = _diag_code`) specifically because `_rsqm_update()`
-(which runs first) already snapshots the pre-HGAC `_diag_code` into `_current_data` — without
-this second refresh, HGAC's bit would lag the published frame by exactly one sample.
+`HGAC_RF1,HGAC_RF2` (current RF per domain), sourced from `AFE4490DebugData` fields
+`hgac_rf_led1`/`hgac_rf_led2` (§3d), populated alongside `analog` in `_process_sample()`.
+(A third field `HGAC_ALARM` / `hgac_alarm_gain_floor` existed through v0.49 and was removed in
+v0.50 — see §14.)
 
 ---
 
@@ -1680,10 +1675,10 @@ See §5.8 for algorithm description.
 | Parameter | API | Default | Range | Effect |
 |---|---|---|---|---|
 | Master enable | `setHgacEnable()` | `false` | true / false | HGAC never actuates while disabled — safe default until bench-validated |
-| Saturation guard threshold | `setHgacVTiaDiffThr()` | 0.9 V | — | `v_tia_diff` above this trips the TIAGUARD guard for that domain |
+| Saturation guard threshold | `setHgacVTiaThr()` | 0.9 V | — | `v_tia` above this trips the TIAGUARD guard for that domain |
 | Ideal operating point | — (config field only) | 0.6 V | — | Telemetry only in v1 — not consumed by the TIAGUARD response logic yet |
-| TIAGUARD persistence | `setHgacTiaguardDebounceMinS()` | 0.5 s (250 samples @ 500 Hz) | 0.0–10.0 | Debounce before a step-down or gain-floor alarm — urgent path (O8.1) |
-| Settling time (fixed, not `$SET`-tunable) | `hgac_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; coarse diagnostic window, distinct from the sub-sample-period `_compute_settle_margin()` used for CF auto-selection |
+| TIAGUARD persistence | `setHgacTiaguardDebounceMinS()` | 0.5 s (250 samples @ 500 Hz) | 0.0–10.0 | Debounce before an RF step-down — urgent path (O8.1) |
+| Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; coarse diagnostic window, distinct from the sub-sample-period `_compute_settle_margin()` used for CF auto-selection |
 
 ---
 
@@ -1754,7 +1749,7 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | → ENSEPGAIN | 1 | — | 0 | **0** | With 0, both channels use TIAGAIN for the TIA. Simplifies configuration. Enable if independent gain per channel is needed |
 | → Stage2 LED1 | EN, 0 dB | — | disabled | **disabled** | RF=500kΩ provides sufficient gain for typical PPG. Stage2 at 0dB adds no useful gain. Configurable via setter |
 | → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Default at 500 Hz / RF_100K: 55 pF |
-| → RF LED1 | 1 MΩ | — | 500 kΩ | **100 kΩ** | Chosen for the earlier 20 mA default. ✅ Verified OK at the 50 mA default (v0.47): measured v_tia_diff < 0.5 V with a finger applied (≪ 1.0 V FS, even below the 0.6 V ideal point) — no saturation, RF_100K adequate. Behaviour with the real neonatal probe/patient (transmittance, perfusion, probe geometry) is uncharacterised — verify v_tia_diff there. Configurable via setTIAGain() |
+| → RF LED1 | 1 MΩ | — | 500 kΩ | **100 kΩ** | Chosen for the earlier 20 mA default. ✅ Verified OK at the 50 mA default (v0.47): measured v_tia < 0.5 V with a finger applied (≪ 1.0 V FS, even below the 0.6 V ideal point) — no saturation, RF_100K adequate. Behaviour with the real neonatal probe/patient (transmittance, perfusion, probe geometry) is uncharacterised — verify v_tia there. Configurable via setTIAGain() |
 | **TIA_AMB_GAIN** | 0x004006 | — | 0x000001 | **0x000000** | With ENSEPGAIN=0, the RF of this register does not affect the main TIA. Relevant for FLTRCNRSEL, AMBDAC and Stage2 |
 | → RF LED2/amb | 1 MΩ | — | 250 kΩ | **100 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
 | → CF LED2/amb | 5 pF | — | 5 pF | **auto (§7.2)** | Same as CF LED1 (ENSEPGAIN=0 shares config) |
@@ -1846,7 +1841,7 @@ Three distinct hardware states are distinguishable from the raw ADC channel patt
 | **PROBE_NOT_APPLIED** | saturated | saturated | low–mid | low–mid | No tissue attenuation; LEDs illuminate photodiode directly. ALED channels depend on ambient light level |
 | **PROBE_APPLIED** | PPG signal | PPG signal | low | low | Normal operation; tissue attenuates LED light; ambient channels remain low |
 
-**Detection method:** see §5.6. DISCONNECTED is instantaneous; SATURATING/NOT_APPLIED/APPLIED use optical transmittance and channel validity (single threshold + 50-sample debounce); APPLIED uses 750-sample EMA warmup for RSQM_DIAG_SIGNAL_WEAK.
+**Detection method:** see §5.6. DISCONNECTED is instantaneous; SATURATING/NOT_APPLIED/APPLIED use optical transmittance and channel validity (single threshold + 0.2 s debounce, 100 samples @ 500 Hz — derived from `rsqm_probe_state_min_s × fs`); APPLIED uses 750-sample EMA warmup for RSQM_DIAG_SIGNAL_WEAK.
 
 > These states are computed by RSQM (_rsqm_update) and gate HGAC operation (§5.8.2): HGAC acts in `PROBE_APPLIED` and `PROBE_SATURATING`, and must not act in `PROBE_DISCONNECTED` or plain `PROBE_NOT_APPLIED`.
 
@@ -1903,6 +1898,16 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.52-experiment | **Rename `v_tia_diff` → `v_tia` (drop the `_diff` suffix).**                |
+|         | All identifiers, config fields (`hgac_v_tia_thr`/`hgac_v_tia_ideal`), the       |
+|         | setter (`setHgacVTiaThr`), comments and CSV column headers (`V_TIA_*`).          |
+|         | Rationale (Alex): only the differential value exists, so `_diff` is redundant   |
+|         | and falsely implies a `v_tia_branch` that is nowhere in the code. Removed the    |
+|         | old "naming rule 4b". API-breaking: config/setter renamed; CSV headers change    |
+|         | from `V_TIA_DIFF_*` to `V_TIA_*` (breaks by-name parsing of older captures).      |
+| v0.51-experiment | **Removed `AFE4490AnalogState::kVTiaDiffFs`/`kVTiaDiffLin` aliases.**       |
+|         | They only re-exposed `tia_axis::FS_V`/`LIN_V` (the single source of truth); the   |
+|         | `tia_over_fs`/`tia_over_lin` masks now compare against `tia_axis::` directly.     |
 | v0.50-experiment | **PROBE_SATURATING checks POSITIVE saturation only (`anyPositiveSaturation`).**|
 |         | RSQM's saturation branch changed from `!allValidRange()` to                     |
 |         | `anyPositiveSaturation() = (adc_sat_pos \| tia_over_fs)`. Rationale (Alex): the  |
@@ -1912,6 +1917,43 @@ Key references for each algorithm implemented in this library.
 |         | Identical behaviour today (AMBDAC=0 → adc_sat_neg always 0); differs only if     |
 |         | AMBDAC is enabled (layer v2). New helper `anyPositiveSaturation()`;              |
 |         | `allValidRange()` removed. No behaviour change. 36/36 tests, build OK.        |
+|         | Also renamed `_rsqm_set_probe_state()` to `_rsqm_request_probe_state()`:    |
+|         | a debounce gate that commits a state only after N consecutive identical     |
+|         | requests, not an imperative setter; the name now matches its `requested`    |
+|         | parameter and contract. Private method, no signature/behaviour change.      |
+|         | Removed the diag-task on-state-change trigger (`xTaskNotify` from           |
+|         | `_rsqm_request_probe_state`); `_diag_task_body` now polls via `vTaskDelay`  |
+|         | every rsqm_diag_period_ms (5 s). The notification only advanced the first   |
+|         | diagnostic by <=5 s while no patient was present (no value) and woke the    |
+|         | task pointlessly on transitions into APPLIED/SATURATING. Behaviour change.  |
+|         | Detector: the two `_rsqm_request_probe_state()` call sites (DISCONNECTED    |
+|         | branch + else) collapsed into one flat if/else-if priority ladder with a    |
+|         | single call, matching the priority order already in §5.6.                   |
+|         | Readability only, no behaviour change.                                      |
+|         | Diag task gate is now a whitelist (DISCONNECTED || NOT_APPLIED) instead     |
+|         | of a blacklist (not APPLIED, not SATURATING). Runs runAfeDiagnostics only   |
+|         | in states with no patient confirmed. Any future ProbeState defaults to      |
+|         | NOT diagnosing → never silently interrupts acquisition. Equivalent for      |
+|         | today's four states; no behaviour change.                                   |
+|         | Gate G0 in _hgac_update() rewritten to an explicit gate-OFF blacklist:      |
+|         | `NOT_APPLIED || DISCONNECTED || HW_SETTLING` instead of the `probe_active`  |
+|         | helper + double negation. Equivalent today (4 states); readability per      |
+|         | Alex. Trade-off recorded: a future ProbeState is NOT gated off (fail-open), |
+|         | unlike the diag-task whitelist above — revisit the list when adding states. |
+|         | Also in _hgac_check_tiaguard(): removed the single-use `tiaguard` bool +    |
+|         | `!tiaguard`; the early-return now tests the condition directly (De Morgan). |
+|         | Removed HGAC gain-floor signal end-to-end: bit HGAC_DIAG_GAIN_FLOOR         |
+|         | (0x10000), members _hgac_alarm_gain_floor_led1/2, param alarm_flag of       |
+|         | _hgac_check_tiaguard, AFE4490DebugData.hgac_alarm_gain_floor, getter        |
+|         | test_hgac_alarm_gain_floor, the $M4 HGAC_ALARM field (frame 37->36 cols),   |
+|         | and §5.8.6. No consumer ever decoded the bit (script parses <=col33;        |
+|         | motherBoard only prints diag_code). Behaviour change (bit gone from         |
+|         | diag_code, one fewer $M4 field). test_hgac Test 5 repurposed to assert      |
+|         | RF reaches the floor (RF_10K).                                              |
+|         | Renamed hgac_settle_time_s -> afe_settle_time_s: it arms the RSQM settling  |
+|         | countdown and models AFE front-end re-settling after any register change,   |
+|         | not an HGAC-specific quantity (comment already anticipates config-change    |
+|         | producers). Private constexpr, no public API break.                         |
 | v0.49-experiment | **Rename TIASAT → TIAGUARD + debounce naming; `adc_code` convention.**  |
 |         | The HGAC over-threshold condition was named "TIASAT" (TIA saturation) — it   |
 |         | collided with RSQM's `PROBE_SATURATING` and misled: the guard trips at        |
@@ -1928,13 +1970,13 @@ Key references for each algorithm implemented in this library.
 |         | convention, e.g. `_sample_count`) → state `_hgac_tiaguard_debounce_count`;     |
 |         | fixed sample thresholds use `_min_samples`. No behaviour change.              |
 |         | 36/36 native tests, ESP32-S3 (incunest_V16) build OK.                         |
-| v0.48-experiment | **Single source of truth for the v_tia_diff axis: `namespace tia_axis`.**|
+| v0.48-experiment | **Single source of truth for the v_tia axis: `namespace tia_axis`.**|
 |         | The five ordered thresholds (IDEAL 0.6 / GUARD 0.9 / FS 1.0 / ADC_SAT 1.2 / LIN  |
 |         | 1.8 V) were scattered across `AFE4490AnalogState` (physics constexpr) and        |
 |         | `AFE4490Config` (HGAC policy defaults). Now defined ONCE in `tia_axis`, with a    |
 |         | `static_assert` enforcing the strict ascending order at compile time.            |
-|         | `kVTiaDiffFs/Lin` and the `hgac_v_tia_diff_thr/ideal` defaults derive from it.    |
-|         | `setHgacVTiaDiffThr()` now clamps to ≤ FS_V (guard can't sit above the reliable   |
+|         | `kVTiaFs/Lin` and the `hgac_v_tia_thr/ideal` defaults derive from it.    |
+|         | `setHgacVTiaThr()` now clamps to ≤ FS_V (guard can't sit above the reliable   |
 |         | range at runtime). Values unchanged → no behaviour change except that clamp.     |
 |         | ADC_SAT_V is nominal; `kAdcSatPos` stays the empirical adc_code rail. 36/36 tests.  |
 | v0.47b-experiment | **Readability: RSQM's PROBE_SATURATING check uses `allValidRange()`.** |
@@ -1951,7 +1993,7 @@ Key references for each algorithm implemented in this library.
 |         | rating is NOT the limit — at the AFE's pulsed ~25 % duty, 50 mA peak sits    |
 |         | ≪ I_FP 100 mA and ~23 mW ≪ Pd, so there is ample margin (datasheet Medle,    |
 |         | reliability-caveated). Side-effects: (a) TIA does NOT saturate — measured   |
-|         | v_tia_diff < 0.5 V, finger, 50 mA/RF_100K (neonatal case uncharacterised); |
+|         | v_tia < 0.5 V, finger, 50 mA/RF_100K (neonatal case uncharacterised); |
 |         | (b) §8 timing note,                                                         |
 |         | ambient settling t5/t11 raised 200→400 counts (100 µs) for the 50 mA drive |
 |         | (longer LED extinction / CF discharge tail); (c) skin-thermal envelope      |
@@ -1965,7 +2007,7 @@ Key references for each algorithm implemented in this library.
 |         | `CH_CLIPPED`→`CH_CLIPPED_RANGE`; helpers `chClean()`→`chValidRange()` and    |
 |         | `allClean()`→`allValidRange()`. Motivation (Alex, 2026-07-26): the old       |
 |         | `CLEAN`/`OFF_SPEC` mix wasn't parallel; the new trio reads as one monotone   |
-|         | scale of `v_tia_diff` bands and drops the earlier `chInValidRange` proposal  |
+|         | scale of `v_tia` bands and drops the earlier `chInValidRange` proposal  |
 |         | (ambiguous "in-valid"). "VALID" = TI's guaranteed-linear range (±1.0 V), NOT |
 |         | that EXTENDED is invalid — enum comment clarifies the nuance. Pure rename:   |
 |         | no behavior change. Propagated to `pulsenest_lab.py`, `pulsenest_lab_spec.md`|
@@ -2021,7 +2063,7 @@ Key references for each algorithm implemented in this library.
 |         | gates (0.5 s persistence), so sustained saturation closed the gate and     |
 |         | reset the descent counters before the debounce could ever complete —      |
 |         | blocking the fix exactly when needed most. Never caught by tests: the only |
-|         | descent test uses a stimulus that stays below `kVTiaDiffFs` so `allValidRange()`|
+|         | descent test uses a stimulus that stays below `kVTiaFs` so `allValidRange()`|
 |         | never went false. Removed: `_hgac_invalid_ema` member, `hgac_gate_invalid_ |
 |         | frac_max`/`hgac_gate_window_s` config fields + `setHgacGateInvalidFracMax()`|
 |         | setter + its `$SET`/`$LCFG` wiring in PulseNest `src/main.cpp`. `_hgac_gate_|
@@ -2143,9 +2185,9 @@ Key references for each algorithm implemented in this library.
 | v0.37   | **HGAC Phase 1: RF-only saturation guard + descent + mandatory SpO2 EMA    |
 |         | rescale** (`_update_hgac()`, runs after `_update_rsqm()` in                 |
 |         | `_process_sample()`). New `AFE4490Config` fields `hgac_enable`,             |
-|         | `hgac_v_tia_diff_thr`, `hgac_v_tia_diff_ideal`, `hgac_descent_persist_s`,   |
+|         | `hgac_v_tia_thr`, `hgac_v_tia_ideal`, `hgac_descent_persist_s`,   |
 |         | `hgac_gate_invalid_frac_max`, `hgac_gate_window_s` (promoted from the       |
-|         | former fixed `hgac_v_tia_diff_thr/ideal` constexpr in the .cpp anonymous    |
+|         | former fixed `hgac_v_tia_thr/ideal` constexpr in the .cpp anonymous    |
 |         | namespace). New bit `HGAC_DIAG_GAIN_FLOOR` (0x10000). First real producer  |
 |         | of `RSQM_DIAG_HW_SETTLING` (previously unreachable). `EmaChannel::rescale()`|
 |         | added. Gate G0 implemented as `probe_state != PROBE_DISCONNECTED` (not     |
@@ -2169,11 +2211,11 @@ Key references for each algorithm implemented in this library.
 |         | tia_over_fs/lin, bit=channel per new `AFE4490Ch` enum); helpers +            |
 |         | `chState()` (`AFE4490ChState`: CH_VALID_RANGE/CH_EXTENDED_RANGE/CH_CLIPPED_RANGE,              |
 |         | precedence CLIPPED>OFF_SPEC>CLEAN); physical constants in struct             |
-|         | (kVTiaDiffFs=1.0, kVTiaDiffLin=1.8, kAdcSatPos/Neg=±2096700: empirical       |
+|         | (kVTiaFs=1.0, kVTiaLin=1.8, kAdcSatPos/Neg=±2096700: empirical       |
 |         | rails +2096921/−2096919 with ~220-code guard — ALED codes near the          |
 |         | negative rail oscillate without pinning due to ADC averaging).               |
 |         | Removed `rsqm_ot_saturated` sentinel and `rsqm_adc_positive_sat`;            |
-|         | `hgac_v_tia_diff_fs` superseded by `kVTiaDiffFs`. RSQM saturation            |
+|         | `hgac_v_tia_fs` superseded by `kVTiaFs`. RSQM saturation            |
 |         | policy now explicit and stricter (`otLedxValid()`: both channels             |
 |         | CH_VALID_RANGE, both rails, TIA linearity). Spec §3c, §5.6.2, §5.6.3.              |
 | v0.32   | Default values changed: LED1/LED2 current 11.7 mA → ~19.9 mA (code 34,  |

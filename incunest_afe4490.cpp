@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.50-experiment — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.52-experiment — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -99,25 +99,25 @@ namespace {
     constexpr float    hr_min_bpm          =  40.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
     constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
 
-    // ── HGAC — TIA operating range (DIFFERENTIAL domain, naming rule 4b) ─────
+    // ── HGAC — TIA operating range (DIFFERENTIAL domain) ─────
     // Reference: AFE4490 datasheet Fig. 135 ("AGC Loop"), §9.2.2.
     // TIA differential output range = ±1.0 V; ADC full-scale = ±1.2 V (22-bit).
-    // To recover v_tia_diff from an ADC reading at any Stage 2 gain and AMBDAC setting:
-    //   v_tia_diff_volt = (adc_value * 1.2f / 2097151.0f) / rg_gain + ambdac_val * 0.2f
+    // To recover v_tia from an ADC reading at any Stage 2 gain and AMBDAC setting:
+    //   v_tia_volt = (adc_value * 1.2f / 2097151.0f) / rg_gain + ambdac_val * 0.2f
     // where rg_gain is the linear Stage 2 gain (1/1.5/2/3/4), ambdac_val is AMBDAC[3:0]
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
     // 2097151 = 2^21-1: per datasheet Table 7, positive full-scale code maps to +1.2 V.
-    // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_diff_volt = adc_value * 1.2f / 2097151.0f.
+    // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_volt = adc_value * 1.2f / 2097151.0f.
     // Physical thresholds (fs = TIA full-scale differential 1.0 V, empirical lin 1.8 V) live in
-    // AFE4490AnalogState (kVTiaDiffFs / kVTiaDiffLin) since v0.35 — physics belongs to
+    // tia_axis (FS_V / LIN_V), the single source of truth, since v0.35 — physics belongs to
     // the reconstruction layer; only HGAC actuation POLICY stays here.
-    // hgac_v_tia_diff_thr/ideal are now runtime-tunable AFE4490Config fields (promoted
+    // hgac_v_tia_thr/ideal are now runtime-tunable AFE4490Config fields (promoted
     // from fixed constexpr here in Phase 1 — see incunest_afe4490.h private defaults,
     // matching the rsqm_* pattern) so their defaults live in the header, not here.
     // Empirical hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-
     // subtraction; independent of RF and AMBDAC; IncuNest 16.A sweep 2026-07-08).
     // Reserved for future use if HGAC ever needs the physical clip:
-    // static constexpr float hgac_v_tia_diff_clip = 1.94f;  // V — empirical hard clip (2026-07-08)
+    // static constexpr float hgac_v_tia_clip = 1.94f;  // V — empirical hard clip (2026-07-08)
 
     // ── HR3 FFT — radix-2 Cooley-Tukey DIT (in-place, complex interleaved) ──
     // x: float array of 2N elements [re0,im0, re1,im1, ..., re(N-1),im(N-1)]
@@ -320,8 +320,6 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hgac_tiaguard_debounce_min_samples(0),
       _hgac_tiaguard_debounce_count_led1(0),
       _hgac_tiaguard_debounce_count_led2(0),
-      _hgac_alarm_gain_floor_led1(false),
-      _hgac_alarm_gain_floor_led2(false),
       _debug_enabled(false)
 {
     // Quantize initial LED currents to the DAC grid (range already set in init list)
@@ -871,11 +869,11 @@ void INCUNEST_AFE4490::setHgacEnable(bool en) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHgacVTiaDiffThr(float v) {
+void INCUNEST_AFE4490::setHgacVTiaThr(float v) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     // Keep the guard on the operating axis: it must trip BELOW the TIA full-scale
     // (tia_axis::FS_V) so HGAC acts before the reading turns unreliable — never above it.
-    hgac_v_tia_diff_thr = constrain(v, 0.0f, tia_axis::FS_V);
+    hgac_v_tia_thr = constrain(v, 0.0f, tia_axis::FS_V);
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -949,8 +947,8 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.rsqm_ema_mean_tau_s      = rsqm_ema_mean_tau_s;
     cfg.rsqm_ema_var_tau_s       = rsqm_ema_var_tau_s;
     cfg.hgac_enable                 = hgac_enable;
-    cfg.hgac_v_tia_diff_thr          = hgac_v_tia_diff_thr;
-    cfg.hgac_v_tia_diff_ideal        = hgac_v_tia_diff_ideal;
+    cfg.hgac_v_tia_thr          = hgac_v_tia_thr;
+    cfg.hgac_v_tia_ideal        = hgac_v_tia_ideal;
     cfg.hgac_tiaguard_debounce_min_s        = hgac_tiaguard_debounce_min_s;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
@@ -1043,20 +1041,19 @@ void INCUNEST_AFE4490::stop() {
 }
 
 // ── _diag_task_body() ─────────────────────────────────────────────────────────
-// Runs at low priority. Calls runAfeDiagnostics() on two triggers:
-//   1. xTaskNotify from _rsqm_set_probe_state() when a state transition is committed.
-//   2. Periodic timeout (rsqm_diag_period_ms) when probe is not APPLIED and not SATURATING.
-// In PROBE_APPLIED or PROBE_SATURATING: timeout expires but no diagnostic is run (blackout
-// would disrupt HR/SpO2 acquisition — and during PROBE_SATURATING specifically, it would also
-// disrupt HGAC's attempt to clear the saturation with a real patient possibly connected).
-// State-change notifications still trigger it regardless of the resulting state.
+// Runs at low priority. Calls runAfeDiagnostics() every rsqm_diag_period_ms, but ONLY in
+// states with no patient confirmed in the optical path: PROBE_DISCONNECTED and
+// PROBE_NOT_APPLIED. The diagnostic's ~10 ms blackout would disrupt HR/SpO2 acquisition in
+// PROBE_APPLIED, and in PROBE_SATURATING it would also disrupt HGAC's attempt to clear the
+// saturation with a real patient possibly connected — so both are excluded.
+// Whitelist (not blacklist) on purpose: any future ProbeState defaults to NOT diagnosing,
+// so a new state can never silently interrupt acquisition; adding it here must be deliberate.
 void INCUNEST_AFE4490::_diag_task_body() {
     const TickType_t period = pdMS_TO_TICKS(rsqm_diag_period_ms);
     while (true) {
-        const bool notified = (xTaskNotifyWait(0, 0, nullptr, period) == pdTRUE);
-        (void)notified; // wake reason logged implicitly via probe_state in diag_code
-        if (_rsqm_probe_state != ProbeState::PROBE_APPLIED
-         && _rsqm_probe_state != ProbeState::PROBE_SATURATING)
+        vTaskDelay(period);
+        if (_rsqm_probe_state == ProbeState::PROBE_DISCONNECTED
+         || _rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED)
             runAfeDiagnostics();
     }
 }
@@ -1096,8 +1093,6 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _rsqm_settling_countdown = 0;
     _hgac_tiaguard_debounce_count_led1 = 0;
     _hgac_tiaguard_debounce_count_led2 = 0;
-    _hgac_alarm_gain_floor_led1 = false;
-    _hgac_alarm_gain_floor_led2 = false;
     _current_data = AFE4490Data{};
     // Precompute Hann window — needed for HR3 FFT (moved here from begin() to support INCUNEST_OFFLINE)
     for (int i = 0; i < hr3_buf_len; i++)
@@ -1106,17 +1101,14 @@ void INCUNEST_AFE4490::_reset_algorithms() {
 
 // ── RSQM ──────────────────────────────────────────────────────────────────────
 
-// _rsqm_set_probe_state — debounce gate for probe state transitions.
+// _rsqm_request_probe_state — debounce gate for probe state transitions.
 // Commits the requested state to _rsqm_probe_state only after
 // _rsqm_probe_state_min_samples consecutive calls with the same value.
 // Any change in the requested state resets the counter.
-void INCUNEST_AFE4490::_rsqm_set_probe_state(ProbeState requested) {
+void INCUNEST_AFE4490::_rsqm_request_probe_state(ProbeState requested) {
     if (requested == _rsqm_probe_state_pending) {
-        if (++_rsqm_probe_state_count >= _rsqm_probe_state_min_samples) {
-            if (requested != _rsqm_probe_state && _diag_task_handle)
-                xTaskNotify(_diag_task_handle, 0, eNoAction); // wake diag task on state change
+        if (++_rsqm_probe_state_count >= _rsqm_probe_state_min_samples)
             _rsqm_probe_state = requested;
-        }
     } else {
         _rsqm_probe_state_pending = requested;
         _rsqm_probe_state_count   = 1;
@@ -1127,9 +1119,9 @@ void INCUNEST_AFE4490::_rsqm_set_probe_state(ProbeState requested) {
 // Datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
 // Inverted:
 //   V_ADC      = code / kAFE_ADC_FS_CODE × kAFE_ADC_FSR
-//   V_TIA_DIFF = 2 × (V_ADC / (2 × RG) + I_CANCEL_A) × Ri   [= 2 × I_PD × RF]
-//   I_PD       = V_TIA_DIFF / (2 × RF)
-// V_TIA convention: DIFFERENTIAL (naming rule 4b; per-branch = diff / 2).
+//   V_TIA = 2 × (V_ADC / (2 × RG) + I_CANCEL_A) × Ri   [= 2 × I_PD × RF]
+//   I_PD       = V_TIA / (2 × RF)
+// V_TIA is always the DIFFERENTIAL TIA output (datasheet §9.2.2); the code has no branch value.
 // When STAGE2EN=0: RG = Ri = kAFE_RI_OHM (unity gain).
 // ALED channels share the RF and RG of the corresponding LED channel.
 // Also computes ot_led1/ot_led2 and the validity masks (value-always policy: every field
@@ -1165,21 +1157,21 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
     const float ri       = kAFE_RI_OHM;
     const float i_cancel = (float)_afe_ambdac_uA * 1e-6f;  // A
 
-    // ── V_TIA_DIFF = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri ─────────────────
+    // ── V_TIA = 2 × (V_ADC / (2 × RG) + I_CANCEL) × Ri ─────────────────
     // Inverted from datasheet Eq.2 (p.30): V_DIFF = 2 × (I_PD × RF/Ri − I_CANCEL) × RG
-    // Differential TIA output voltage before Stage 2 (= 2 × I_PD × RF, rule 4b).
+    // Differential TIA output voltage before Stage 2 (= 2 × I_PD × RF).
     // LED1/ALED1 share rf1, rg1; LED2/ALED2 share rf2, rg2 (same TIA path).
-    as.v_tia_diff_led1  = 2.0f * (as.v_adc_led1  / (2.0f * rg1) + i_cancel) * ri;
-    as.v_tia_diff_led2  = 2.0f * (as.v_adc_led2  / (2.0f * rg2) + i_cancel) * ri;
-    as.v_tia_diff_aled1 = 2.0f * (as.v_adc_aled1 / (2.0f * rg1) + i_cancel) * ri;
-    as.v_tia_diff_aled2 = 2.0f * (as.v_adc_aled2 / (2.0f * rg2) + i_cancel) * ri;
+    as.v_tia_led1  = 2.0f * (as.v_adc_led1  / (2.0f * rg1) + i_cancel) * ri;
+    as.v_tia_led2  = 2.0f * (as.v_adc_led2  / (2.0f * rg2) + i_cancel) * ri;
+    as.v_tia_aled1 = 2.0f * (as.v_adc_aled1 / (2.0f * rg1) + i_cancel) * ri;
+    as.v_tia_aled2 = 2.0f * (as.v_adc_aled2 / (2.0f * rg2) + i_cancel) * ri;
 
-    // ── I_PD = V_TIA_DIFF / (2 × RF) ─────────────────────────────────────────
-    // From V_TIA_DIFF = 2 × I_PD × RF (TIA transimpedance, differential).
-    as.i_pd_led1  = as.v_tia_diff_led1  / (2.0f * rf1);
-    as.i_pd_led2  = as.v_tia_diff_led2  / (2.0f * rf2);
-    as.i_pd_aled1 = as.v_tia_diff_aled1 / (2.0f * rf1);
-    as.i_pd_aled2 = as.v_tia_diff_aled2 / (2.0f * rf2);
+    // ── I_PD = V_TIA / (2 × RF) ─────────────────────────────────────────
+    // From V_TIA = 2 × I_PD × RF (TIA transimpedance, differential).
+    as.i_pd_led1  = as.v_tia_led1  / (2.0f * rf1);
+    as.i_pd_led2  = as.v_tia_led2  / (2.0f * rf2);
+    as.i_pd_aled1 = as.v_tia_aled1 / (2.0f * rf1);
+    as.i_pd_aled2 = as.v_tia_aled2 / (2.0f * rf2);
 
     // ── OT = (I_PD_LED − I_PD_ALED) / I_LED  [A/A, dimensionless] ────────────
     // Ambient-subtracted: isolates the modulated component driven by the LED.
@@ -1193,18 +1185,18 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
 
     // ── Validity masks (bit = channel, order per AFE4490Ch) ──────────────────
     // adc_sat: code at/beyond ≈95% of rail — stored values are bounds, not measurements.
-    // tia_over_fs: outside TI-guaranteed linearity (OFF_SPEC band up to kVTiaDiffLin).
+    // tia_over_fs: outside TI-guaranteed linearity (OFF_SPEC band up to tia_axis::LIN_V).
     // tia_over_lin: beyond empirical linearity — TIA compresses, value is a bound.
-    // No lower TIA bound: photocurrent is unipolar (v_tia_diff ≥ 0 physically).
+    // No lower TIA bound: photocurrent is unipolar (v_tia ≥ 0 physically).
     const int32_t code[4] = { led1, aled1, led2, aled2 };
-    const float   vtd[4]  = { as.v_tia_diff_led1, as.v_tia_diff_aled1,
-                              as.v_tia_diff_led2, as.v_tia_diff_aled2 };
+    const float   vtd[4]  = { as.v_tia_led1, as.v_tia_aled1,
+                              as.v_tia_led2, as.v_tia_aled2 };
     for (int ch = 0; ch < 4; ++ch) {
         const uint8_t bit = (uint8_t)(1u << ch);
         if (code[ch] >= AFE4490AnalogState::kAdcSatPos)  as.adc_sat_pos  |= bit;
         if (code[ch] <= AFE4490AnalogState::kAdcSatNeg)  as.adc_sat_neg  |= bit;
-        if (vtd[ch]  >  AFE4490AnalogState::kVTiaDiffFs) as.tia_over_fs  |= bit;
-        if (vtd[ch]  >  AFE4490AnalogState::kVTiaDiffLin) as.tia_over_lin |= bit;
+        if (vtd[ch]  >  tia_axis::FS_V)  as.tia_over_fs  |= bit;
+        if (vtd[ch]  >  tia_axis::LIN_V) as.tia_over_lin |= bit;
     }
 
     return as;
@@ -1235,35 +1227,35 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
         fabsf((float)led1_sub) < rsqm_disconn_led_sub_thr &&
         fabsf((float)led2_sub) < rsqm_disconn_led_sub_thr;
 
+    // Classification is a strict priority ladder — the first matching cause wins;
+    // DISCONNECTED (computed above) is the highest priority.
+    // OT is computed in _compute_analog_state() (as.ot_led1/ot_led2, A/A);
+    // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
+    // Two DISTINCT causes, checked separately (2026-07-24 — were previously collapsed
+    // into a single NOT_APPLIED via OR, see spec §5.6.2 changelog):
+    //  (a) a channel saturated from ABOVE (ADC at the positive rail or TIA past FS) — the OT
+    //      value is not trustworthy here, regardless of what it reads → PROBE_SATURATING.
+    //      This can happen with or without a patient (e.g. an unapplied probe under a
+    //      phototherapy lamp), so it must NOT be folded into "no tissue" (NOT_APPLIED).
+    //  (b) channel in range but OT reads above threshold — a trustworthy measurement that
+    //      genuinely indicates no tissue in the optical path → PROBE_NOT_APPLIED.
+    // Saturation takes priority over the threshold check (a saturated channel can't be
+    // trusted to classify NOT_APPLIED vs APPLIED). Only saturation from ABOVE matters: the
+    // probe saturates only by excess light, and photocurrent is unipolar (v_adc ≥ 0 without
+    // AMBDAC), so we check anyPositiveSaturation() = adc_sat_pos | tia_over_fs. (adc_sat_neg
+    // needs AMBDAC — unused in v1 — and wouldn't be cleared by reducing RF/ILED.)
+    // Debounce (same for all transitions) lives in _rsqm_request_probe_state().
+    ProbeState requested;
     if (disconnected) {
-        _rsqm_set_probe_state(ProbeState::PROBE_DISCONNECTED);
+        requested = ProbeState::PROBE_DISCONNECTED;
+    } else if (as.anyPositiveSaturation()) {
+        requested = ProbeState::PROBE_SATURATING;
+    } else if (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr) {
+        requested = ProbeState::PROBE_NOT_APPLIED;
     } else {
-        // OT is computed in _compute_analog_state() (as.ot_led1/ot_led2, A/A);
-        // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
-        // Two DISTINCT causes, checked separately (2026-07-24 — were previously collapsed
-        // into a single NOT_APPLIED via OR, see spec §5.6.2 changelog):
-        //  (a) a channel saturated from ABOVE (ADC at the positive rail or TIA past FS) — the OT
-        //      value is not trustworthy here, regardless of what it reads → PROBE_SATURATING.
-        //      This can happen with or without a patient (e.g. an unapplied probe under a
-        //      phototherapy lamp), so it must NOT be folded into "no tissue" (NOT_APPLIED).
-        //  (b) channel in range but OT reads above threshold — a trustworthy measurement that
-        //      genuinely indicates no tissue in the optical path → PROBE_NOT_APPLIED.
-        // Saturation takes priority over the threshold check below (a saturated channel can't be
-        // trusted to classify NOT_APPLIED vs APPLIED). Only saturation from ABOVE matters: the
-        // probe saturates only by excess light, and photocurrent is unipolar (v_adc ≥ 0 without
-        // AMBDAC), so we check anyPositiveSaturation() = adc_sat_pos | tia_over_fs. (adc_sat_neg
-        // needs AMBDAC — unused in v1 — and wouldn't be cleared by reducing RF/ILED.)
-        // Debounce (N=50 samples, same for all transitions) lives in _rsqm_set_probe_state().
-        ProbeState requested;
-        if (as.anyPositiveSaturation()) {
-            requested = ProbeState::PROBE_SATURATING;
-        } else if (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr) {
-            requested = ProbeState::PROBE_NOT_APPLIED;
-        } else {
-            requested = ProbeState::PROBE_APPLIED;
-        }
-        _rsqm_set_probe_state(requested);
+        requested = ProbeState::PROBE_APPLIED;
     }
+    _rsqm_request_probe_state(requested);
 
     // ── DiagCode ───────────────────────────────────────────────────────────────
     uint32_t diag = 0;
@@ -1306,7 +1298,7 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
 // under _state_mutex) — never call this directly from application code or another task.
 // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): no longer rescales the
 // SpO2 EmaChannel here — SpO2 now consumes as.ot_led1/ot_led2 (gain-invariant by
-// construction: v_tia_diff/RF cancels), so an RF change no longer creates a discontinuity in
+// construction: v_tia/RF cancels), so an RF change no longer creates a discontinuity in
 // its input. See incunest_afe4490_spec.md §5.1/§5.8.
 void INCUNEST_AFE4490::_hgac_step_rf_down(HgacColor color, AFE4490RF new_rf) {
     const AFE4490RF old_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
@@ -1318,37 +1310,35 @@ void INCUNEST_AFE4490::_hgac_step_rf_down(HgacColor color, AFE4490RF new_rf) {
     }
     // Arm HW_SETTLING for the analog front-end to re-settle after the gain step — first real
     // producer of RSQM_DIAG_HW_SETTLING (previously dead code, see incunest_afe4490.h comment).
-    // hgac_settle_time_s is a coarse, sample-granularity diagnostic window — NOT the same as
+    // afe_settle_time_s is a coarse, sample-granularity diagnostic window — NOT the same as
     // _compute_settle_margin() (a sub-sample-period AFECLK-count budget used only for CF
     // auto-selection within one PRP cycle; using it directly here would be a unit mismatch).
-    _rsqm_settling_countdown = (uint32_t)roundf(hgac_settle_time_s * (float)_afe_sample_rate_hz);
+    _rsqm_settling_countdown = (uint32_t)roundf(afe_settle_time_s * (float)_afe_sample_rate_hz);
 }
 
 // One saturation-guard channel pair (LED phase + its ambient phase share one RF domain,
 // A4/O10) → debounced TIA-guard (TIAGUARD) check: steps RF down one LUT level once TIAGUARD
-// has persisted long enough, or raises the gain-floor alarm if already at RF_10K.
-void INCUNEST_AFE4490::_hgac_check_tiaguard(HgacColor color, float v_tia_diff_led, float v_tia_diff_aled,
-                                            uint32_t& debounce_count, bool& alarm_flag) {
-    const bool tiaguard = (v_tia_diff_led  > hgac_v_tia_diff_thr) ||
-                        (v_tia_diff_aled > hgac_v_tia_diff_thr);
-    if (!tiaguard) {
+// has persisted long enough, or does nothing if already at the RF floor (RF_10K).
+void INCUNEST_AFE4490::_hgac_check_tiaguard(HgacColor color, float v_tia_led, float v_tia_aled,
+                                            uint32_t& debounce_count) {
+    // Not in TIAGUARD — both the LED phase and its ambient phase at/below the guard threshold:
+    // reset the debounce and bail.
+    if (v_tia_led  <= hgac_v_tia_thr &&
+        v_tia_aled <= hgac_v_tia_thr) {
         debounce_count = 0;
-        alarm_flag   = false;
         return;
     }
 
-    // O8.1 debounce: require N consecutive TIAGUARD samples before acting (either alarming
-    // or stepping down), to avoid a one-sample blip triggering either. Shared by both outcomes
-    // below. Counter is capped at the threshold (not left to grow unbounded while saturated).
+    // O8.1 debounce: require N consecutive TIAGUARD samples before stepping down, to avoid a
+    // one-sample blip triggering a step. Counter is capped at the threshold (not left to grow
+    // unbounded while saturated).
     if (debounce_count < _hgac_tiaguard_debounce_min_samples) ++debounce_count;
     if (debounce_count < _hgac_tiaguard_debounce_min_samples) return;
 
     const AFE4490RF cur_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
     if (cur_rf == AFE4490RF::RF_10K) {
-        // Already at the gain floor — nothing left to step down to; raise the alarm instead.
-        // Counter (and alarm) stay latched until TIAGUARD clears or the RF moves off the
-        // floor — no reset here.
-        alarm_flag = true;
+        // Already at the gain floor — nothing left to step down to (ILED actuation is Phase 4).
+        // Counter stays latched (no reset) so it doesn't retrigger the instant TIAGUARD clears.
         return;
     }
 
@@ -1356,21 +1346,24 @@ void INCUNEST_AFE4490::_hgac_check_tiaguard(HgacColor color, float v_tia_diff_le
     // debounce above, so persistent TIAGUARD keeps stepping down one level at a time
     // (Phase 1 scope; analytic feed-forward to the final target is Phase 5, R5).
     debounce_count = 0;
-    alarm_flag   = false;
     _hgac_step_rf_down(color, (AFE4490RF)((int)cur_rf - 1));
 }
 
 void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     if (!hgac_enable) return;
 
-    // Gate G0 (axiom A6, spec §5.8): act only while the probe is active — APPLIED or
-    // SATURATING (saturation has its own state since 2026-07-24, so a TIAGUARD event can't flip
-    // to NOT_APPLIED and deadlock the step-down) — and the front-end is not re-settling after
-    // a gain change. Plain NOT_APPLIED/DISCONNECTED (probe idle) is excluded so HGAC doesn't
-    // drive RF down on an unrelated optical event (e.g. a phototherapy lamp) with nobody connected.
-    const bool probe_active = _rsqm_probe_state == ProbeState::PROBE_APPLIED
-                           || _rsqm_probe_state == ProbeState::PROBE_SATURATING;
-    if (!probe_active || (_diag_code & RSQM_DIAG_HW_SETTLING)) {
+    // Gate G0 (axiom A6, spec §5.8): HGAC acts only while the probe is active (APPLIED or
+    // SATURATING) and the front-end is not re-settling after a gain change. Gate off in the
+    // idle states — NOT_APPLIED / DISCONNECTED — so HGAC doesn't drive RF down on an unrelated
+    // optical event (e.g. a phototherapy lamp) with nobody connected. SATURATING is deliberately
+    // NOT idle: it has its own state since 2026-07-24 so a TIAGUARD event can't flip to
+    // NOT_APPLIED and deadlock the step-down.
+    // NOTE: the idle states are listed explicitly (not "!(APPLIED||SATURATING)"). A future
+    // ProbeState is therefore NOT gated off here and would let HGAC act — revisit this list
+    // whenever a ProbeState is added.
+    if (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED
+     || _rsqm_probe_state == ProbeState::PROBE_DISCONNECTED
+     || (_diag_code & RSQM_DIAG_HW_SETTLING)) {
         // Don't accumulate TIAGUARD debounce while gated off — avoids a stale counter firing
         // the instant the gate reopens.
         _hgac_tiaguard_debounce_count_led1 = 0;
@@ -1378,19 +1371,12 @@ void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
         return;
     }
 
-    _hgac_check_tiaguard(HgacColor::IR, as.v_tia_diff_led1, as.v_tia_diff_aled1,
-                        _hgac_tiaguard_debounce_count_led1, _hgac_alarm_gain_floor_led1);
-    _hgac_check_tiaguard(HgacColor::RED, as.v_tia_diff_led2, as.v_tia_diff_aled2,
-                        _hgac_tiaguard_debounce_count_led2, _hgac_alarm_gain_floor_led2);
-
-    // _rsqm_update() (which runs before this) already copied the pre-HGAC _diag_code into
-    // _current_data.diag_code — refresh it here so HGAC's bit is visible in the same
-    // sample's published frame, not lagged by one sample.
-    if (_hgac_alarm_gain_floor_led1 || _hgac_alarm_gain_floor_led2)
-        _diag_code |= HGAC_DIAG_GAIN_FLOOR;
-    else
-        _diag_code &= ~HGAC_DIAG_GAIN_FLOOR;
-    _current_data.diag_code = _diag_code;
+    _hgac_check_tiaguard(HgacColor::IR, as.v_tia_led1, as.v_tia_aled1,
+                        _hgac_tiaguard_debounce_count_led1);
+    _hgac_check_tiaguard(HgacColor::RED, as.v_tia_led2, as.v_tia_aled2,
+                        _hgac_tiaguard_debounce_count_led2);
+    // No _diag_code write here: HGAC no longer publishes a bit (gain-floor removed in v0.50).
+    // _rsqm_update() (runs before this) already set _current_data.diag_code for the sample.
 }
 
 // ── SPI primitives ────────────────────────────────────────────────────────────
@@ -1776,7 +1762,7 @@ void IRAM_ATTR INCUNEST_AFE4490::_drdy_isr() {
 
 void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                    int32_t led1_sub, int32_t led2_sub) {
-    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA_DIFF, I_PD, OT)
+    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA, I_PD, OT)
     const AFE4490AnalogState as = _compute_analog_state(led1, led2, aled1, aled2);
 
     // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
@@ -1849,7 +1835,6 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     _debug_data.analog                = as;
     _debug_data.hgac_rf_led1          = _afe_tia_rf_led1;
     _debug_data.hgac_rf_led2          = _afe_tia_rf_led2;
-    _debug_data.hgac_alarm_gain_floor = _hgac_alarm_gain_floor_led1 || _hgac_alarm_gain_floor_led2;
 
     // Push to queue; if full, drop oldest to keep most recent.
     // Debug mode: push combined DebugQueueItem for atomic getData(data,dbg) access.
