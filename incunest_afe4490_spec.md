@@ -1096,6 +1096,20 @@ Phase 1 (this), Phase 2 (RF ascent with prediction/hysteresis), Phase 3 (telemet
 Phase 4 (ILED actuation + thermal envelope), Phases 5-7 (feed-forward, P² estimator, UI —
 optional/deferred).
 
+> **Why HGAC is RF-only in v1 — ILED is a weak de-saturation actuator at the gain floor
+> (analysis 2026-08-04).** In the LED phase, `v_tia_led = 2·RF·(i_amb + i_led)` with
+> `i_led = OT·ILED`; only `i_led` scales with ILED (ambient current does not — see the ILED-settling
+> note above). The maximum voltage that lowering ILED can shed at RF = 10K (the floor) is
+> `Δv = 2·RF·OT·(ILED_max − ILED_min) = 800·OT` V. For an APPLIED neonatal probe (OT < `rsqm_ot_thr`
+> ≈ 1e-4, typically 1e-5…1e-4) that is only **~0.01–0.08 V** — negligible. The reason: at RF = 10K
+> the LED-driven part of `v_tia` is itself tiny (~0.1 V), so if a channel is *saturating* there
+> (~1.2 V ADC rail), the bulk is **ambient**, which ILED cannot touch. This is why the descent
+> ladder's response to "RF at floor and still saturating" is the **excessive-ambient-light alarm**
+> (discriminated by the ALED phase), not ILED reduction — and it motivates keeping v1 RF-only.
+> Lowering ILED only sheds meaningful voltage in the rare LED-dominated case (high OT, very
+> translucent tissue, ALED not saturating). OT thresholds still need empirical calibration, so
+> Δv is order-of-magnitude. Design rationale lives in the project's HGAC design notes.
+
 #### 5.8.1 TIAGUARD — TIA over-threshold guard (single guard, v1)
 
 With Stage 2 frozen at ×1 gain and AMBDAC=0 (v1 defaults), `v_tia == v_adc` — the ADC
