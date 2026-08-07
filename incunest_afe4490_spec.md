@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.53
+# incunest_afe4490 — Specification v0.57
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -94,7 +94,7 @@ struct AFE4490Data {
     float   hr3_sqi;    // HR3 Signal Quality Index [0–1]: spectral concentration at peak; 0=diffuse spectrum, 1=dominant tone
     // RSQM outputs (filled every sample by _rsqm_update)
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
-    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SIGNAL_WEAK | RSQM_DIAG_HW_SETTLING | ...
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_HW_SETTLING | ...
     ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, PROBE_APPLIED, or PROBE_SATURATING
 };
 ```
@@ -195,7 +195,6 @@ struct AFE4490Config {
     float             hr_max_bpm;                // valid output upper bound [bpm]
     // RSQM algorithm parameters (runtime-configurable via setRsqm*() setters)
     float             rsqm_ot_thr;               // OT threshold: NOT_APPLIED vs APPLIED [A/A]
-    float             rsqm_signal_weak_std;      // LED1_Sub_std threshold for SIGNAL_WEAK [adc_code]
     float             rsqm_disconn_led_sub_thr;  // |led_sub| min for DISCONNECTED detection [adc_code]
     float             rsqm_disconn_i_pd_thr;     // |i_pd| min for DISCONNECTED detection [A]
     float             rsqm_probe_state_min_s;    // debounce time to change probe state [s]
@@ -249,7 +248,6 @@ void setHRValidRange(float min_bpm, float max_bpm);        // valid HR output ra
 
 // RSQM — all callable before or after begin()
 void setRsqmOtThr(float v);                     // OT threshold: NOT_APPLIED vs APPLIED [A/A]
-void setRsqmSignalWeakStd(float v);             // LED1_Sub_std threshold for SIGNAL_WEAK [adc_code]
 void setRsqmDisconnLedSubThr(float v);          // |led_sub| min for DISCONNECTED detection [adc_code]
 void setRsqmDisconnIPdThr(float v);             // |i_pd| min for DISCONNECTED detection [A]
 void setRsqmProbeStateMinS(float s);            // debounce time [s] — recalc
@@ -415,8 +413,8 @@ constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — commo
 constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
 //
 // Bits 13+: RSQM software checks — updated continuously at 500 Hz by _rsqm_update()
+// Bit 14 (0x4000) is free — held RSQM_DIAG_SIGNAL_WEAK, removed v0.56 (see §14). Reuse as RSQM_DIAG_AC_LOW if a pulsatile-amplitude flag is ever needed.
 constexpr uint32_t RSQM_DIAG_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
-constexpr uint32_t RSQM_DIAG_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
 constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 // bits 16–31 reserved
 ```
@@ -742,6 +740,14 @@ Both DC and AC power are extracted from a single `EmaChannel` per signal (IR and
 
 The two τ values are intentionally different because DC and AC² have distinct temporal requirements: DC must track slow baseline drift (τ = 2 s), while AC² must be stable enough for a reliable SpO2 estimate (τ ≥ 6 s per ISO).
 
+**First-sample seeding (v0.55):** `EmaChannel::update()` seeds on the first sample after
+construction or `reset()` — `count == 0` → `mean = x`, `var = 0` — instead of ramping `mean` up
+from 0. Ramping from 0 leaves `d = x − mean ≈ x` for the first ~3·τ, which spuriously **inflates
+`var`** (hence PI) during warm-up. Seeding removes that
+start-up bias. It does **not** shorten `spo2_warmup_s` (= 3·τ_var): `var`
+still needs several pulse cycles to become representative — seeding only fixes the *bias*, not the
+*convergence time*. Steady-state behaviour is unchanged (same recursion, same α).
+
 **Perfusion Index (PI):**
 
 ```
@@ -949,21 +955,16 @@ HR1–HR4 all operate on `led1_aled1` (IR ambient-corrected) and run in parallel
 
 Runs in `_process_sample()` after `_compute_analog_state()`, once per sample at 500 Hz. Fills `AFE4490Data::rsqi`, `diag_code`, and `probe_state`. Receives `AFE4490AnalogState` by `const&` (pre-computed OT values).
 
-#### 5.6.1 EMA estimators
+#### 5.6.1 Estimators
 
-Two per-channel EMA estimators track mean and variance of the differential signal (LED_Sub = LED − ALED):
-
-```
-ema_mean += α_mean × (x − ema_mean)          α_mean = 1−exp(−1/(τ_mean·fs)), τ_mean = rsqm_ema_mean_tau_s (default 2.0 s)
-d = x − ema_mean
-ema_var  += α_var  × (d² − ema_var)           α_var  = 1−exp(−1/(τ_var·fs)),  τ_var  = rsqm_ema_var_tau_s  (default 4.0 s)
-```
-
-Both `rsqm_ema_mean_tau_s` and `rsqm_ema_var_tau_s` are runtime-configurable via `setRsqmEmaTau()`; changing them triggers `_recalc_rate_params()`.
-
-Estimators are considered **ready** after `rsqm_ready_count` = 6000 samples (3 × τ_var = 12 s @ 500 Hz). During warmup, `probe_state = PROBE_DISCONNECTED` and `rsqi = 0`.
-
-> Reset required on hardware config change (RF / RG / AMBDAC): `ema_mean = x_current; ema_var = 0; count = 0`. Implemented as part of HGAC (not yet active in v0.27).
+RSQM keeps **no EMA estimators of its own**. Until v0.56 it maintained two `EmaChannel`s over the
+differential signal (LED_Sub = LED − ALED), but both of their consumers are gone: the pulsatile-amplitude
+flag `RSQM_DIAG_SIGNAL_WEAK` (removed v0.56 — redundant with the PI-based `spo2_sqi`, and not fixable
+by gain) and the `ready`/`rsqm_ready_count` warm-up gate on `rsqi` (removed v0.57 — a vestige of
+SIGNAL_WEAK with no remaining statistic to mature). Probe-state detection uses **instantaneous**
+quantities (`i_pd`, OT, saturation masks), so it needs no warm-up. The generic `EmaChannel` (§5.1) is
+now used only by SpO2. If a pulsatile-amplitude check is ever needed again, reintroduce it as
+`RSQM_DIAG_AC_LOW`.
 
 #### 5.6.2 Probe state machine
 
@@ -1052,19 +1053,19 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 | Bit | Constant | Condition |
 |---|---|---|
 | 0x2000 | `RSQM_DIAG_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `adc::SAT_POS` = 2 096 700) |
-| 0x4000 | `RSQM_DIAG_SIGNAL_WEAK` | `ProbeState == PROBE_APPLIED` AND (`LED1_Sub_std < 2000` OR `LED2_Sub_std < 2000`) — both channels needed for SpO2 (needs HW calibration) |
+| 0x4000 | *(free)* | Held `RSQM_DIAG_SIGNAL_WEAK` until v0.56 (removed — see §14). Reuse as `RSQM_DIAG_AC_LOW` if needed. |
 | 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
 
 HGAC publishes no DiagCode bit (the former bit 16 `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — no consumer decoded it; the "at RF floor and still saturating" condition is derivable at the point of use as `rf == RF_10K` while TIAGUARD persists, and its actuator, ILED, is Phase 4).
 
 Multiple bits may be set simultaneously.
 
-**Update (v0.37):** `RSQM_DIAG_HW_SETTLING` is no longer unreachable — HGAC (§5.8) is its first real producer, arming `_rsqm_settling_countdown` after every RF step-down. `RSQM_DIAG_AMB_SAT` and `RSQM_DIAG_SIGNAL_WEAK` still have no programmatic consumer beyond the aggregate `rsqi` gate and human inspection.
+**Update (v0.37):** `RSQM_DIAG_HW_SETTLING` is no longer unreachable — HGAC (§5.8) is its first real producer, arming `_rsqm_settling_countdown` after every RF step-down. `RSQM_DIAG_AMB_SAT` still has no programmatic consumer beyond the aggregate `rsqi` gate and human inspection.
 
 #### 5.6.4 RSQI
 
 ```
-rsqi = 1  iff  (estimators ready) AND (probe_state == PROBE_APPLIED) AND (diag_code == 0)
+rsqi = 1  iff  (probe_state == PROBE_APPLIED) AND (diag_code == 0)
 rsqi = 0  otherwise
 ```
 
@@ -1225,8 +1226,8 @@ called from `_hgac_update()` — never directly from application code or another
 
 #### 5.8.5 Parameters (see §10.9) and telemetry
 
-`AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_thr`, `hgac_v_tia_ideal`
-(telemetry only in v1), `hgac_tiaguard_debounce_min_s`. `$SET`/`$LCFG` wiring in PulseNest's
+`AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_thr`,
+`hgac_tiaguard_debounce_min_s`. `$SET`/`$LCFG` wiring in PulseNest's
 `src/main.cpp`. `$M4` gained
 `HGAC_RF1,HGAC_RF2` (current RF per domain), sourced from `AFE4490DebugData` fields
 `hgac_rf_led1`/`hgac_rf_led2` (§3d), populated alongside `analog` in `_process_sample()`.
@@ -1709,7 +1710,6 @@ See §5.8 for algorithm description.
 |---|---|---|---|---|
 | Master enable | `setHgacEnable()` | `false` | true / false | HGAC never actuates while disabled — safe default until bench-validated |
 | Saturation guard threshold | `setHgacVTiaThr()` | 0.9 V | — | `v_tia` above this trips the TIAGUARD guard for that domain |
-| Ideal operating point | — (config field only) | 0.6 V | — | Telemetry only in v1 — not consumed by the TIAGUARD response logic yet |
 | TIAGUARD persistence | `setHgacTiaguardDebounceMinS()` | 0.5 s (250 samples @ 500 Hz) | 0.0–10.0 | Debounce before an RF step-down — urgent path (O8.1) |
 | Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; coarse diagnostic window, distinct from the sub-sample-period `_compute_settle_margin()` used for CF auto-selection |
 
@@ -1874,7 +1874,7 @@ Three distinct hardware states are distinguishable from the raw ADC channel patt
 | **PROBE_NOT_APPLIED** | saturated | saturated | low–mid | low–mid | No tissue attenuation; LEDs illuminate photodiode directly. ALED channels depend on ambient light level |
 | **PROBE_APPLIED** | PPG signal | PPG signal | low | low | Normal operation; tissue attenuates LED light; ambient channels remain low |
 
-**Detection method:** see §5.6. DISCONNECTED is instantaneous; SATURATING/NOT_APPLIED/APPLIED use optical transmittance and channel validity (single threshold + 0.2 s debounce, 100 samples @ 500 Hz — derived from `rsqm_probe_state_min_s × fs`); APPLIED uses 750-sample EMA warmup for RSQM_DIAG_SIGNAL_WEAK.
+**Detection method:** see §5.6. DISCONNECTED is instantaneous; SATURATING/NOT_APPLIED/APPLIED use optical transmittance and channel validity (single threshold + 0.2 s debounce, 100 samples @ 500 Hz — derived from `rsqm_probe_state_min_s × fs`).
 
 > These states are computed by RSQM (_rsqm_update) and gate HGAC operation (§5.8.2): HGAC acts in `PROBE_APPLIED` and `PROBE_SATURATING`, and must not act in `PROBE_DISCONNECTED` or plain `PROBE_NOT_APPLIED`.
 
@@ -1931,6 +1931,43 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.57-experiment | **Remove RSQM's EMA estimators, the `ready` gate, and the RSQM EMA τ config.** |
+|         | Follow-on to v0.56: once SIGNAL_WEAK was gone, `_rsqm_led1/2_sub_ema` fed only their   |
+|         | sample `.count` (the `ready = count ≥ rsqm_ready_count` gate), and `ready` fed only     |
+|         | `rsqi`'s 12 s warm-up — itself a vestige of SIGNAL_WEAK (no statistic left to mature).   |
+|         | Removed: the two `EmaChannel`s, `rsqm_ready_count`, `ready`, and (cascade) the now-inert |
+|         | `rsqm_ema_mean_tau_s`/`rsqm_ema_var_tau_s` config + `setRsqmEmaTau()` + `getConfig()`    |
+|         | copies + `$LCFG`/`$SET` wiring + LIBConfig controls. `rsqi` is now                        |
+|         | `PROBE_APPLIED && diag_code==0` (responsive, no warm-up — probe-state is instantaneous,  |
+|         | and SpO2/HR keep their own warm-ups). Spec §5.6.1 rewritten. API-breaking (config fields  |
+|         | + setter + wire keys). 36/36 native tests, ESP32-S3 V16 build OK.                         |
+| v0.56-experiment | **Remove `RSQM_DIAG_SIGNAL_WEAK` (bit 14) end-to-end.**                    |
+|         | No actionable consumer (only the aggregate `rsqi` gate + display), not fixable by |
+|         | gain (RF scales AC and DC together → PI/ratio invariant), and redundant with the  |
+|         | PI-based `spo2_sqi`. Removed: the bit, `rsqm_signal_weak_std` config field + `2000`|
+|         | default + `setRsqmSignalWeakStd()` + `getConfig()` copy, the producer block in     |
+|         | `_rsqm_update()`, and the `$LCFG`/`$SET` wiring + LIBConfig control in PulseNest.  |
+|         | Bit 14 (0x4000) left free — reintroduce as `RSQM_DIAG_AC_LOW` if a pulsatile-      |
+|         | amplitude flag is ever needed. API-breaking (config field + setter + bit + wire).  |
+|         | Note: `_rsqm_led1/2_sub_ema` now feed only `.count` (for `ready`); their var/mean   |
+|         | are unconsumed (candidate to reduce to a plain sample counter). 36/36 native tests, |
+|         | ESP32-S3 V16 build OK.                                                              |
+| v0.55-experiment | **`EmaChannel::update()` seeds on the first sample.**                      |
+|         | `count == 0` → `mean = x`, `var = 0` (was: ramp `mean` from 0). Ramping from 0 left    |
+|         | `d = x − mean ≈ x` for ~3·τ, spuriously inflating `var` (→ PI, RSQM SIGNAL_WEAK) during |
+|         | warm-up. Fixes the start-up bias; does NOT shorten `spo2_warmup_s` / `rsqm_ready_count` |
+|         | (var still needs ~3·τ_var to be representative). Steady state unchanged. Behaviour      |
+|         | change only in the transient after construction/`reset()`. Affects all EmaChannel users |
+|         | (RSQM, SpO2). 36/36 native tests (same as baseline), no regression.                     |
+| v0.54-experiment | **Remove the `IDEAL` (0.6 V) v_tia threshold — unused.**                    |
+|         | `tia_axis::IDEAL_V` and the `hgac_v_tia_ideal` config field (default + `getConfig()` |
+|         | copy) deleted; the ascending `static_assert` drops the `IDEAL_V <` term. It was      |
+|         | telemetry-only in v1 and never consumed by any control logic. RF is a discrete 7-step |
+|         | actuator (×2–3 jumps) → no fine setpoint is reachable, so a "target DC" is meaningless: |
+|         | v1 control is a dead-band `[LOW, HIGH]` + `GUARD`, no attractor at the centre. Would    |
+|         | only matter for a future feed-forward jump (Phase 5). API-breaking: `AFE4490Config`     |
+|         | loses a field (no wire/firmware consumer — `$CFG` never sent it). 36/36 native tests,   |
+|         | ESP32-S3 (incunest_V16) build OK.                                                       |
 | v0.53-experiment | **Consolidate ADC constants into `namespace adc`.**                        |
 |         | `kAFE_ADC_FS_CODE`/`kAFE_ADC_FSR` (file-scope) and `kAdcSatPos`/`kAdcSatNeg`     |
 |         | (`AFE4490AnalogState`) moved to `namespace adc`: `FS_CODE`/`FSR`/`SCALE`, NOMINAL |

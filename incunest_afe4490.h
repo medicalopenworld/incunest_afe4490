@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.53 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.57 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.53"
+#define INCUNEST_AFE4490_VERSION "0.57"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -102,13 +102,13 @@ constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — commo
 constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
 //
 // Bits 13+: RSQM software checks — set continuously by _rsqm_update() at 500 Hz.
-// ANTICIPATORY CODE (2026-07-11): these flags currently have NO programmatic consumer
-// beyond the aggregate rsqi gate (diag_code == 0) and human inspection in pulsenest_lab.
-// Their intended consumer is HGAC, which may end up doing its own internal checks and
-// never read them — they may remain unused. HW_SETTLING is currently unreachable: nobody
-// sets _rsqm_settling_countdown > 0 yet (intended producer: HGAC / config changes).
+// AMB_SAT has NO programmatic consumer beyond the aggregate rsqi gate (diag_code == 0) and
+// human inspection in pulsenest_lab. HW_SETTLING's producer is HGAC (arms
+// _rsqm_settling_countdown after an RF step-down).
+// Bit 14 is FREE: it held RSQM_DIAG_SIGNAL_WEAK (removed v0.56 — no actionable consumer,
+// not fixable by gain, and redundant with the PI-based spo2_sqi). If a pulsatile-amplitude
+// flag is ever needed, reintroduce it here as RSQM_DIAG_AC_LOW (name the magnitude, not a verdict).
 constexpr uint32_t RSQM_DIAG_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
-constexpr uint32_t RSQM_DIAG_SIGNAL_WEAK = 0x00004000UL;  // bit 14 — differential signal amplitude too low
 constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 
 // ── Public data struct ────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ struct AFE4490Data {
     float   hr3_sqi;     // HR3 Signal Quality Index [0–1]: HPS peak prominence in search range; 0=diffuse HPS, 1=dominant peak
     // RSQM outputs
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
-    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SIGNAL_WEAK | RSQM_DIAG_HW_SETTLING | ...
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_HW_SETTLING | ...
     ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, PROBE_APPLIED, or PROBE_SATURATING
 };
 
@@ -313,17 +313,16 @@ enum class AFE4490ChState : uint8_t {
 /// ── v_tia operating axis — SINGLE SOURCE OF TRUTH ───────────────────────
 /// Every threshold on the differential TIA output, in ascending order. Edit the values HERE
 /// only; the strict ordering below is an enforced compile-time invariant. Two natures coexist:
-/// PHYSICS (fixed: FS/ADC/LIN — datasheet/silicon/board) and POLICY (HGAC defaults IDEAL/GUARD,
+/// PHYSICS (fixed: FS/ADC/LIN — datasheet/silicon/board) and POLICY (HGAC default GUARD,
 /// runtime-tunable). NOTE: the ADC full-scale (adc::FSR, mapped onto this axis at unity gain) is
 /// NOMINAL; the operative saturation flag is adc::SAT_POS, an EMPIRICAL rail in adc_code, NOT this axis.
 namespace tia_axis {
-    constexpr float IDEAL_V = 0.6f;  // ideal operating point (HGAC telemetry)    — POLICY default
     constexpr float GUARD_V = 0.9f;  // HGAC acts (reduce RF) above this          — POLICY default, runtime-tunable
     constexpr float FS_V    = 1.0f;  // TI full-scale guarantee                   — PHYSICS; above → CH_EXTENDED_RANGE
     constexpr float LIN_V   = 1.8f;  // empirical TIA linearity limit             — PHYSICS; above → CH_CLIPPED_RANGE
     // ADC saturation (adc::FSR = 1.2 V) is an ADC property, not a v_tia threshold; at unity gain
     // (V_ADC = V_TIA) it falls on this axis between FS_V and LIN_V, hence it enters the ordering.
-    static_assert(IDEAL_V < GUARD_V && GUARD_V < FS_V && FS_V < adc::FSR && adc::FSR < LIN_V,
+    static_assert(GUARD_V < FS_V && FS_V < adc::FSR && adc::FSR < LIN_V,
                   "v_tia axis strictly ascending (adc::FSR mapped at unity gain)");
 }
 
@@ -333,7 +332,7 @@ namespace tia_axis {
 /// Consumers must query through the helpers (chState/chValidRange/otLedxValid/...), never the
 /// masks directly, so the packing (per-stage masks) can change without touching consumers.
 /// The thresholds below are PHYSICS (datasheet / silicon / per-board characterization),
-/// not policy — HGAC actuation thresholds (hgac_v_tia_thr/ideal) live in the controller.
+/// not policy — HGAC actuation thresholds (hgac_v_tia_thr) live in the controller.
 struct AFE4490AnalogState {
     // ── Detection thresholds — live in namespaces, not here ──────────────────
     // v_tia thresholds live in tia_axis; ADC saturation rails (SAT_POS/SAT_NEG) live in
@@ -539,16 +538,12 @@ struct AFE4490Config {
     float             hr_max_bpm;                // valid output upper bound [bpm]
     // RSQM algorithm parameters
     float             rsqm_ot_thr;               // OT threshold: NOT_APPLIED vs APPLIED [A/A]
-    float             rsqm_signal_weak_std;      // LED1_Sub_std threshold for SIGNAL_WEAK [adc_code]
     float             rsqm_disconn_led_sub_thr;  // |led_sub| min for DISCONNECTED detection [adc_code]
     float             rsqm_disconn_i_pd_thr;     // |i_pd| min for DISCONNECTED detection [A]
     float             rsqm_probe_state_min_s;    // debounce time to change probe state [s]
-    float             rsqm_ema_mean_tau_s;        // RSQM EMA mean time constant [s]
-    float             rsqm_ema_var_tau_s;         // RSQM EMA variance time constant [s]
     // HGAC parameters (Phase 1: RF-only descent — see incunest_afe4490_spec.md §5.8)
     bool              hgac_enable;                    // master enable; false = HGAC never actuates
     float             hgac_v_tia_thr;            // V — TIA guard (A3): descend RF above this
-    float             hgac_v_tia_ideal;          // V — ideal operating point (telemetry only, v1)
     float             hgac_tiaguard_debounce_min_s;          // s — TIAGUARD debounce before acting (urgent path)
 };
 
@@ -625,11 +620,9 @@ public:
 
     // RSQM algorithm setters (callable before or after begin())
     void setRsqmOtThr(float v);                     // OT threshold: NOT_APPLIED vs APPLIED [A/A]
-    void setRsqmSignalWeakStd(float v);             // LED1_Sub_std threshold for SIGNAL_WEAK [adc_code]
     void setRsqmDisconnLedSubThr(float v);          // |led_sub| min for DISCONNECTED detection [adc_code]
     void setRsqmDisconnIPdThr(float v);             // |i_pd| min for DISCONNECTED detection [A]
     void setRsqmProbeStateMinS(float s);            // debounce time to change probe state [s]; triggers recalc
-    void setRsqmEmaTau(float mean_tau_s, float var_tau_s); // RSQM EMA time constants [s]; triggers recalc
 
     // HGAC setters (callable before or after begin()) — Phase 1: RF-only descent
     void setHgacEnable(bool en);                    // master enable; false = HGAC never actuates
@@ -773,6 +766,12 @@ private:
         void reset() { mean = 0.0f; var = 0.0f; count = 0; }
 
         inline void update(float x) {
+            // Seed on the first sample (after construction or reset): start mean AT x with
+            // var = 0, instead of ramping mean up from 0. Ramping from 0 would leave
+            // d = x − mean ≈ x for the first ~3·τ, spuriously INFLATING var (the AC-power
+            // estimate → PI). Seeding removes that start-up bias. It does NOT shorten
+            // the ~3·τ_var that var still needs to become representative (see spo2_warmup_s).
+            if (count == 0) { mean = x; var = 0.0f; count = 1; return; }
             mean += _mean_alpha * (x - mean);
             float d = x - mean;
             var  += _var_alpha  * (d * d - var);
@@ -790,25 +789,6 @@ private:
     enum class HgacColor : uint8_t { IR = 0, RED = 1 };
 
     // ── RSQM constants ─────────────────────────────────────────────────────────
-    // EMA mean τ: 2000 ms, f_c = 0.08 Hz.
-    // Must be slow enough that f_c << 0.5 Hz (min physiological HR) so the mean tracks only
-    // the DC baseline and does not follow the pulsatile component — otherwise d = x−mean is
-    // underestimated, biasing the variance estimate and causing false RSQM_DIAG_SIGNAL_WEAK.
-    // Also used for OT (optical transmittance): responds to hardware level changes (HGAC
-    // RF/LED adjustments, settling ~150 ms) within 3τ ≈ 6 s — acceptable because
-    // RSQM_DIAG_HW_SETTLING gates HGAC actions during that period.
-    float             rsqm_ema_mean_tau_s    = 2.0f;     // τ_mean = 2 s → α ≈ 0.001 @ 500 Hz
-
-    // EMA variance τ: 4000 ms, f_c = 0.04 Hz.
-    // Must be slower than mean (τ_var > τ_mean) because the variance estimate needs to
-    // accumulate several complete cardiac cycles to be reliable:
-    //   @ 60 bpm (1 Hz, period 1000 ms): τ_var covers 4 full cycles
-    //   @ 30 bpm (0.5 Hz, period 2000 ms): τ_var covers 2 full cycles (minimum acceptable)
-    // Using τ_var = τ_mean = 2 s would cover only 1 cycle at 30 bpm — borderline.
-    // τ_var > τ_mean is intentional asymmetry justified by different physical requirements.
-    float             rsqm_ema_var_tau_s     = 4.0f;     // τ_var  = 4 s → α ≈ 0.0005 @ 500 Hz
-
-    static constexpr uint32_t rsqm_ready_count      = 6000;     // samples before estimators trusted (3 × τ_var = 12 s @ 500 Hz)
     float             rsqm_disconn_led_sub_thr = 5000.0f;  // |led_sub| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
     float             rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
                                                                  // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
@@ -818,16 +798,14 @@ private:
                                                                  // to probe placement, frequently reading OT above 8.5e-5 with probe applied.
                                                                  // Still needs empirical calibration with a real neonatal probe/patient.
     // ADC saturation thresholds live in namespace adc (SAT_POS/SAT_NEG).
-    float             rsqm_signal_weak_std  = 2000.0f;  // LED1_Sub_std < this → RSQM_DIAG_SIGNAL_WEAK (needs HW calibration)
     float             rsqm_probe_state_min_s = 0.2f;    // debounce time to change probe state [s] (= 100 samples @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED
 
     // ── HGAC constants (Phase 1: RF-only descent) ────────────────────────────
-    // Defaults promoted from the former file-scope hgac_v_tia_thr/ideal constants
+    // Default promoted from the former file-scope hgac_v_tia_thr constant
     // (now runtime-tunable, matching the RSQM pattern above).
     bool              hgac_enable                = false; // OFF by default until bench-validated
     float             hgac_v_tia_thr        = tia_axis::GUARD_V;  // V — HGAC actuation (A3); source tia_axis. Runtime-tunable, clamped ≤ FS_V by setter
-    float             hgac_v_tia_ideal      = tia_axis::IDEAL_V;  // V — ideal operating point; source tia_axis (telemetry only, v1)
     float             hgac_tiaguard_debounce_min_s      = 0.5f;  // s — O8.1: TIAGUARD response is urgent (~500 ms)
     // Fixed (not $SET-tunable in v1, like rsqm_diag_period_ms): approximate analog front-end
     // + downstream settling time after an RF change, used to arm RSQM_DIAG_HW_SETTLING.
@@ -1123,8 +1101,6 @@ private:
     float    _hr_max_bpm;
 
     // ── RSQM state ────────────────────────────────────────────────────────────
-    EmaChannel _rsqm_led1_sub_ema;     // EMA estimator for led1_sub (IR differential)
-    EmaChannel _rsqm_led2_sub_ema;     // EMA estimator for led2_sub (RED differential)
     ProbeState     _rsqm_probe_state         { ProbeState::PROBE_DISCONNECTED }; // current probe state (output of _rsqm_request_probe_state)
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint32_t       _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state

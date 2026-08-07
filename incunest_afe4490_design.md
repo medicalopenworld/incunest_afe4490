@@ -65,7 +65,7 @@ so it naturally stays high.
 
 Not "two layers": the saturation guard is the **top (most urgent) rung of the same descent**.
 
-Thresholds on `V_TIA` (per color): `LOW 0.25` · `IDEAL 0.6` · `HIGH 0.75` · `GUARD 0.9`
+Thresholds on `V_TIA` (per color): `LOW 0.25` · `HIGH 0.75` · `GUARD 0.9`
 (the physical ceiling `adc::FSR` is 1.2 V; `tia_axis::FS_V` 1.0 V is the TIA linearity guarantee).
 
 ```
@@ -146,7 +146,7 @@ zone (accessing the 1.0–1.8 V TIA band by shifting the ADC window), and multi-
 ## 3. Analog reconstruction & RSQM (summary — see spec §3, §5)
 
 - **Single source of truth for thresholds:** `namespace tia_axis` (the ordered `v_tia` thresholds
-  IDEAL/GUARD/FS/LIN, with a compile-time ascending `static_assert`) and `namespace adc` (ADC scale +
+  GUARD/FS/LIN, with a compile-time ascending `static_assert`) and `namespace adc` (ADC scale +
   code rails). No per-struct aliases (deliberately removed): the 1.2 V full-scale lives once in
   `adc::FSR`. ADC rails keep **NOMINAL** (datasheet 2^21) vs **ACTUAL** (empirically measured on
   IncuNest 16.A) side by side; the operative saturation flag is the guarded *actual* rail

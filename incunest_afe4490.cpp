@@ -30,10 +30,8 @@ namespace {
     // ── SpO2 ──────────────────────────────────────────────────────────────────
     constexpr float    spo2_warmup_s       = 18.0f;    // s  — warmup before reporting SpO2 (3 × τ_var = 3 × 6 s)
     // EMA mean τ (DC baseline): 2.0 s, f_c ≈ 0.08 Hz.
-    // Same value as rsqm_ema_mean_tau_s — both track the DC baseline of the same signal
-    // (led1_sub / led2_sub) with the same physical requirement: f_c << min physiological HR
-    // (0.5 Hz @ 30 bpm) so the DC estimate does not follow the pulsatile component.
-    // If it did, AC = x−DC would be underestimated, biasing the R ratio and SpO2.
+    // f_c << min physiological HR (0.5 Hz @ 30 bpm) so the DC estimate does not follow the
+    // pulsatile component; if it did, AC = x−DC would be underestimated, biasing the R ratio and SpO2.
     constexpr float    spo2_ema_mean_tau_s   = 2.0f;
     // EMA variance τ (AC² power = SpO2 averaging time): 6.0 s.
     // ISO 80601-2-61:2026 Annex JJ.2 d) requires a transfer standard to have an averaging
@@ -111,7 +109,7 @@ namespace {
     // Physical thresholds (fs = TIA full-scale differential 1.0 V, empirical lin 1.8 V) live in
     // tia_axis (FS_V / LIN_V), the single source of truth, since v0.35 — physics belongs to
     // the reconstruction layer; only HGAC actuation POLICY stays here.
-    // hgac_v_tia_thr/ideal are now runtime-tunable AFE4490Config fields (promoted
+    // hgac_v_tia_thr is now a runtime-tunable AFE4490Config field (promoted
     // from fixed constexpr here in Phase 1 — see incunest_afe4490.h private defaults,
     // matching the rsqm_* pattern) so their defaults live in the header, not here.
     // Empirical hard clip ~1.94 V diff (TIA output node hits the rail, pre-ambient-
@@ -313,8 +311,6 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr3_update_interval(25u),
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
-      _rsqm_led1_sub_ema{},
-      _rsqm_led2_sub_ema{},
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _rsqm_settling_countdown(0),
       _hgac_tiaguard_debounce_min_samples(0),
@@ -829,12 +825,6 @@ void INCUNEST_AFE4490::setRsqmOtThr(float v) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setRsqmSignalWeakStd(float v) {
-    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    rsqm_signal_weak_std = v;
-    if (_initialized) xSemaphoreGive(_state_mutex);
-}
-
 void INCUNEST_AFE4490::setRsqmDisconnLedSubThr(float v) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     rsqm_disconn_led_sub_thr = v;
@@ -850,14 +840,6 @@ void INCUNEST_AFE4490::setRsqmDisconnIPdThr(float v) {
 void INCUNEST_AFE4490::setRsqmProbeStateMinS(float s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     rsqm_probe_state_min_s = s;
-    _recalc_rate_params();
-    if (_initialized) xSemaphoreGive(_state_mutex);
-}
-
-void INCUNEST_AFE4490::setRsqmEmaTau(float mean_tau_s, float var_tau_s) {
-    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    rsqm_ema_mean_tau_s = mean_tau_s;
-    rsqm_ema_var_tau_s  = var_tau_s;
     _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
@@ -940,15 +922,11 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hr_min_bpm            = _hr_min_bpm;
     cfg.hr_max_bpm            = _hr_max_bpm;
     cfg.rsqm_ot_thr              = rsqm_ot_thr;
-    cfg.rsqm_signal_weak_std     = rsqm_signal_weak_std;
     cfg.rsqm_disconn_led_sub_thr = rsqm_disconn_led_sub_thr;
     cfg.rsqm_disconn_i_pd_thr    = rsqm_disconn_i_pd_thr;
     cfg.rsqm_probe_state_min_s   = rsqm_probe_state_min_s;
-    cfg.rsqm_ema_mean_tau_s      = rsqm_ema_mean_tau_s;
-    cfg.rsqm_ema_var_tau_s       = rsqm_ema_var_tau_s;
     cfg.hgac_enable                 = hgac_enable;
     cfg.hgac_v_tia_thr          = hgac_v_tia_thr;
-    cfg.hgac_v_tia_ideal        = hgac_v_tia_ideal;
     cfg.hgac_tiaguard_debounce_min_s        = hgac_tiaguard_debounce_min_s;
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
@@ -1087,8 +1065,6 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_result_sqi = 0.0f;
     _hr3_result = 0.0f; _hr3_result_sqi = 0.0f;
-    _rsqm_led1_sub_ema.reset();
-    _rsqm_led2_sub_ema.reset();
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
     _rsqm_settling_countdown = 0;
     _hgac_tiaguard_debounce_count_led1 = 0;
@@ -1210,12 +1186,6 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
 // Called at the top of _process_sample() after _compute_analog_state().
 void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                      int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
-    // ── EMA estimators ─────────────────────────────────────────────────────────
-    _rsqm_led1_sub_ema.update((float)led1_sub);
-    _rsqm_led2_sub_ema.update((float)led2_sub);
-
-    const bool ready = (_rsqm_led1_sub_ema.count >= rsqm_ready_count);
-
     // ── Probe state detection ──────────────────────────────────────────────────
     // PROBE_DISCONNECTED: instantaneous criterion — all four i_pd below threshold AND
     // |led1_sub|/|led2_sub| near zero on both channels.  When cable is disconnected,
@@ -1267,13 +1237,6 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     if (as.adcSatPos(AFE4490Ch::ALED1) || as.adcSatPos(AFE4490Ch::ALED2))
         diag |= RSQM_DIAG_AMB_SAT;
 
-    // RSQM_DIAG_SIGNAL_WEAK: probe is applied but pulsatile amplitude too low on either channel
-    // Both channels required: SpO2 needs IR and RED simultaneously
-    if (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED &&
-        (sqrtf(_rsqm_led1_sub_ema.var) < rsqm_signal_weak_std ||
-         sqrtf(_rsqm_led2_sub_ema.var) < rsqm_signal_weak_std))
-        diag |= RSQM_DIAG_SIGNAL_WEAK;
-
     // RSQM_DIAG_HW_SETTLING: set externally by HGAC or config change; counts down to 0
     if (_rsqm_settling_countdown > 0) {
         diag |= RSQM_DIAG_HW_SETTLING;
@@ -1285,8 +1248,8 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     _diag_code = (_diag_code & AFE_DIAG_MASK) | diag;
 
     // ── RSQI ───────────────────────────────────────────────────────────────────
-    // 1 only when: probe applied, estimators ready, and no active diagnostic flags (any bit)
-    _current_data.rsqi        = (ready && _rsqm_probe_state == ProbeState::PROBE_APPLIED && _diag_code == 0) ? 1 : 0;
+    // 1 only when: probe applied and no active diagnostic flags (any bit)
+    _current_data.rsqi        = (_rsqm_probe_state == ProbeState::PROBE_APPLIED && _diag_code == 0) ? 1 : 0;
     _current_data.diag_code   = _diag_code;
     _current_data.probe_state = _rsqm_probe_state;
 }
@@ -1580,8 +1543,6 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
     _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
-    _rsqm_led1_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
-    _rsqm_led2_sub_ema.init(rsqm_ema_mean_tau_s, rsqm_ema_var_tau_s, fs);
     _hgac_tiaguard_debounce_min_samples = (uint32_t)roundf(hgac_tiaguard_debounce_min_s * fs);
     if (_hgac_tiaguard_debounce_min_samples < 1) _hgac_tiaguard_debounce_min_samples = 1;
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
