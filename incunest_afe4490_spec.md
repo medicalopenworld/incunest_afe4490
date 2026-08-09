@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.57
+# incunest_afe4490 — Specification v0.60
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -52,7 +52,7 @@ The AFE4490 produces 6 signals per sample. All are read internally:
     │
     ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA, I_PD, OT)  — see §3c
     │       ├─→ _rsqm_update()      (probe state, DiagCode, RSQI)
-    │       └─→ _hgac_update()      (TIAGUARD guard + RF step-down — Phase 1, §5.8)
+    │       └─→ _hgac_update()      (RF guard/leveling, two EMA per domain, §5.8)
     │
     ├─→ selected channel (setPPGChannel)
     │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
@@ -412,9 +412,10 @@ constexpr uint32_t AFE_DIAG_LED1SC_ALM      = 0x00000800UL;  // bit 11 — LED1 
 constexpr uint32_t AFE_DIAG_COMMON_MODE_ALM = 0x00001000UL;  // bit 12 — common-mode voltage out of range
 constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 AFE DIAG bits
 //
-// Bits 13+: RSQM software checks — updated continuously at 500 Hz by _rsqm_update()
-// Bit 14 (0x4000) is free — held RSQM_DIAG_SIGNAL_WEAK, removed v0.56 (see §14). Reuse as RSQM_DIAG_AC_LOW if a pulsatile-amplitude flag is ever needed.
-constexpr uint32_t RSQM_DIAG_AMB_SAT     = 0x00002000UL;  // bit 13 — ambient channel near positive rail
+// Bits 13+: RSQM/HGAC software checks — updated continuously at 500 Hz
+// Bit 14 = RSQM_DIAG_AMBIENT_HIGH (HGAC ambient alarm, v0.59; previously SIGNAL_WEAK, removed v0.56).
+constexpr uint32_t RSQM_DIAG_AMB_SAT      = 0x00002000UL;  // bit 13 — ambient channel near positive rail
+constexpr uint32_t RSQM_DIAG_AMBIENT_HIGH = 0x00004000UL;  // bit 14 — ambient saturates at RF floor (HGAC)
 constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
 // bits 16–31 reserved
 ```
@@ -646,9 +647,9 @@ raw ambient-corrected counts to OT.** `_spo2_update()` now consumes `as.ot_led1`
 i_pd_aled) / I_LED` is a linear rescaling of `led_sub` by `1/(2·RF·I_LED)` — since the real
 photocurrent does not change instantaneously when RF/ILED change, OT (and `i_pd`) is
 **gain-invariant by construction**. An RF change (HGAC, §5.8) no longer creates a
-discontinuity in SpO2's input, so `_hgac_step_rf_down()` no longer needs to rescale the SpO2
-`EmaChannel` by k (removed; see §5.8, `EmaChannel::rescale()` deleted as dead code) — R is
-never corrupted by a gain step, without the reactive rescale mechanism HGAC Phase 1 used.
+discontinuity in SpO2's input, so an RF change no longer needs to rescale the SpO2
+`EmaChannel` by k (`EmaChannel::rescale()` deleted as dead code) — R is
+never corrupted by a gain step, without any reactive rescale mechanism.
 This also decouples HGAC's actuation rate from any future change to how PI/SpO2 are
 estimated (see "future alternative" notes below) — a rescale-by-k trick only works for a
 linear EMA; a more sophisticated estimator might not have one, which would otherwise force
@@ -747,6 +748,13 @@ from 0. Ramping from 0 leaves `d = x − mean ≈ x` for the first ~3·τ, which
 start-up bias. It does **not** shorten `spo2_warmup_s` (= 3·τ_var): `var`
 still needs several pulse cycles to become representative — seeding only fixes the *bias*, not the
 *convergence time*. Steady-state behaviour is unchanged (same recursion, same α).
+
+**Optional warmup / `valid()` (v0.58):** `init()` takes an optional `warmup_s` (default 0). When
+> 0, `valid()` returns false until `warmup_s · fs` samples have been seen since the last `reset()`;
+`mean`/`var` remain plain public fields (always real values — no NaN), so the filter keeps
+accumulating during warmup and consumers that don't care (SpO2, `warmup_s = 0` → always valid)
+are unaffected. HGAC uses it (3·τ per EMA) to skip decisions until an estimator has matured after
+a gain-change reset — the check `ema.valid() && ema.mean >= thr` short-circuits with no action.
 
 **Perfusion Index (PI):**
 
@@ -1053,7 +1061,7 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 | Bit | Constant | Condition |
 |---|---|---|
 | 0x2000 | `RSQM_DIAG_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `adc::SAT_POS` = 2 096 700) |
-| 0x4000 | *(free)* | Held `RSQM_DIAG_SIGNAL_WEAK` until v0.56 (removed — see §14). Reuse as `RSQM_DIAG_AC_LOW` if needed. |
+| 0x4000 | `RSQM_DIAG_AMBIENT_HIGH` | HGAC alarm: RF at the floor (`RF_10K`) AND the ambient (ALED) EMA ≥ HIGH2 on either domain → ambient light alone saturates ("TOO MUCH AMBIENT LIGHT"). Preventive (EMA @ HIGH2), distinct from `AMB_SAT`'s per-sample hard rail. (Was `SIGNAL_WEAK` until v0.56.) |
 | 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
 
 HGAC publishes no DiagCode bit (the former bit 16 `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — no consumer decoded it; the "at RF floor and still saturating" condition is derivable at the point of use as `rf == RF_10K` while TIAGUARD persists, and its actuator, ILED, is Phase 4).
@@ -1085,154 +1093,115 @@ The task is created in `begin()` and deleted in `stop()`. It runs on core 1 at `
 
 ---
 
-### 5.8 HGAC — Hardware Gain Control (Phase 1: RF-only TIAGUARD response)
+### 5.8 HGAC — Hardware Gain Control (RF-only, two EMA per gain domain)
 
-**Status (v0.37): Phase 1 implemented — RF-only guard stepping RF down on TIAGUARD
-(`v_tia` above the guard threshold, below full-scale), no ascent yet (manual recovery).
-Disabled by default (`hgac_enable = false`).**
-Runs in `_process_sample()`
-immediately after `_rsqm_update()`, once per sample at 500 Hz. This is the first of a planned
-multi-phase rollout (full design, closed architecturally, in the project's design notes):
-Phase 1 (this), Phase 2 (RF ascent with prediction/hysteresis), Phase 3 (telemetry closure),
-Phase 4 (ILED actuation + thermal envelope), Phases 5-7 (feed-forward, P² estimator, UI —
-optional/deferred).
+**Status (v0.58): RF-only, two EMA per gain domain — a fast EMA drives an urgent saturation
+guard (HIGH2) and a slow EMA drives a bidirectional leveling dead-band (HIGH1/LOW1). Disabled by
+default (`hgac_enable = false`).** Runs in `_process_sample()` immediately after `_rsqm_update()`,
+once per sample at 500 Hz. Two independent loops, one per gain domain (IR = LED1+ALED1, RED =
+LED2+ALED2 — ENSEPGAIN=1; see §5.6/§11). ILED is fixed at its thermal-envelope maximum (RF is the
+only actuator); alarms (RF floor→ambient, RF ceiling→weak signal), the ALED cause-discriminator
+and feed-forward jumps are deferred. Full design rationale in the project's HGAC design notes.
 
-> **Why HGAC is RF-only in v1 — ILED is a weak de-saturation actuator at the gain floor
-> (analysis 2026-08-04).** In the LED phase, `v_tia_led = 2·RF·(i_amb + i_led)` with
-> `i_led = OT·ILED`; only `i_led` scales with ILED (ambient current does not — see the ILED-settling
-> note above). The maximum voltage that lowering ILED can shed at RF = 10K (the floor) is
+> **Why HGAC is RF-only — ILED is a weak de-saturation actuator at the gain floor (analysis
+> 2026-08-04).** In the LED phase, `v_tia_led = 2·RF·(i_amb + i_led)` with `i_led = OT·ILED`; only
+> `i_led` scales with ILED (ambient current does not — see the ILED-settling note above). The
+> maximum voltage that lowering ILED can shed at RF = 10K (the floor) is
 > `Δv = 2·RF·OT·(ILED_max − ILED_min) = 800·OT` V. For an APPLIED neonatal probe (OT < `rsqm_ot_thr`
-> ≈ 1e-4, typically 1e-5…1e-4) that is only **~0.01–0.08 V** — negligible. The reason: at RF = 10K
-> the LED-driven part of `v_tia` is itself tiny (~0.1 V), so if a channel is *saturating* there
-> (~1.2 V ADC rail), the bulk is **ambient**, which ILED cannot touch. This is why the descent
-> ladder's response to "RF at floor and still saturating" is the **excessive-ambient-light alarm**
-> (discriminated by the ALED phase), not ILED reduction — and it motivates keeping v1 RF-only.
-> Lowering ILED only sheds meaningful voltage in the rare LED-dominated case (high OT, very
-> translucent tissue, ALED not saturating). OT thresholds still need empirical calibration, so
-> Δv is order-of-magnitude. Design rationale lives in the project's HGAC design notes.
+> ≈ 1e-4) that is only **~0.01–0.08 V** — negligible: at RF = 10K the LED-driven part of `v_tia`
+> is itself tiny (~0.1 V), so if a channel is *saturating* there (~1.2 V ADC rail), the bulk is
+> **ambient**, which ILED cannot touch.
 
-#### 5.8.1 TIAGUARD — TIA over-threshold guard (single guard, v1)
+#### 5.8.1 Tracked signal and thresholds
 
-With Stage 2 frozen at ×1 gain and AMBDAC=0 (v1 defaults), `v_tia == v_adc` — the ADC
-clips before the TIA's own linearity limit, so ADC saturation and TIA-linearity saturation
-collapse into a single guard trip. **TIAGUARD** names this condition — `v_tia` above the
-guard threshold (`GUARD_V` = 0.9 V, which sits BELOW full-scale; see `tia_axis`) — not the
-response to it:
+Only the **LED phase** of each domain is tracked (`v_tia_led1`/`v_tia_led2`); the ALED phase is
+not. Rationale (v1: unipolar photocurrent ≥ 0, AMBDAC=0): `v_tia_led ≥ v_tia_aled` always, so the
+LED phase is the upper envelope — the active constraint both for descending (it saturates first)
+and ascending (raise RF until LED enters the band → ALED stays below). ALED is reserved as the
+cause-discriminator of the (deferred) excessive-ambient-light alarm.
 
+Three thresholds on `v_tia_led` (per domain), all runtime-tunable:
+
+| Threshold | Default | Source | Acts on | Action |
+|---|---|---|---|---|
+| `hgac_v_tia_high2` | 0.90 V | `tia_axis::HIGH2_V` (clamped ≤ FS_V) | fast EMA | guard: `RF--` urgently |
+| `hgac_v_tia_high1` | 0.75 V | policy literal | slow EMA | leveling: `RF--` |
+| `hgac_v_tia_low1`  | 0.25 V | policy literal | slow EMA | leveling: `RF++` |
+
+`[LOW1, HIGH1]` is a dead-band (no action). Stability invariant: `HIGH1/LOW1 = 3.0 > 2.5×` (the
+largest RF LUT step), so a single step never crosses from one band edge to the other (no hunting).
+
+#### 5.8.2 Two EMA per domain (fast guard / slow leveling)
+
+Each domain runs two `EmaChannel`s (§5.1) over `v_tia_led`:
+
+| EMA | τ default | warmup (3·τ) | Role |
+|---|---|---|---|
+| fast (`hgac_ema_fast_tau_s`) | 0.1 s | 0.3 s | HIGH2 guard — integrates **severity × time** (how far/how long the level exceeds the guard). An EMA is chosen over the raw sample precisely for this: the raw sample can't tell a brief graze from a sustained excursion. |
+| slow (`hgac_ema_slow_tau_s`) | 2.0 s | 6 s | HIGH1/LOW1 leveling — clean DC (f_c ≈ 0.08 Hz ≪ HR_min 0.5 Hz, so it does not follow the pulse). |
+| ambient (`hgac_ema_ambient_tau_s`) | 2.0 s | 6 s | AMBIENT_HIGH alarm on the **ALED** phase (`v_tia_aled`). Sustained (long τ) so a brief ambient flash doesn't flicker the alarm. |
+
+There is **no separate debounce**: the temporal weighting is the EMA's τ itself (an EMA already
+rejects transients shorter than its scale). `valid()` (§5.1) short-circuits each check, so nothing
+acts during an EMA's warmup after a reset — a fail-safe with no extra branch.
+
+#### 5.8.3 Response algorithm
+
+**Actuation — `_hgac_track()`, per domain (RF only, no diagnostic output):**
 ```
-tiaguard(channel) = v_tia > hgac_v_tia_thr   (default 0.9 V)
+guard (fast): if fast.valid() && fast.mean >= HIGH2 → if RF>RF_10K: RF-- ; return  (priority)
+level (slow): if !slow.valid() → return
+              if slow.mean >= HIGH1 → if RF>RF_10K: RF--
+              else if slow.mean < LOW1 → if RF<RF_1M: RF++
 ```
+RF steps one `kAFE_RF_OHM` LUT level per action. At the floor (`RF_10K`) a further `RF--` is a
+no-op; at the ceiling (`RF_1M`) a further `RF++` is a no-op.
 
-Evaluated per gain domain (IR = LED1+ALED1; RED = LED2+ALED2 — the two domains ENSEPGAIN=1
-creates, see §5.6/§11 TIAGAIN/TIA_AMB_GAIN): either the LED phase or its ambient phase
-saturating trips that domain's guard (both share one RF).
-
-#### 5.8.2 Gate G0
-
+**Ambient alarm — `_hgac_ambient_high()`, diagnostic, evaluated separately in `_hgac_update()`:**
 ```
-// Implemented as a gate-OFF in _hgac_update() (reset TIAGUARD debounce counters + return):
-gate_off = (probe_state == PROBE_NOT_APPLIED OR probe_state == PROBE_DISCONNECTED)
-           OR (diag_code & RSQM_DIAG_HW_SETTLING)
-// Idle states listed explicitly (not !(APPLIED||SATURATING)): a future ProbeState is NOT
-// gated off here and would let HGAC act — revisit this list when adding a ProbeState.
-// Equivalent today to: gate_ok = (APPLIED OR SATURATING) AND !HW_SETTLING
+ambient_high(domain) = (RF == RF_10K) && ambient.valid() && ambient.mean >= HIGH2
+AMBIENT_HIGH bit = ambient_high(IR) || ambient_high(RED)      (global OR)
 ```
+Kept **out of `_hgac_track()`** so actuation and diagnostic stay separate. Meaning: RF is at the
+floor (HGAC can do no more) AND the **ALED** phase alone is ≥ HIGH2 → ambient light alone saturates,
+so lowering RF/ILED can't help (`v_tia_led ≥ v_tia_aled`, LED adds only ~0.1 V at the floor) →
+**AMBIENT_HIGH** (bit 14, §5.6.3). Deliberately **independent of the LED guard** (`fast`): ALED is
+the direct ambient indicator, so the alarm doesn't require the LED guard to have tripped. The
+LED-dominated case (ALED low) raises no alarm (ILED actuation deferred). Produced by HGAC (not RSQM)
+because it depends on RF state; evaluated after `_hgac_track()` (a step to the floor resets the
+ambient EMA → `valid()==false` holds the alarm off until it re-warms). HGAC sets/clears the bit each
+sample and refreshes `_current_data.diag_code` (it runs after `_rsqm_update()`, which wrote the
+mirror without it).
 
-**Removed in v0.44c (2026-07-21):** a third clause `invalid_fraction_ema.mean <=
-hgac_gate_invalid_frac_max` (a dedicated `EmaChannel` fed `1.0` when
-`!AFE4490AnalogState::allValidRange()`, else `0.0`, window 0.2 s) used to gate HGAC on a recent
-history of "clean" samples. Removed because it was self-defeating for a corrective actuator:
-`allValidRange()` IS the TIAGUARD condition HGAC exists to correct, so the gate blocked the fix
-in proportion to how much the problem it fixes had been occurring. Worse, its time constant
-(0.2 s window, crosses the 0.5 threshold after ~139 ms of continuous TIAGUARD — exact EMA
-step-response math) is faster than the TIAGUARD persistence debounce (0.5 s, §5.8.1) that
-commits an actual RF step — so under *sustained* TIAGUARD the gate closed and reset the
-TIAGUARD counters (see `_hgac_update()`) before the debounce could ever complete, blocking the
-step-down exactly when it was most needed. No test ever caught this: the one test that
-exercises the step-down path (`test_hgac_descent_after_persistence`) deliberately used a
-stimulus (`v_tia ≈ 0.973 V`, since changed — see below) that stayed below `kVTiaFs`
-(1.0 V) — i.e. `allValidRange()` stayed `true` throughout — so the EMA clause was never actually
-exercised by continuous TIAGUARD in practice. HGAC's own persistence debounce
-inside `_hgac_check_tiaguard()` (O8.1) already exists specifically to reject one-sample blips,
-making this upstream smoothing redundant even in the cases where it didn't backfire.
+#### 5.8.4 Reset on RF change (`_hgac_change_rf`) — no rescale
 
-**Resolved 2026-07-24 (was an open question 2026-07-21-23):** the gate used to be
-`probe_state != PROBE_DISCONNECTED` — a deviation from the closed design's literal "gate on
-PROBE_APPLIED", needed because RSQM's (then-overloaded) `PROBE_NOT_APPLIED` classifier also
-fired when a channel's optical-transmittance ratio became invalid due to clipping (`otLedxValid()`
-requires `CH_VALID_RANGE`) — i.e. exactly the TIAGUARD condition HGAC exists to correct. Gating on
-`PROBE_APPLIED` literally would have let a severe/fast TIAGUARD event flip `probe_state` to
-`NOT_APPLIED` and then block the very RF step-down that would clear it (a deadlock). But that
-gate was broader than the deadlock required: it also let HGAC act during *any*
-`PROBE_NOT_APPLIED`, including the common "probe idle, no patient" state — and since Phase 1
-has no ascent, an unrelated optical event in that state (e.g. a phototherapy lamp on an
-unapplied probe) could have driven RF down irreversibly before a real patient was connected.
+A gain change scales `v_tia` by `k = RF_new/RF_old`, making prior measurements meaningless, so
+`_hgac_change_rf()` **resets** the domain's two EMAs (rather than rescaling them analytically) and
+arms `_rsqm_settling_countdown` (≈150 ms, `afe_settle_time_s`) — the producer of
+`RSQM_DIAG_HW_SETTLING` (§5.6.3). After the reset the EMAs re-warm (`valid()==false`), so no action
+is taken until they mature — this warmup **doubles as a cooldown** between consecutive steps (no
+cascade), and it comfortably absorbs the HW settling window. SpO2's own EMAs are **not** touched:
+SpO2 consumes gain-invariant OT (§5.1), so an RF change is not a discontinuity in its input.
 
-**The actual fix was upstream, not in this gate:** RSQM now reports the TIAGUARD condition as
-its own state, `PROBE_SATURATING` (§5.6.2), distinct from `PROBE_NOT_APPLIED`. This gate simply
-treats `PROBE_SATURATING` like `PROBE_APPLIED` — no need to reason about which `NOT_APPLIED`
-causes are "safe" to include, because the ambiguous cause no longer reports as `NOT_APPLIED`
-at all. `PROBE_DISCONNECTED` is excluded as before (structurally incompatible with TIAGUARD —
-all 4 channels near zero, §5.6.2); plain `PROBE_NOT_APPLIED` (probe idle, not saturating) is
-now correctly excluded too.
+**Gate G0:** HGAC acts only while `probe_state` is `PROBE_APPLIED` or `PROBE_SATURATING` and no
+`RSQM_DIAG_HW_SETTLING` is active. The idle states (`PROBE_NOT_APPLIED`, `PROBE_DISCONNECTED`) are
+listed explicitly (a future ProbeState is NOT gated off — revisit when adding one). While gated
+off, the four EMAs are `reset()` so they re-warm cleanly when the probe is re-applied (otherwise
+stale probe-in-air values would leak into the first decisions). `PROBE_SATURATING` (§5.6.2) is a
+distinct state so a guard event can't flip to `NOT_APPLIED` and deadlock the step-down.
 
-#### 5.8.3 TIAGUARD response algorithm
-
-Per gain domain, debounced by `hgac_tiaguard_debounce_min_s` (default 0.5 s = 250 samples @ 500 Hz):
-
-1. If not TIAGUARD → reset the debounce counter for that domain.
-2. If TIAGUARD and RF is not at the floor (`RF_10K`) → after the debounce window, step RF
-   down one LUT level (`kAFE_RF_OHM`) via `_hgac_step_rf_down()`.
-3. If TIAGUARD and RF is already at `RF_10K` → nothing to do (no further step possible; ILED
-   actuation is Phase 4). The debounce counter stays latched (not reset) so it doesn't
-   retrigger the instant TIAGUARD clears. No DiagCode bit is published (the former
-   `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — see §14; the condition is derivable at the
-   point of use as `rf == RF_10K` while TIAGUARD persists).
-
-No ascent in Phase 1 — recovery from a lowered RF is manual (a documented limitation of this
-phase, not an oversight; Phase 2 adds predicted/hysteresis-protected ascent).
-
-#### 5.8.4 Atomic RF change + SpO2 EMA rescale (`_hgac_step_rf_down`)
-
-A gain change must not corrupt SpO2's R ratio. `_spo2_ch_ir_ema`/`_spo2_ch_red_ema`
-(`EmaChannel`, §5.1) are linear EMAs, so a gain step by a known factor `k` rescales exactly:
-
-```
-k = kAFE_RF_OHM[new_rf] / kAFE_RF_OHM[old_rf]
-mean ← mean × k          // EmaChannel::rescale(k)
-var  ← var × k²
-```
-
-`_hgac_step_rf_down()` performs the register write (via the existing `setTIAGainLED1`/`LED2`
-setters — reused, not duplicated) and the corresponding EMA rescale as one operation, then
-arms `_rsqm_settling_countdown` (≈150 ms, `afe_settle_time_s`) — the first real producer of
-`RSQM_DIAG_HW_SETTLING` (§5.6.3). **This ordering is mandatory, not an optimization:** without
-it, an RF change would leave the EMA's stale pre-change state in place for ~3×`spo2_ema_var_tau_s`
-(≈18 s), during which R can be corrupted by tens to ~100% (documented in the project's O10/C1
-analysis). There is no shippable intermediate state where automatic RF actuation exists without
-this rescale.
-
-Only applies to RF changes (clean rescale, since RF is linear in the signal chain). ILED
-changes (Phase 4) do NOT get this treatment — ambient current does not scale with ILED
-(asymmetric residual, tracked separately) — so ILED changes must instead gate SpO2 invalid
-during settling, not rescale.
-
-**Concurrency:** `_hgac_update()` and everything it calls take no lock of their own — they
-run from `_process_sample()`, already under `_state_mutex`. `_hgac_step_rf_down()` calls
-`setTIAGainLED1/2()`, which take `_spi_mutex` internally; nesting `_spi_mutex` inside the
-caller's `_state_mutex` is safe because no code path acquires `_spi_mutex` first and then
-blocks on `_state_mutex`. **Contract:** the `_hgac_*` actuation primitives must only ever be
-called from `_hgac_update()` — never directly from application code or another task.
+**Concurrency:** `_hgac_update()` and everything it calls take no lock of their own — they run from
+`_process_sample()`, already under `_state_mutex`. `_hgac_change_rf()` calls `setTIAGainLED1/2()`,
+which take `_spi_mutex` internally; nesting `_spi_mutex` inside the caller's `_state_mutex` is safe
+(no path takes `_spi_mutex` first then blocks on `_state_mutex`). **Contract:** the `_hgac_*`
+actuation primitives are only ever called from `_hgac_update()`.
 
 #### 5.8.5 Parameters (see §10.9) and telemetry
 
-`AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_thr`,
-`hgac_tiaguard_debounce_min_s`. `$SET`/`$LCFG` wiring in PulseNest's
-`src/main.cpp`. `$M4` gained
-`HGAC_RF1,HGAC_RF2` (current RF per domain), sourced from `AFE4490DebugData` fields
+`AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_high2`, `hgac_v_tia_high1`, `hgac_v_tia_low1`,
+`hgac_ema_fast_tau_s`, `hgac_ema_slow_tau_s`, `hgac_ema_ambient_tau_s`. `$SET`/`$LCFG` wiring in PulseNest's `src/main.cpp`.
+`$M4` carries `HGAC_RF1,HGAC_RF2` (current RF per domain), from `AFE4490DebugData`
 `hgac_rf_led1`/`hgac_rf_led2` (§3d), populated alongside `analog` in `_process_sample()`.
-(A third field `HGAC_ALARM` / `hgac_alarm_gain_floor` existed through v0.49 and was removed in
-v0.50 — see §14.)
 
 ---
 
@@ -1702,16 +1671,20 @@ These factors belong to the test protocol, clinical validation documentation, an
 
 ---
 
-### 10.9 HGAC parameters (Phase 1: RF-only TIAGUARD response)
+### 10.9 HGAC parameters (RF-only, two EMA per gain domain)
 
 See §5.8 for algorithm description.
 
 | Parameter | API | Default | Range | Effect |
 |---|---|---|---|---|
 | Master enable | `setHgacEnable()` | `false` | true / false | HGAC never actuates while disabled — safe default until bench-validated |
-| Saturation guard threshold | `setHgacVTiaThr()` | 0.9 V | — | `v_tia` above this trips the TIAGUARD guard for that domain |
-| TIAGUARD persistence | `setHgacTiaguardDebounceMinS()` | 0.5 s (250 samples @ 500 Hz) | 0.0–10.0 | Debounce before an RF step-down — urgent path (O8.1) |
-| Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; coarse diagnostic window, distinct from the sub-sample-period `_compute_settle_margin()` used for CF auto-selection |
+| HIGH2 guard threshold | `setHgacVTiaHigh2()` | 0.90 V | ≤ FS_V | fast-EMA `v_tia_led` above this → urgent `RF--` for that domain |
+| HIGH1 leveling upper | `setHgacVTiaHigh1()` | 0.75 V | — | slow-EMA `v_tia_led` above this → `RF--` |
+| LOW1 leveling lower | `setHgacVTiaLow1()` | 0.25 V | — | slow-EMA `v_tia_led` below this → `RF++` |
+| Guard EMA τ (fast) | `setHgacEmaFastTauS()` | 0.1 s | 0.0–10.0 | HIGH2 estimator time constant; warmup = 3·τ |
+| Leveling EMA τ (slow) | `setHgacEmaSlowTauS()` | 2.0 s | 0.0–30.0 | HIGH1/LOW1 estimator time constant; warmup = 3·τ |
+| Ambient EMA τ | `setHgacEmaAmbientTauS()` | 2.0 s | 0.0–30.0 | ALED-phase estimator for the AMBIENT_HIGH alarm; sustained (avoids flicker); warmup = 3·τ |
+| Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; absorbed by the EMA warmup |
 
 ---
 
@@ -1931,6 +1904,39 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.60-experiment | **Move the ambient alarm out of `_hgac_track()` (separate actuation/diagnostic).** |
+|         | `_hgac_track()` is pure actuation again (returns void); the AMBIENT_HIGH condition moves|
+|         | to a new `_hgac_ambient_high(color, ambient)` evaluated in `_hgac_update()`. Same        |
+|         | producer (HGAC — depends on RF state, so not RSQM), but no longer nested in the guard   |
+|         | branch. Behaviour change: the alarm no longer requires the LED guard (`fast`) to have    |
+|         | tripped — condition is now just `RF==floor && ambient≥HIGH2` (ALED is the direct ambient |
+|         | indicator). Cleaner separation and drops the spurious `fast` dependency. Tests unchanged |
+|         | (8/8), ESP32-S3 V16 build OK.                                                            |
+| v0.59-experiment | **HGAC ambient-light alarm (`RSQM_DIAG_AMBIENT_HIGH`, bit 14).**            |
+|         | When the guard is tripped but RF is already at the floor, HGAC now discriminates the  |
+|         | cause with a third per-domain EMA on the **ALED** phase (`hgac_ema_ambient_tau_s`,     |
+|         | default 2 s, sustained): if ambient alone ≥ HIGH2, lowering RF/ILED can't help         |
+|         | (`v_tia_led ≥ v_tia_aled`) → raise bit 14 "TOO MUCH AMBIENT LIGHT" (global OR across    |
+|         | domains). Reuses the bit freed by SIGNAL_WEAK's removal; distinct from `AMB_SAT`        |
+|         | (per-sample hard rail). `_hgac_track()` returns the alarm and `_hgac_update()` publishes|
+|         | it into `_current_data.diag_code`. Consumer: pulsenest_lab DiagCode tooltip (operator-  |
+|         | actionable). test_hgac +2 (alarm at floor; no alarm when LED-dominated). 38/38 native   |
+|         | tests, ESP32-S3 V16 build OK.                                                           |
+| v0.58-experiment | **HGAC rebuilt: RF-only, two EMA per gain domain (guard + leveling).**      |
+|         | Replaces the single TIAGUARD guard + debounce + descent-only design. Per domain (LED |
+|         | phase only): a **fast** EMA (τ 0.1 s) drives an urgent HIGH2 guard (0.90 V), a **slow**|
+|         | EMA (τ 2 s) drives a bidirectional HIGH1/LOW1 leveling dead-band (0.75/0.25 V) — so RF |
+|         | now both descends AND ascends. No debounce (the EMA τ is the temporal filter).        |
+|         | `EmaChannel` gains optional `warmup_s` + `valid()`; HGAC uses 3·τ warmup, and          |
+|         | `_hgac_change_rf()` **resets** the domain's EMAs on a gain step (warmup doubles as     |
+|         | cooldown; no analytic rescale). Renames: `tia_axis::GUARD_V`→`HIGH2_V`;                |
+|         | `hgac_v_tia_thr`→`hgac_v_tia_high2`; added `hgac_v_tia_high1`, `hgac_v_tia_low1`,      |
+|         | `hgac_ema_fast_tau_s`, `hgac_ema_slow_tau_s`; removed `hgac_tiaguard_debounce_min_s`.  |
+|         | Setters renamed/added accordingly; `_hgac_step_rf_down`/`_hgac_check_tiaguard` →       |
+|         | `_hgac_change_rf`/`_hgac_track`. Only led1/led2 tracked (ALED reserved for the         |
+|         | deferred ambient alarm). API-breaking (config fields, setters, wire keys). test_hgac   |
+|         | rewritten (6 behavioural tests: guard→floor, warmup, disabled, leveling→raises RF,     |
+|         | reset+rewarm, SpO2-EMA-untouched). 36/36 native tests, ESP32-S3 V16 build OK.          |
 | v0.57-experiment | **Remove RSQM's EMA estimators, the `ready` gate, and the RSQM EMA τ config.** |
 |         | Follow-on to v0.56: once SIGNAL_WEAK was gone, `_rsqm_led1/2_sub_ema` fed only their   |
 |         | sample `.count` (the `ready = count ≥ rsqm_ready_count` gate), and `ready` fed only     |
