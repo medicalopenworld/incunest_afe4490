@@ -1349,7 +1349,27 @@ Lower Fs → wider LED window → larger settle margin → larger CF (more noise
 ```
 f_pole = 1 / (2π × RF × CF)
 ```
-At 500 Hz / RF_100K / 100 pF: f_pole ≈ 15.9 kHz — well above the PPG signal band (0.5–20 Hz), so the larger CF filters wideband noise without touching the signal.
+At 500 Hz / RF_100K / 100 pF: f_pole ≈ 15.9 kHz — well above the PPG signal band (0.5–20 Hz).
+
+#### Measured behaviour on IncuNest 16.A (2026-08-17) — CF has no observable effect
+
+Bench measurements at RF_100K / 500 Hz, sweeping CF across its **full range (5 pF → 250 pF, a factor of 50)**, with HGAC disabled so RF stayed fixed:
+
+| Quantity | CF = 5 pF | CF = 250 pF | Verdict |
+|---|---|---|---|
+| V_TIA (all four channels) | ~0.5 V | ~0.5 V (±1 mV, i.e. setup drift) | no effect |
+| `LED1_SUB` % SD/Mean | 0.01 | 0.01 | no effect |
+
+Write path verified by a control: changing RF 100K → 50K halved V_TIA as expected, and RF lives in the same two registers (TIAGAIN / TIA_AMB_GAIN) in adjacent bit fields — so the CF bits are reaching the chip and the null result is physical.
+
+**Why:** the AFE's internal low-pass filter (`FLTRCNRSEL` = 500 Hz) sits between Stage 2 and the sampler and dominates the noise bandwidth. The TIA pole ranges from 318 kHz (5 pF) to 6.4 kHz (250 pF) — always far above the 500 Hz corner — and because that filter precedes the sample-and-hold, there is no out-of-band noise left to alias either.
+
+**Consequences:**
+- The claim that a larger CF buys meaningful noise filtering **is not supported by measurement** in this configuration. v0.62's value is that it fixes an incomplete register grid, not that it improves SNR.
+- Settling is not the binding constraint either: the ADC sample phase is a ~449.5 µs window and the held value reflects its end, so the TIA has margin + window ≈ 500 µs — not the ~50 µs pre-window margin the auto-CF criterion assumes. At RF_100K / 250 pF the settling residual is ≈ e⁻²⁰ (~1 nV), which is why 250 pF reads identically to 5 pF.
+- The library's criterion (`5τ ≤ tia_margin`) is therefore roughly **10× stricter than the datasheet's own Equation 1** (`RF × CF ≤ Rx Sample Time / 10`), which at RF_100K / 500 Hz would permit up to ~449 pF (i.e. the whole grid).
+
+**Decision: keep the conservative criterion.** Relaxing it would buy nothing measurable while spending settling margin, and the margin is free. Revisit only if a configuration is found where CF demonstrably affects noise — e.g. with `FLTRCNRSEL` raised to 1000 Hz, a much higher RF, or a probe/cable whose capacitance makes TIA loop stability the limiting factor (the one CF-related risk these measurements did *not* probe, since no ringing was observed even at 5 pF).
 
 ---
 
@@ -1968,12 +1988,19 @@ Key references for each algorithm implemented in this library.
 |         | strings → no $CFG/$SET protocol break. `kAFE_CF_MATCH_TOL` (1e-4) added: the  |
 |         | budget computes 99.9999924 instead of 100.0 in float, which would have        |
 |         | silently dropped a whole step and negated the change. **Behaviour change:**   |
-|         | auto-CF at the default 500 Hz / RF_100K now picks **100 pF (was 55 pF)** —    |
-|         | ~1.8× more TIA noise filtering; f_pole ≈ 15.9 kHz, far above the PPG band.    |
-|         | Every RF/Fs combination improves or is unchanged; none violates 5τ.           |
+|         | auto-CF at the default 500 Hz / RF_100K now picks **100 pF (was 55 pF)**;     |
+|         | f_pole ≈ 15.9 kHz, far above the PPG band. Every RF/Fs combination improves   |
+|         | or is unchanged; none violates 5τ.                                            |
 |         | New `test_tia_cf` (9 cases) covers the LUT vs. datasheet weights, quantise-   |
 |         | down, round-trips, legacy strings and the float-tolerance regression.         |
-|         | ⚠️ Not yet verified on hardware — check v_tia and noise on 16.A.              |
+|         | **Verified on 16.A (2026-08-17):** sweeping CF over its full 5–250 pF range   |
+|         | changes neither V_TIA (±1 mV = drift) nor `LED1_SUB` %SD/Mean (0.01 → 0.01).  |
+|         | An earlier claim in this changelog that the change bought "~1.8× more noise   |
+|         | filtering" was NOT supported by measurement and has been removed: the         |
+|         | internal 500 Hz filter (FLTRCNRSEL) dominates the noise bandwidth and sits    |
+|         | before the sampler. v0.62's value is fixing an incomplete register grid, not  |
+|         | improving SNR. See §7.2 "Measured behaviour" for the data, the write-path     |
+|         | control, and why the auto-CF criterion is ~10× stricter than datasheet Eq. 1. |
 | v0.61-experiment (doc fix) | **§5.8.4 corrected: `afe_settle_time_s` and the EMA warmup are SEQUENTIAL, not overlapped.** |
 |         | No code change — the spec previously claimed the 3·τ EMA warmup "comfortably absorbs"  |
 |         | the 150 ms settling window (implying they run in parallel). Wrong: Gate G0             |
