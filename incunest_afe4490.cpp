@@ -215,9 +215,9 @@ namespace {
     constexpr uint32_t rf_code[7] = { 5, 4, 3, 2, 1, 0, 6 };
     // Physical RF values: use kAFE_RF_OHM[] from header (single source of truth)
 
-    // TIAGAIN / TIA_AMB_GAIN: CF bits [7:3] (5 pF base + parallel caps)
-    // enum order: CF_5P=0..CF_155P=5 → register bits
-    constexpr uint32_t cf_code[6] = { 0x000, 0x008, 0x010, 0x020, 0x040, 0x080 };
+    // TIAGAIN / TIA_AMB_GAIN: CF_LED[4:0] occupies bits D[7:3] — the code IS the value,
+    // so it is written with a plain shift (no lookup table). See AFE4490CFCode in the header.
+    constexpr uint32_t cf_shift = 3;
     // Physical CF values: use kAFE_CF_PF[] from header (single source of truth)
 
     // Auto-CF settling parameters
@@ -272,11 +272,11 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_led1_current_mA(50.0f), _afe_led2_current_mA(50.0f), _afe_led_range_mA(150),
       _afe_sep_tia_en(true),
       _afe_tia_rf_led1(AFE4490RF::RF_100K),
-      _afe_tia_cf_led1(AFE4490TIACF::CF_5P),
+      _afe_tia_cf_led1(kAFE_CF_CODE_DEFAULT),
       _afe_stg2_rg_led1(AFE4490RG::RG_100K),
       _afe_stg2_en_led1(true),
       _afe_tia_rf_led2(AFE4490RF::RF_100K),
-      _afe_tia_cf_led2(AFE4490TIACF::CF_5P),
+      _afe_tia_cf_led2(kAFE_CF_CODE_DEFAULT),
       _afe_stg2_rg_led2(AFE4490RG::RG_100K),
       _afe_stg2_en_led2(true),
       _afe_ambdac_uA(0),
@@ -537,11 +537,11 @@ void INCUNEST_AFE4490::setTIAGain(AFE4490RF gain) {
 #endif
 }
 
-void INCUNEST_AFE4490::setTIACF(AFE4490TIACF cf) {
+void INCUNEST_AFE4490::setTIACF(float pF) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_tia_cf_led1 = _afe_tia_cf_led2 = cf;
+    _afe_tia_cf_led1 = _afe_tia_cf_led2 = afeCFPFToCode(pF);
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -592,11 +592,11 @@ void INCUNEST_AFE4490::setTIAGainLED1(AFE4490RF gain) {
 #endif
 }
 
-void INCUNEST_AFE4490::setTIACFLED1(AFE4490TIACF cf) {
+void INCUNEST_AFE4490::setTIACFLED1(float pF) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_tia_cf_led1 = cf;
+    _afe_tia_cf_led1 = afeCFPFToCode(pF);
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -633,11 +633,11 @@ void INCUNEST_AFE4490::setTIAGainLED2(AFE4490RF gain) {
 #endif
 }
 
-void INCUNEST_AFE4490::setTIACFLED2(AFE4490TIACF cf) {
+void INCUNEST_AFE4490::setTIACFLED2(float pF) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_tia_cf_led2 = cf;
+    _afe_tia_cf_led2 = afeCFPFToCode(pF);
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -904,11 +904,13 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.afe_led_range_mA    = _afe_led_range_mA;
     cfg.afe_sep_tia_en        = _afe_sep_tia_en;
     cfg.afe_tia_rf_led1    = _afe_tia_rf_led1;
-    cfg.afe_tia_cf_led1      = _afe_tia_cf_led1;
+    cfg.afe_tia_cf_led1_code = _afe_tia_cf_led1;
+    cfg.afe_tia_cf_led1_pF   = afeCFCodeToPF(_afe_tia_cf_led1);
     cfg.afe_stg2_rg_led1 = _afe_stg2_rg_led1;
     cfg.afe_stg2_en_led1       = _afe_stg2_en_led1;
     cfg.afe_tia_rf_led2    = _afe_tia_rf_led2;
-    cfg.afe_tia_cf_led2      = _afe_tia_cf_led2;
+    cfg.afe_tia_cf_led2_code = _afe_tia_cf_led2;
+    cfg.afe_tia_cf_led2_pF   = afeCFCodeToPF(_afe_tia_cf_led2);
     cfg.afe_stg2_rg_led2 = _afe_stg2_rg_led2;
     cfg.afe_stg2_en_led2       = _afe_stg2_en_led2;
     cfg.afe_ambdac_uA        = _afe_ambdac_uA;
@@ -1533,7 +1535,7 @@ void INCUNEST_AFE4490::_apply_timing_regs() {
 uint32_t INCUNEST_AFE4490::_build_tiagain_led1() {
     // TIAGAIN register (0x20): RF_LED1[2:0] | CF_LED1[4:0] | STG2GAIN1[2:0] | STAGE2EN1 | ENSEPGAIN
     uint32_t reg = rf_code[(int)_afe_tia_rf_led1];           // bits D[2:0]
-    reg         |= cf_code[(int)_afe_tia_cf_led1];             // bits D[7:3]
+    reg         |= ((uint32_t)(_afe_tia_cf_led1 & kAFE_CF_CODE_MAX)) << cf_shift;  // bits D[7:3]
     reg         |= stg2_gain_code[(int)_afe_stg2_rg_led1]; // bits D[10:8]: gain only
     if (_afe_stg2_en_led1)  reg |= 0x004000UL;                   // D14: STAGE2EN1 (explicit)
     if (_afe_sep_tia_en)   reg |= 0x008000UL;                   // D15: ENSEPGAIN
@@ -1544,7 +1546,7 @@ uint32_t INCUNEST_AFE4490::_build_tia_amb_gain_led2() {
     // TIA_AMB_GAIN register (0x21): RF_LED2[2:0] | CF_LED2[4:0] | STG2GAIN2[2:0] | STAGE2EN2 | FLTRCNRSEL | AMBDAC[3:0]
     // RF/CF/Stage2 fields control LED2 (RED) when ENSEPGAIN=1, or both channels when ENSEPGAIN=0.
     uint32_t reg = rf_code[(int)_afe_tia_rf_led2];           // bits D[2:0]
-    reg         |= cf_code[(int)_afe_tia_cf_led2];             // bits D[7:3]
+    reg         |= ((uint32_t)(_afe_tia_cf_led2 & kAFE_CF_CODE_MAX)) << cf_shift;  // bits D[7:3]
     reg         |= stg2_gain_code[(int)_afe_stg2_rg_led2]; // bits D[10:8]: gain only
     reg         |= ((uint32_t)_afe_ambdac_uA << 16);           // bits D[19:16]: AMBDAC[3:0]
     // STAGE2EN2 (D14): set when explicitly enabled OR when AMBDAC > 0.
@@ -1623,10 +1625,8 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led1() {
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
     float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_rf_led1]) * 1e12f;
-    _afe_tia_cf_led1 = AFE4490TIACF::CF_5P;
-    for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
-        if (kAFE_CF_PF[i] <= cf_max_pF) { _afe_tia_cf_led1 = (AFE4490TIACF)i; break; }
-    }
+    // Same quantise-DOWN rule as the public setter: largest of the 32 achievable CF ≤ cf_max_pF.
+    _afe_tia_cf_led1 = afeCFPFToCode(cf_max_pF);
 }
 
 void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
@@ -1634,10 +1634,8 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
     float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
     float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_rf_led2]) * 1e12f;
-    _afe_tia_cf_led2 = AFE4490TIACF::CF_5P;
-    for (int i = (int)AFE4490TIACF::CF_155P; i > (int)AFE4490TIACF::CF_5P; --i) {
-        if (kAFE_CF_PF[i] <= cf_max_pF) { _afe_tia_cf_led2 = (AFE4490TIACF)i; break; }
-    }
+    // Same quantise-DOWN rule as the public setter: largest of the 32 achievable CF ≤ cf_max_pF.
+    _afe_tia_cf_led2 = afeCFPFToCode(cf_max_pF);
 }
 
 // ── BiquadFilter methods ──────────────────────────────────────────────────────

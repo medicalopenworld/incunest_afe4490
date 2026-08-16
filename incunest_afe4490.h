@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.61 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.62 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.61"
+#define INCUNEST_AFE4490_VERSION "0.62"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -161,14 +161,17 @@ enum class AFE4490RF {
     RF_1M
 };
 
-enum class AFE4490TIACF {
-    CF_5P,    // 5 pF (default)
-    CF_10P,
-    CF_20P,
-    CF_30P,
-    CF_55P,
-    CF_155P
-};
+// TIA feedback capacitance — CF_LED[4:0] register code (TIAGAIN / TIA_AMB_GAIN, bits D[7:3]).
+// The AFE4490 has five switchable capacitors in parallel over a fixed 5 pF base
+// (datasheet Figure 114, p.36): bit0=5 pF, bit1=15 pF, bit2=25 pF, bit3=50 pF, bit4=150 pF.
+//   CF(code) = 5 pF + Σ (selected weights)   → 32 distinct values, 5 pF … 250 pF.
+// Datasheet example: code 01111 = 50+25+15+5 +5 = 100 pF.
+// The weights are superincreasing (each > the sum of all smaller ones), so kAFE_CF_PF[] is
+// strictly increasing in the code — code order == capacitance order (see static_assert below).
+// Not an enum: all 32 combinations are legal hardware settings, so the code IS the value.
+using AFE4490CFCode = uint8_t;              // valid range 0…31
+constexpr AFE4490CFCode kAFE_CF_CODE_MAX = 31;
+constexpr AFE4490CFCode kAFE_CF_CODE_DEFAULT = 0;   // 5 pF — chip reset value
 
 enum class AFE4490RG {
     RG_100K,    // 0 dB   — ×1   — RG=100 kΩ  (Ri=100 kΩ fixed, datasheet Table 1)
@@ -194,14 +197,50 @@ constexpr float kAFE_RF_OHM[7] = {
      1e6f    // RF_1M
 };
 
-// AFE4490TIACF → TIA feedback capacitance [pF]
-constexpr float kAFE_CF_PF[6] = {
-     5.0f,   // CF_5P
-    10.0f,   // CF_10P
-    20.0f,   // CF_20P
-    30.0f,   // CF_30P
-    55.0f,   // CF_55P
-   155.0f    // CF_155P
+// AFE4490CFCode → TIA feedback capacitance [pF]
+// Indexed by the raw CF_LED[4:0] register code: kAFE_CF_PF[code] = 5 + Σ selected weights.
+// Bit weights: b0=5, b1=15, b2=25, b3=50, b4=150 pF (datasheet Figure 114).
+constexpr float kAFE_CF_PF[32] = {
+     5.0f,   // 00000 — 5 pF base only (chip reset default)
+    10.0f,   // 00001 — 5
+    20.0f,   // 00010 — 15
+    25.0f,   // 00011 — 15+5
+    30.0f,   // 00100 — 25
+    35.0f,   // 00101 — 25+5
+    45.0f,   // 00110 — 25+15
+    50.0f,   // 00111 — 25+15+5
+    55.0f,   // 01000 — 50
+    60.0f,   // 01001 — 50+5
+    70.0f,   // 01010 — 50+15
+    75.0f,   // 01011 — 50+15+5
+    80.0f,   // 01100 — 50+25
+    85.0f,   // 01101 — 50+25+5
+    95.0f,   // 01110 — 50+25+15
+   100.0f,   // 01111 — 50+25+15+5   (datasheet worked example)
+   155.0f,   // 10000 — 150
+   160.0f,   // 10001 — 150+5
+   170.0f,   // 10010 — 150+15
+   175.0f,   // 10011 — 150+15+5
+   180.0f,   // 10100 — 150+25
+   185.0f,   // 10101 — 150+25+5
+   195.0f,   // 10110 — 150+25+15
+   200.0f,   // 10111 — 150+25+15+5
+   205.0f,   // 11000 — 150+50
+   210.0f,   // 11001 — 150+50+5
+   220.0f,   // 11010 — 150+50+15
+   225.0f,   // 11011 — 150+50+15+5
+   230.0f,   // 11100 — 150+50+25
+   235.0f,   // 11101 — 150+50+25+5
+   245.0f,   // 11110 — 150+50+25+15
+   250.0f    // 11111 — all caps (maximum)
+};
+
+// CF_LED[4:0] code → display string, same index as kAFE_CF_PF[] (used by $CFG / $SET).
+constexpr const char* kAFE_CF_STR[32] = {
+    "5p",   "10p",  "20p",  "25p",  "30p",  "35p",  "45p",  "50p",
+    "55p",  "60p",  "70p",  "75p",  "80p",  "85p",  "95p",  "100p",
+    "155p", "160p", "170p", "175p", "180p", "185p", "195p", "200p",
+    "205p", "210p", "220p", "225p", "230p", "235p", "245p", "250p"
 };
 
 // AFE4490RG → Stage 2 feedback resistance RG [Ω]
@@ -224,6 +263,42 @@ constexpr float kAFE_RG_GAIN[5] = {
 
 // Stage 2 input resistance Ri [Ω] — fixed by chip design (datasheet p.28)
 constexpr float kAFE_RI_OHM = 100e3f;
+
+// ── TIA CF helpers ──────────────────────────────────────────────────────────
+// Invariant relied upon by afeCFPFToCode() and the auto-CF scan (§7.2): capacitance is
+// strictly increasing in the code, because the bit weights are superincreasing.
+// Recursive form (single return statement): the Arduino/ESP32 build compiles as C++11,
+// where a constexpr function body cannot contain a loop.
+constexpr bool afeCFTableIsMonotonic(int i = 1) {
+    return (i > (int)kAFE_CF_CODE_MAX)
+             ? true
+             : (kAFE_CF_PF[i] > kAFE_CF_PF[i - 1] && afeCFTableIsMonotonic(i + 1));
+}
+static_assert(afeCFTableIsMonotonic(), "kAFE_CF_PF must be strictly increasing in the CF code");
+
+// CF register code → capacitance [pF].
+inline float afeCFCodeToPF(AFE4490CFCode code) {
+    return kAFE_CF_PF[code & kAFE_CF_CODE_MAX];
+}
+
+// Relative tolerance used when matching a requested capacitance against the grid.
+// Rationale: the auto-CF budget is computed as (settle_s / 5 / RF) × 1e12, which in float lands
+// a few ULP BELOW the exact grid value — at 500 Hz / RF_100K it yields 99.9999924 instead of
+// 100.0, which without this guard would drop a whole step (95 pF instead of 100 pF) and silently
+// negate the gain. 0.01% is orders of magnitude below the on-chip capacitor tolerance, so
+// accepting it can never cause a real settling violation.
+constexpr float kAFE_CF_MATCH_TOL = 1e-4f;
+
+// Capacitance [pF] → CF register code, quantised DOWN: returns the largest achievable CF ≤ pF
+// (within kAFE_CF_MATCH_TOL). Never rounds up — overshooting CF would stretch the TIA time
+// constant past the settling budget reserved before the ADC sample window (5τ ≤ settle_time, §7.2).
+// Values below 5 pF clamp to code 0 (the 5 pF base cannot be switched out).
+inline AFE4490CFCode afeCFPFToCode(float pF) {
+    const float limit = pF * (1.0f + kAFE_CF_MATCH_TOL);
+    for (int i = (int)kAFE_CF_CODE_MAX; i > 0; --i)
+        if (kAFE_CF_PF[i] <= limit) return (AFE4490CFCode)i;
+    return 0;
+}
 
 // ── ADC domain — SINGLE SOURCE OF TRUTH ─────────────────────────────────────
 // Signed 22-bit twos-complement converter (datasheet p.11: ±1.2 V FS; p.43 §8.4.1).
@@ -426,25 +501,16 @@ inline bool afeStrToRF(const char* s, AFE4490RF& out) {
     return false;
 }
 
-inline const char* afeCFToStr(AFE4490TIACF cf) {
-    switch (cf) {
-        case AFE4490TIACF::CF_5P:   return "5p";
-        case AFE4490TIACF::CF_10P:  return "10p";
-        case AFE4490TIACF::CF_20P:  return "20p";
-        case AFE4490TIACF::CF_30P:  return "30p";
-        case AFE4490TIACF::CF_55P:  return "55p";
-        case AFE4490TIACF::CF_155P: return "155p";
-        default:                    return "?";
-    }
+inline const char* afeCFToStr(AFE4490CFCode code) {
+    return (code <= kAFE_CF_CODE_MAX) ? kAFE_CF_STR[code] : "?";
 }
 
-inline bool afeStrToCF(const char* s, AFE4490TIACF& out) {
-    if      (strcmp(s, "5p")   == 0) { out = AFE4490TIACF::CF_5P;   return true; }
-    else if (strcmp(s, "10p")  == 0) { out = AFE4490TIACF::CF_10P;  return true; }
-    else if (strcmp(s, "20p")  == 0) { out = AFE4490TIACF::CF_20P;  return true; }
-    else if (strcmp(s, "30p")  == 0) { out = AFE4490TIACF::CF_30P;  return true; }
-    else if (strcmp(s, "55p")  == 0) { out = AFE4490TIACF::CF_55P;  return true; }
-    else if (strcmp(s, "155p") == 0) { out = AFE4490TIACF::CF_155P; return true; }
+// Accepts any of the 32 achievable values ("5p" … "250p"); the six strings used before v0.62
+// ("5p","10p","20p","30p","55p","155p") remain valid and map to the same hardware setting.
+inline bool afeStrToCF(const char* s, AFE4490CFCode& out) {
+    for (int i = 0; i <= (int)kAFE_CF_CODE_MAX; ++i) {
+        if (strcmp(s, kAFE_CF_STR[i]) == 0) { out = (AFE4490CFCode)i; return true; }
+    }
     return false;
 }
 
@@ -501,11 +567,13 @@ struct AFE4490Config {
     // When afe_sep_tia_en=true:  TIAGAIN register controls LED1 (IR); TIA_AMB_GAIN controls LED2 (RED)
     bool              afe_sep_tia_en;         // ENSEPGAIN bit D15 in TIAGAIN register
     AFE4490RF    afe_tia_rf_led1;     // RF for LED1 (IR)  — active when afe_sep_tia_en=true
-    AFE4490TIACF      afe_tia_cf_led1;       // CF for LED1 (IR)  — active when afe_sep_tia_en=true
+    AFE4490CFCode     afe_tia_cf_led1_code;  // CF_LED1[4:0] register code (0–31) — active when afe_sep_tia_en=true
+    float             afe_tia_cf_led1_pF;    // same setting in pF (= kAFE_CF_PF[afe_tia_cf_led1_code])
     AFE4490RG afe_stg2_rg_led1;  // Stage 2 STG2GAIN1 for LED1 (IR) — gain only, no enable
     bool              afe_stg2_en_led1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit Stage 2 enable for LED1
     AFE4490RF    afe_tia_rf_led2;     // RF for LED2 (RED) — always active (both channels when ENSEPGAIN=0)
-    AFE4490TIACF      afe_tia_cf_led2;       // CF for LED2 (RED) — always active
+    AFE4490CFCode     afe_tia_cf_led2_code;  // CF_LED2[4:0] register code (0–31) — always active
+    float             afe_tia_cf_led2_pF;    // same setting in pF (= kAFE_CF_PF[afe_tia_cf_led2_code])
     AFE4490RG afe_stg2_rg_led2;  // Stage 2 STG2GAIN2 for LED2 (RED) — gain only, no enable
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
@@ -577,17 +645,17 @@ public:
     void setLEDRange(uint8_t mA);           // 75 or 150 mA
     // Joint setters — apply the same value to both LED1 and LED2 channels; also sets ENSEPGAIN=0
     void setTIAGain(AFE4490RF gain);   // sets afe_tia_rf_led1 = afe_tia_rf_led2 = gain
-    void setTIACF(AFE4490TIACF cf);         // sets afe_tia_cf_led1 = afe_tia_cf_led2 = cf
+    void setTIACF(float pF);                // sets both channels; quantised DOWN to the largest CF ≤ pF
     void setStage2Gain(AFE4490RG gain); // sets afe_stg2_rg_led1 = afe_stg2_rg_led2 = gain
     // Separate gain mode — enable independent LED1/LED2 TIA settings (ENSEPGAIN bit D15 in TIAGAIN)
     void setEnSepGain(bool enable);
     // Per-channel setters — only meaningful when ENSEPGAIN=1 (setEnSepGain(true))
     void setTIAGainLED1(AFE4490RF gain);   // RF for LED1 (IR)  — writes TIAGAIN RF_LED1[2:0]
-    void setTIACFLED1(AFE4490TIACF cf);         // CF for LED1 (IR)  — writes TIAGAIN CF_LED1[4:0]
+    void setTIACFLED1(float pF);            // CF for LED1 (IR)  — writes TIAGAIN CF_LED1[4:0]; quantised DOWN
     void setStage2GainLED1(AFE4490RG gain); // STG2GAIN1[2:0] for LED1 (IR) — gain only, does not touch STAGE2EN1
     void setStage2En1(bool en);             // STAGE2EN1 (D14 of TIAGAIN) — explicit Stage 2 enable for LED1
     void setTIAGainLED2(AFE4490RF gain);   // RF for LED2 (RED) — writes TIA_AMB_GAIN RF_LED2[2:0]
-    void setTIACFLED2(AFE4490TIACF cf);         // CF for LED2 (RED) — writes TIA_AMB_GAIN CF_LED2[4:0]
+    void setTIACFLED2(float pF);            // CF for LED2 (RED) — writes TIA_AMB_GAIN CF_LED2[4:0]; quantised DOWN
     void setStage2GainLED2(AFE4490RG gain); // STG2GAIN2[2:0] for LED2 (RED) — gain only, does not touch STAGE2EN2
     void setStage2En2(bool en);             // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
@@ -849,7 +917,7 @@ private:
     void _recalc_rate_params();
     // Returns TIA settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window)
     uint32_t _compute_settle_margin() const;
-    // Selects the largest AFE4490TIACF that settles within _compute_settle_margin() for the given RF.
+    // Selects the largest CF code (of the 32) that settles within _compute_settle_margin() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
     void _recalc_afe_tia_cf_led2();   // updates _afe_tia_cf_led2 from _afe_tia_rf_led2
@@ -1014,11 +1082,11 @@ private:
     // When true:  TIAGAIN→LED1(IR), TIA_AMB_GAIN→LED2(RED)
     bool              _afe_sep_tia_en;
     AFE4490RF    _afe_tia_rf_led1;    // RF_LED1 in TIAGAIN
-    AFE4490TIACF      _afe_tia_cf_led1;      // CF_LED1 in TIAGAIN
+    AFE4490CFCode     _afe_tia_cf_led1;      // CF_LED1[4:0] code in TIAGAIN
     AFE4490RG _afe_stg2_rg_led1; // STG2GAIN1[2:0] in TIAGAIN D[10:8]
     bool              _afe_stg2_en_led1;       // STAGE2EN1 (D14 of TIAGAIN)
     AFE4490RF    _afe_tia_rf_led2;    // RF_LED2 in TIA_AMB_GAIN
-    AFE4490TIACF      _afe_tia_cf_led2;      // CF_LED2 in TIA_AMB_GAIN
+    AFE4490CFCode     _afe_tia_cf_led2;      // CF_LED2[4:0] code in TIA_AMB_GAIN
     AFE4490RG _afe_stg2_rg_led2; // STG2GAIN2[2:0] in TIA_AMB_GAIN D[10:8]
     bool              _afe_stg2_en_led2;       // STAGE2EN2 (D14 of TIA_AMB_GAIN); also forced ON when _afe_ambdac_uA > 0
     uint8_t           _afe_ambdac_uA;        // AMBDAC[3:0] value (0–10), written to TIA_AMB_GAIN D19:D16

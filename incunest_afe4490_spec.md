@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.61
+# incunest_afe4490 — Specification v0.62
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -116,7 +116,7 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 | LED2 current   | ~49.8 mA (code 85/256 × 150 mA) — preliminary dev-phase default (v0.47) |
 | LED range      | 150 mA (TX_REF = 0.75V)       |
 | TIA gain (RF)  | 100 kΩ                        |
-| TIA CF         | auto (see §7.2): 55 pF @ 500 Hz / RF_100K |
+| TIA CF         | auto (see §7.2): 100 pF @ 500 Hz / RF_100K |
 | Stage 2 gain   | disabled                      |
 | ENSEPGAIN      | 0 (single gain)               |
 | NUMAV          | 7 (8 averages, max 9 at 500Hz)|
@@ -134,7 +134,8 @@ void setLED1Current(float mA);          // stored as actual DAC-quantised value;
 void setLED2Current(float mA);          // stored as actual DAC-quantised value; depends on setLEDRange()
 void setLEDRange(uint8_t mA);           // 75 or 150 mA (with TX_REF=0.75V default); re-quantises both LED currents
 void setTIAGain(AFE4490RF gain);   // auto-recalculates CF (see §7.2); setTIACF() can override
-void setTIACF(AFE4490TIACF cf);         // manual override; overridden again if setTIAGain()/setSampleRate() is called
+void setTIACF(float pF);                // manual override, quantised DOWN to the largest CF ≤ pF;
+                                        // overridden again if setTIAGain()/setSampleRate() is called
 void setStage2Gain(AFE4490RG gain);      // sets gain for both channels; does NOT touch STAGE2EN1/2
 void setStage2GainLED1(AFE4490RG gain);  // STG2GAIN1 only; does NOT touch STAGE2EN1
 void setStage2GainLED2(AFE4490RG gain);  // STG2GAIN2 only; does NOT touch STAGE2EN2
@@ -155,11 +156,13 @@ struct AFE4490Config {
     float             afe_led2_current_mA;   // RED LED drive current [mA] — actual DAC-quantised value
     uint8_t           afe_led_range_mA;      // LED full-scale range: 75 or 150 mA
     AFE4490RF    afe_tia_rf_led1;      // TIA RF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
-    AFE4490TIACF      afe_tia_cf_led1;       // TIA CF for LED1 (IR) — TIAGAIN; active when ENSEPGAIN=1
+    AFE4490CFCode     afe_tia_cf_led1_code;  // CF_LED1[4:0] code (0–31) — TIAGAIN; active when ENSEPGAIN=1
+    float             afe_tia_cf_led1_pF;    // same setting in pF (= kAFE_CF_PF[code])
     AFE4490RG afe_stg2_rg_led1;  // STG2GAIN1 for LED1 — gain bits only, no enable
     bool              afe_stg2_en_led1;        // STAGE2EN1 (D14 of TIAGAIN) — explicit enable
     AFE4490RF    afe_tia_rf_led2;     // TIA RF for LED2 (RED) — TIA_AMB_GAIN; always active
-    AFE4490TIACF      afe_tia_cf_led2;       // TIA CF for LED2 (RED) — TIA_AMB_GAIN; always active
+    AFE4490CFCode     afe_tia_cf_led2_code;  // CF_LED2[4:0] code (0–31) — TIA_AMB_GAIN; always active
+    float             afe_tia_cf_led2_pF;    // same setting in pF (= kAFE_CF_PF[code])
     AFE4490RG afe_stg2_rg_led2;  // STG2GAIN2 for LED2 — gain bits only, no enable
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit enable; also forced ON when AMBDAC > 0
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
@@ -363,15 +366,17 @@ enum class AFE4490RF {
     RF_1M
 };
 
-enum class AFE4490TIACF {
-    CF_5P,     // 5 pF (default)
-    CF_10P,
-    CF_20P,
-    CF_30P,
-    CF_55P,
-    CF_155P,
-    // any combination supported by register CF_LED[4:0]
-};
+// TIA feedback capacitance — NOT an enum: the CF_LED[4:0] register field selects five
+// switchable capacitors in parallel over a fixed 5 pF base (datasheet Figure 114, p.36),
+// so all 32 combinations are legal and the register code IS the value.
+//   bit weights: b0=5, b1=15, b2=25, b3=50, b4=150 pF
+//   CF(code) = 5 pF + Σ selected weights  → 5, 10, 20, 25, … 245, 250 pF
+//   datasheet worked example: code 01111 = 50+25+15+5 +5 = 100 pF
+// The weights are superincreasing, so capacitance is strictly increasing in the code
+// (static_assert via afeCFTableIsMonotonic()).
+using AFE4490CFCode = uint8_t;                      // valid range 0…31
+constexpr AFE4490CFCode kAFE_CF_CODE_MAX     = 31;
+constexpr AFE4490CFCode kAFE_CF_CODE_DEFAULT = 0;   // 5 pF — chip reset value
 
 enum class AFE4490RG {
     RG_100K,    // 0 dB   — ×1   — RG=100 kΩ  (Ri=100 kΩ fixed, datasheet Table 1)
@@ -434,8 +439,22 @@ Indexed by casting the enum to `int`. Example: `float rf = kAFE_RF_OHM[(int)cfg.
 // TIA feedback resistor — indexed by AFE4490RF (0=RF_10K … 6=RF_1M)
 constexpr float kAFE_RF_OHM[7] = { 10e3f, 25e3f, 50e3f, 100e3f, 250e3f, 500e3f, 1e6f };
 
-// TIA feedback capacitor — indexed by AFE4490TIACF (0=CF_5P … 5=CF_155P)
-constexpr float kAFE_CF_PF[6]  = { 5.0f, 10.0f, 20.0f, 30.0f, 55.0f, 155.0f };
+// TIA feedback capacitor — indexed by the raw CF_LED[4:0] code (0…31), value = 5 + Σ weights.
+// Strictly increasing (superincreasing bit weights), which afeCFPFToCode() and auto-CF rely on.
+constexpr float kAFE_CF_PF[32] = {
+      5,  10,  20,  25,  30,  35,  45,  50,   // 00000…00111
+     55,  60,  70,  75,  80,  85,  95, 100,   // 01000…01111  (0x0F = 100 pF, datasheet example)
+    155, 160, 170, 175, 180, 185, 195, 200,   // 10000…10111
+    205, 210, 220, 225, 230, 235, 245, 250    // 11000…11111
+};
+// Same index → display string, used by the $CFG/$SET protocol.
+constexpr const char* kAFE_CF_STR[32] = { "5p", "10p", …, "245p", "250p" };
+
+// Relative tolerance for matching a requested CF against the grid. The auto-CF budget
+// (settle_s / 5 / RF) × 1e12 lands a few ULP BELOW the exact grid value in float — at
+// 500 Hz / RF_100K it yields 99.9999924 instead of 100.0, which would drop a whole step.
+// 0.01% is far below the on-chip capacitor tolerance, so it cannot cause a real violation.
+constexpr float kAFE_CF_MATCH_TOL = 1e-4f;
 
 // Stage 2 feedback resistor RG — indexed by AFE4490RG (0=RG_100K … 4=RG_400K)
 constexpr float kAFE_RG_OHM[5] = { 100e3f, 150e3f, 200e3f, 300e3f, 400e3f };
@@ -474,7 +493,16 @@ constexpr uint8_t  kAFE_FLTRCNRSEL      = 0;
 constexpr uint32_t kAFE_DIAG_HOLDOFF_MS = kAFE_FLTRCNRSEL ? 16U : 28U;
 ```
 
-Register-code arrays (`rf_code[]`, `cf_code[]`, `stg2_gain_code[]`) remain in an anonymous namespace in `incunest_afe4490.cpp` — internal only, never exposed.
+Register-code arrays (`rf_code[]`, `stg2_gain_code[]`) remain in an anonymous namespace in `incunest_afe4490.cpp` — internal only, never exposed. CF has no such array: the code is the value, written as `(code & 0x1F) << 3` into bits D[7:3].
+
+### CF conversion helpers (inline)
+
+```cpp
+inline float         afeCFCodeToPF(AFE4490CFCode code);  // → kAFE_CF_PF[code & 31]
+inline AFE4490CFCode afeCFPFToCode(float pF);            // largest achievable CF ≤ pF
+```
+
+`afeCFPFToCode()` quantises **DOWN**, never up (within `kAFE_CF_MATCH_TOL`): overshooting CF would stretch the TIA time constant past the settling budget reserved before the ADC sample window (5τ ≤ settle_time, §7.2). Requests below 5 pF clamp to code 0 — the base capacitor cannot be switched out. This is the same rule the public setters and auto-CF both use, so manual and automatic selection can never disagree.
 
 ### String codecs (inline)
 
@@ -486,8 +514,10 @@ inline const char* afeRFToStr(AFE4490RF g);          // → "10K"/"25K"/"50K"/"1
 inline bool        afeStrToRF(const char* s, AFE4490RF& out);  // returns false if unrecognised
 
 // TIA feedback capacitor CF
-inline const char* afeCFToStr(AFE4490TIACF cf);            // → "5p"/"10p"/"20p"/"30p"/"55p"/"155p"
-inline bool        afeStrToCF(const char* s, AFE4490TIACF& out);
+inline const char* afeCFToStr(AFE4490CFCode code);         // → "5p" … "250p" (32 values), "?" if out of range
+inline bool        afeStrToCF(const char* s, AFE4490CFCode& out);
+// The six strings used before v0.62 ("5p","10p","20p","30p","55p","155p") remain valid
+// and map to the same hardware setting — no protocol break.
 
 // Stage 2 gain
 inline const char* afeRGToStr(AFE4490RG g);      // → "0dB"/"3.5dB"/"6dB"/"9.5dB"/"12dB"
@@ -1286,29 +1316,40 @@ tia_margin   = max(50, floor(q × 0.10))   [10% of LED window, floor 12.5 µs]
 settle_time_s = tia_margin / afeclk
 ```
 
-This margin is used both by `_apply_timing_regs()` (to set LED2STC/LED1STC) and by `_recalc_tia_cf()` (to select CF). Both functions always use the same value — they are in sync.
+This margin is used both by `_apply_timing_regs()` (to set LED2STC/LED1STC) and by `_recalc_afe_tia_cf_led1/2()` (to select CF). Both functions always use the same value — they are in sync.
 
-**`_recalc_tia_cf()`** selects the **largest** `AFE4490TIACF` value whose physical capacitance satisfies the constraint. It is called automatically from `_recalc_rate_params()` (triggered by `setSampleRate()` and constructor) and from `setTIAGain()`. `setTIACF()` can override afterwards.
+**`_recalc_afe_tia_cf_led1/2()`** converts the budget to picofarads and delegates to `afeCFPFToCode()`, which returns the largest of the **32** achievable capacitances that satisfies the constraint:
 
-**CF selection table at 500 Hz** (settle = 200 counts = 50 µs):
+```cpp
+float cf_max_pF  = (settle_s / tia_n_tau / RF) * 1e12f;
+_afe_tia_cf_led1 = afeCFPFToCode(cf_max_pF);     // quantise DOWN
+```
 
-| RF (AFE4490RF) | RF (Ω) | CF_max (pF) | Auto CF |
-|---|---|---|---|
-| RF_10K  | 10 kΩ  | 1000 | CF_155P |
-| RF_25K  | 25 kΩ  | 400  | CF_155P |
-| RF_50K  | 50 kΩ  | 200  | CF_155P |
-| RF_100K | 100 kΩ | 100  | CF_55P  |
-| RF_250K | 250 kΩ | 40   | CF_30P  |
-| RF_500K | 500 kΩ | 20   | CF_20P  |
-| RF_1M   | 1 MΩ   | 10   | CF_10P  |
+Selection and the manual setter therefore share one rule and cannot disagree. Called automatically from `_recalc_rate_params()` (triggered by `setSampleRate()` and the constructor) and from `setTIAGain*()`. `setTIACF*()` can override afterwards.
 
-At lower Fs the settle window is larger and CF increases further (e.g. at 100 Hz, settle = 250 µs → RF_500K gets CF_55P).
+> **Float note (v0.62):** `cf_max_pF` lands a few ULP below the exact grid value — at 500 Hz / RF_100K it computes 99.9999924, not 100.0. Without `kAFE_CF_MATCH_TOL` the selector would drop a whole step (95 pF) and silently negate the benefit of exposing the full grid. The tolerance is applied inside `afeCFPFToCode()`, so it protects both paths.
+
+**CF selection table** (auto-CF output, generated from the library):
+
+| RF | 125 Hz | 250 Hz | 500 Hz *(default)* | 1000 Hz |
+|---|---|---|---|---|
+| RF_10K  | 250 pF | 250 pF | 250 pF | 250 pF |
+| RF_25K  | 250 pF | 250 pF | 250 pF | 200 pF |
+| RF_50K  | 250 pF | 250 pF | 200 pF | 100 pF |
+| RF_100K | 250 pF | 200 pF | **100 pF** | 50 pF |
+| RF_250K | 160 pF | 80 pF  | 35 pF  | 20 pF |
+| RF_500K | 80 pF  | 35 pF  | 20 pF  | 10 pF |
+| RF_1M   | 35 pF  | 20 pF  | 10 pF  | 5 pF  |
+
+Lower Fs → wider LED window → larger settle margin → larger CF (more noise filtering).
+
+**Change vs. v0.61** (which could only pick from six single-bit settings): at the default operating point (500 Hz / RF_100K) auto-CF now selects **100 pF instead of 55 pF** — an exactly reachable, legal register setting that was previously unrepresentable. Every entry in the table above either improves or is unchanged; none violates the 5τ budget.
 
 **TIA pole frequency** (for reference, not used in the calculation):
 ```
 f_pole = 1 / (2π × RF × CF)
 ```
-At 500 Hz / RF_500K / CF_20P: f_pole ≈ 15.9 kHz — well above the PPG signal band (0.5–20 Hz).
+At 500 Hz / RF_100K / 100 pF: f_pole ≈ 15.9 kHz — well above the PPG signal band (0.5–20 Hz), so the larger CF filters wideband noise without touching the signal.
 
 ---
 
@@ -1539,7 +1580,7 @@ Parameters written to chip registers during initialisation. Changing them requir
 | Parameter | API | Default | Options | Effect on output |
 |---|---|---|---|---|
 | Feedback resistance R_F | `setTIAGain()` | RF_100K (100 kΩ) | 10k, 25k, 50k, 100k, 250k, 500k, 1MΩ | Transimpedance gain: larger R_F = higher voltage output, higher noise floor. Full-scale input current = 1 V / R_F |
-| Feedback capacitance C_F | `setTIACF()` (or auto) | auto (see §7.2) | 5, 10, 20, 30, 55, 155 pF | TIA RC pole: must settle before ADC samples. Auto-selected by library from R_F and PRF |
+| Feedback capacitance C_F | `setTIACF()` (or auto) | auto (see §7.2) | 32 steps, 5–250 pF (5 pF base + 5/15/25/50/150 pF caps) | TIA RC pole: must settle before ADC samples. Auto-selected by library from R_F and PRF |
 
 > R_F and C_F together determine the front-end gain and noise. The library enforces `R_F × C_F ≤ Rx_sample_time / 10` via auto-CF (§7.2).
 
@@ -1762,7 +1803,7 @@ The cycle is **circular**: LED2 active phase occupies the last quarter (≈6000�
 | **TIAGAIN** | 0x00C006 | — | 0x000000 | **0x000000** | Minimal config: RF=500kΩ, CF=5pF, Stage2 off, ENSEPGAIN=0 |
 | → ENSEPGAIN | 1 | — | 0 | **0** | With 0, both channels use TIAGAIN for the TIA. Simplifies configuration. Enable if independent gain per channel is needed |
 | → Stage2 LED1 | EN, 0 dB | — | disabled | **disabled** | RF=500kΩ provides sufficient gain for typical PPG. Stage2 at 0dB adds no useful gain. Configurable via setter |
-| → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Default at 500 Hz / RF_100K: 55 pF |
+| → CF LED1 | 5 pF | — | 5 pF | **auto (§7.2)** | Auto-selected to maximise noise filtering while guaranteeing 5τ settling. Chosen from all 32 register codes (v0.62). Default at 500 Hz / RF_100K: 100 pF (was 55 pF) |
 | → RF LED1 | 1 MΩ | — | 500 kΩ | **100 kΩ** | Chosen for the earlier 20 mA default. ✅ Verified OK at the 50 mA default (v0.47): measured v_tia < 0.5 V with a finger applied (≪ 1.0 V FS, even below the 0.6 V ideal point) — no saturation, RF_100K adequate. Behaviour with the real neonatal probe/patient (transmittance, perfusion, probe geometry) is uncharacterised — verify v_tia there. Configurable via setTIAGain() |
 | **TIA_AMB_GAIN** | 0x004006 | — | 0x000001 | **0x000000** | With ENSEPGAIN=0, the RF of this register does not affect the main TIA. Relevant for FLTRCNRSEL, AMBDAC and Stage2 |
 | → RF LED2/amb | 1 MΩ | — | 250 kΩ | **100 kΩ** | Ignored for TIA when ENSEPGAIN=0. Set equal to TIAGAIN to avoid surprises if ENSEPGAIN=1 is enabled later |
@@ -1912,6 +1953,27 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.62   | **TIA CF: expose all 32 register codes (was 6).** Found by Alex reviewing     |
+|         | `_recalc_afe_tia_cf_led1()` against datasheet Figure 114. `CF_LED[4:0]` is    |
+|         | not a 6-value enum: it switches five capacitors in parallel over a fixed 5 pF |
+|         | base (weights 5/15/25/50/150 pF), so all 32 combinations are legal —          |
+|         | 5…250 pF. The old `enum class AFE4490TIACF` covered only the six single-bit   |
+|         | settings; its values were CORRECT but the grid was incomplete, making auto-CF |
+|         | under-select. Changes: `AFE4490TIACF` → `using AFE4490CFCode = uint8_t` (the  |
+|         | code IS the value); `kAFE_CF_PF[6]` → `[32]`; new `kAFE_CF_STR[32]`,          |
+|         | `afeCFCodeToPF()`, `afeCFPFToCode()` (quantise DOWN — never overshoot the 5τ  |
+|         | budget); `cf_code[]` LUT deleted (now `(code & 0x1F) << 3`); setters take pF  |
+|         | (`setTIACF(float)`), mirroring `_quantize_led_mA()`; `AFE4490Config` exposes  |
+|         | `afe_tia_cf_ledN_code` + `_pF`. `afeStrToCF()` still accepts the six pre-v0.62 |
+|         | strings → no $CFG/$SET protocol break. `kAFE_CF_MATCH_TOL` (1e-4) added: the  |
+|         | budget computes 99.9999924 instead of 100.0 in float, which would have        |
+|         | silently dropped a whole step and negated the change. **Behaviour change:**   |
+|         | auto-CF at the default 500 Hz / RF_100K now picks **100 pF (was 55 pF)** —    |
+|         | ~1.8× more TIA noise filtering; f_pole ≈ 15.9 kHz, far above the PPG band.    |
+|         | Every RF/Fs combination improves or is unchanged; none violates 5τ.           |
+|         | New `test_tia_cf` (9 cases) covers the LUT vs. datasheet weights, quantise-   |
+|         | down, round-trips, legacy strings and the float-tolerance regression.         |
+|         | ⚠️ Not yet verified on hardware — check v_tia and noise on 16.A.              |
 | v0.61-experiment (doc fix) | **§5.8.4 corrected: `afe_settle_time_s` and the EMA warmup are SEQUENTIAL, not overlapped.** |
 |         | No code change — the spec previously claimed the 3·τ EMA warmup "comfortably absorbs"  |
 |         | the 150 ms settling window (implying they run in parallel). Wrong: Gate G0             |
