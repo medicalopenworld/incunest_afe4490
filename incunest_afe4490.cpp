@@ -1227,33 +1227,40 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
         fabsf((float)led1_sub) < rsqm_disconn_led_sub_thr &&
         fabsf((float)led2_sub) < rsqm_disconn_led_sub_thr;
 
-    // Classification is a strict priority ladder — the first matching cause wins;
-    // DISCONNECTED (computed above) is the highest priority.
-    // OT is computed in _compute_analog_state() (as.ot_led1/ot_led2, A/A);
-    // thresholds APPLIED ≈ 1.4e-5 / NOT_APPLIED ≈ 8e-4 need empirical calibration.
-    // Two DISTINCT causes, checked separately (2026-07-24 — were previously collapsed
-    // into a single NOT_APPLIED via OR, see spec §5.6.2 changelog):
-    //  (a) a channel saturated from ABOVE (ADC at the positive rail or TIA past FS) — the OT
-    //      value is not trustworthy here, regardless of what it reads → PROBE_SATURATING.
-    //      This can happen with or without a patient (e.g. an unapplied probe under a
-    //      phototherapy lamp), so it must NOT be folded into "no tissue" (NOT_APPLIED).
-    //  (b) channel in range but OT reads above threshold — a trustworthy measurement that
-    //      genuinely indicates no tissue in the optical path → PROBE_NOT_APPLIED.
-    // Saturation takes priority over the threshold check (a saturated channel can't be
-    // trusted to classify NOT_APPLIED vs APPLIED). Only saturation from ABOVE matters: the
-    // probe saturates only by excess light, and photocurrent is unipolar (v_adc ≥ 0 without
-    // AMBDAC), so we check anyPositiveSaturation() = adc_sat_pos | tia_over_fs. (adc_sat_neg
-    // needs AMBDAC — unused in v1 — and wouldn't be cleared by reducing RF/ILED.)
+    // Classification ladder (DISCONNECTED highest priority, computed above). OT is computed in
+    // _compute_analog_state() (as.ot_led1/ot_led2, A/A); thresholds need empirical calibration.
+    //
+    // The presence question ("is there tissue?") is answered by OT = (i_pd_led − i_pd_aled)/ILED,
+    // which is INVARIANT to ambient light (it subtracts the ambient/ALED phase) — so it separates
+    // "tissue" (OT ≈ 1e-4) from "no tissue" (OT ≈ 1) even under a lamp. Two regimes:
+    //
+    //  • NOT saturated → OT is a clean measurement → classify presence directly:
+    //      OT > thr → NOT_APPLIED (no tissue) ; else → APPLIED.
+    //  • Saturated (anyPositiveSaturation: ADC at rail or v_tia > FS) → OT is clipped/unreliable,
+    //    so discriminate by WHICH phase clips (v0.61 — replaces the old "saturation ⇒ SATURATING"
+    //    priority, which drove RF to the floor whenever the finger was removed):
+    //      – an AMBIENT phase (ALED1/ALED2) also clips → external light (lamp/phototherapy) is
+    //        saturating with tissue present → PROBE_SATURATING (HGAC should correct it).
+    //      – only LED phases clip, ambient phases do NOT → the LED's own light reaches the PD
+    //        directly (no tissue in the path) → probe in air → PROBE_NOT_APPLIED, so HGAC does
+    //        NOT chase RF to the floor on finger removal.
+    //    Limitation: when ONLY the LED phase clips, the masks can't tell "probe in air" from a
+    //    rare "tissue signal so large it saturates without ambient" — we assume air (the common,
+    //    intended case: finger removal). Photocurrent is unipolar in v1 (adc_sat_neg needs AMBDAC).
     // Debounce (same for all transitions) lives in _rsqm_request_probe_state().
     ProbeState requested;
     if (disconnected) {
         requested = ProbeState::PROBE_DISCONNECTED;
-    } else if (as.anyPositiveSaturation()) {
-        requested = ProbeState::PROBE_SATURATING;
-    } else if (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr) {
-        requested = ProbeState::PROBE_NOT_APPLIED;
+    } else if (!as.anyPositiveSaturation()) {
+        requested = (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr)
+                    ? ProbeState::PROBE_NOT_APPLIED
+                    : ProbeState::PROBE_APPLIED;
     } else {
-        requested = ProbeState::PROBE_APPLIED;
+        const bool ambient_sat =
+            as.adcSatPos(AFE4490Ch::ALED1) || as.tiaOverFs(AFE4490Ch::ALED1) ||
+            as.adcSatPos(AFE4490Ch::ALED2) || as.tiaOverFs(AFE4490Ch::ALED2);
+        requested = ambient_sat ? ProbeState::PROBE_SATURATING
+                                : ProbeState::PROBE_NOT_APPLIED;
     }
     _rsqm_request_probe_state(requested);
 

@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.60
+# incunest_afe4490 — Specification v0.61
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -387,11 +387,11 @@ enum class ProbeState {
     PROBE_DISCONNECTED,  // cable or probe connector not plugged in
     PROBE_NOT_APPLIED,   // probe connected, OT indicates no tissue in the optical path
     PROBE_APPLIED,       // probe on patient, normal measurement
-    PROBE_SATURATING     // a channel is saturated/off-spec (!CH_VALID_RANGE) — presence unknown;
-                         // saturation can happen with or without a patient (e.g. an unapplied
-                         // probe under a phototherapy lamp), so this does NOT imply APPLIED.
-                         // Algorithms (SpO2/HR1/HR2/HR3) and RSQI treat it like any non-
-                         // APPLIED state. HGAC treats it like PROBE_APPLIED (§5.8.2).
+    PROBE_SATURATING     // saturated AND the ambient (ALED) phase also clips → EXTERNAL light
+                         // (lamp/phototherapy), not the LED's own light (that case → NOT_APPLIED,
+                         // probe in air; see v0.61 classifier §5.6.2). Presence unknown. Algorithms
+                         // (SpO2/HR1/HR2/HR3) and RSQI treat it like any non-APPLIED state; HGAC
+                         // treats it like PROBE_APPLIED (§5.8.2).
 };
 
 // DiagCode bitmask flags (returned in AFE4490Data::diag_code — uint32_t, 32 bits)
@@ -976,7 +976,20 @@ now used only by SpO2. If a pulsatile-amplitude check is ever needed again, rein
 
 #### 5.6.2 Probe state machine
 
-**Priority order:** PROBE_DISCONNECTED > PROBE_SATURATING > PROBE_NOT_APPLIED > PROBE_APPLIED.
+**Classifier (v0.61).** Presence ("is there tissue?") is answered by OT, which is **invariant to
+ambient light** because it subtracts the ALED phase — so it separates tissue from no-tissue even
+under a lamp. DISCONNECTED first; then, if not saturated, OT is a clean measurement; if saturated,
+OT is clipped so the *clipping phase pattern* decides:
+
+```
+if DISCONNECTED                          → PROBE_DISCONNECTED
+elif NOT anyPositiveSaturation:                              # OT is a clean measurement
+        OT_led1 > thr OR OT_led2 > thr   → PROBE_NOT_APPLIED     # no tissue
+        else                             → PROBE_APPLIED
+else (saturated: ADC at rail or v_tia > FS — OT clipped):   # discriminate by phase
+        ALED1/ALED2 phase also clips     → PROBE_SATURATING      # external light (lamp/phototherapy)
+        else (only LED phase clips)      → PROBE_NOT_APPLIED      # probe in air (LED's own light, no tissue)
+```
 
 **PROBE_DISCONNECTED** — instantaneous criterion, ALL of:
 - `LED1_raw < 0` AND `ALED1_raw < 0` AND `LED2_raw < 0` AND `ALED2_raw < 0`
@@ -986,45 +999,32 @@ Physical cause: when cable is disconnected, TIA input is floating; input-offset 
 
 Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_Sub_mean ≈ −592 (range −3117..+65).
 
-**PROBE_SATURATING** (added 2026-07-24, distinct from PROBE_NOT_APPLIED since — see below) —
-checked before the OT threshold, when not DISCONNECTED:
+**Presence by OT (not saturated).** `OT = (I_PD_LED − I_PD_ALED) / I_LED` [A/A] is computed in
+`_compute_analog_state()` (`ot_led1`/`ot_led2`, §3c); `_rsqm_update()` consumes it. It is the full
+electro-optical system ratio (LED efficiency × tissue × PD responsivity), not tissue transmittance
+alone. Threshold: `ot_led1 > rsqm_ot_thr` OR `ot_led2 > rsqm_ot_thr` → PROBE_NOT_APPLIED; else
+PROBE_APPLIED. Default `rsqm_ot_thr = 1.0e-4`, runtime-configurable via `setRsqmOtThr()`. Single
+threshold (no hysteresis) — oscillation is prevented by the `rsqm_probe_state_min_s` debounce.
 
-```
-PROBE_SATURATING  ⟺  !as.otLed1Valid() || !as.otLed2Valid()
-```
+**Saturated — discriminate by phase (v0.61).** When `anyPositiveSaturation()` (ADC positive rail or
+v_tia > FS on any channel), OT is clipped/unreliable, so RSQM looks at *which* phase clips:
+- An **ambient** phase (ALED1 or ALED2) also clips (`adcSatPos || tiaOverFs`) → the saturating light
+  is present in the LED-off phase too → **external light** (lamp/phototherapy) → **PROBE_SATURATING**.
+  Presence unknown, but HGAC should try to correct it (and the ambient alarm §5.8.3 may fire). Its
+  own state (not folded into NOT_APPLIED) is what lets HGAC's gate act on real saturation.
+- Only **LED** phases clip, ambient phases clean → the LED's own light reaches the PD directly with
+  nothing attenuating it → **probe in air** (finger removed) → **PROBE_NOT_APPLIED**, so HGAC does
+  NOT chase RF to the floor on finger removal (which would ruin the operating point for reattach).
+  *Limitation:* LED-only clipping can't distinguish air from a rare tissue signal so large it
+  saturates without ambient — assumed air (the common, intended case).
 
-i.e. either color's OT source channels (its own phase or its ambient phase) are not `CH_VALID_RANGE`
-(ADC saturated either rail, or TIA beyond linearity — see §3c). Under saturation the OT ratio
-itself is not trustworthy, so it is not even evaluated against `rsqm_ot_thr` in this case.
+**Consumers:** SpO2/HR1/HR2/HR3 and RSQI treat PROBE_SATURATING and PROBE_NOT_APPLIED like any
+non-`PROBE_APPLIED` state (invalid/reset — they gate on `!= PROBE_APPLIED`). `_diag_task_body()` and
+HGAC (§5.8) treat PROBE_SATURATING like PROBE_APPLIED (HGAC acts; the ambient alarm may then fire).
 
-**Not the same as "no tissue".** Saturation is a property of signal amplitude, not of patient
-presence — an unapplied probe under strong or flickering light (e.g. a phototherapy lamp) can
-saturate with nobody connected, and a genuinely applied probe can saturate from motion or an
-ambient spike. So `PROBE_SATURATING` deliberately does **not** imply `PROBE_APPLIED`; it only
-asserts "presence unknown, channel out of range". Before 2026-07-24 this case was folded into
-`PROBE_NOT_APPLIED` (see former text below) — separating it is what makes HGAC's gate (§5.8.2)
-able to act on real saturation without also acting during ordinary probe-idle periods.
-
-Consumers: SpO2/HR1/HR2/HR3 and RSQI treat `PROBE_SATURATING` like any other non-`PROBE_APPLIED`
-state (invalid output, internal state reset — no code change needed, they already gate on
-`!= PROBE_APPLIED`). `_diag_task_body()` treats it like `PROBE_APPLIED` (skips periodic HW
-diagnostics — running one during a real saturation event would disrupt HGAC's attempt to clear
-it). HGAC (§5.8.2) treats it like `PROBE_APPLIED` (acts to correct the saturation).
-
-**PROBE_NOT_APPLIED** — detected via *optical transmittance*, when not DISCONNECTED and not
-SATURATING (i.e. both color channels are already known `CH_VALID_RANGE`):
-
-```
-OT = (I_PD_LED − I_PD_ALED) / I_LED     [A/A, dimensionless]
-```
-
-Since v0.35 OT is computed in `_compute_analog_state()` and stored in `AFE4490AnalogState` (`ot_led1`/`ot_led2`, see §3c); `_rsqm_update()` only consumes it. Responds in one sample; PPG modulation (~2%) produces negligible OT variation.
-
-OT is the **full electro-optical system ratio** — it combines LED wall-plug efficiency, tissue transmittance, and photodiode responsivity into a single dimensionless number. It is not the tissue optical transmittance alone.
-
-- Threshold: `as.ot_led1 > rsqm_ot_thr` OR `as.ot_led2 > rsqm_ot_thr` → PROBE_NOT_APPLIED; otherwise PROBE_APPLIED *(OR logic: one channel is enough)*. Default `rsqm_ot_thr = 1.0e-4` (v0.44, widened from 8.5e-5) — runtime-configurable via `setRsqmOtThr()`.
-- Single threshold (no hysteresis) — state oscillation is prevented by the `rsqm_probe_state_min_s` debounce in `_rsqm_request_probe_state()` instead.
-- **Until 2026-07-24**, this check also folded in `!as.otLedxValid()` (saturation) via OR — collapsing "channel saturated" and "channel clean but reads high" into the same `PROBE_NOT_APPLIED` value. Split into the dedicated `PROBE_SATURATING` state above (see its rationale).
+**History:** ≤2026-07-24 saturation was folded into NOT_APPLIED; 2026-07-24…v0.60 *any* positive
+saturation → PROBE_SATURATING (which drove RF to the floor on finger removal — the bug that
+motivated v0.61); v0.61 splits saturation by phase as above.
 
 Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54). First real-HW test (2026-07-19, CONTEC MS100 simulator, probe applied) showed the theoretical APPLIED estimate does not hold in practice: the simulator is highly sensitive to probe placement and OT frequently reads above 8.5e-5 with the probe applied, so `probe_state` never reached APPLIED at that threshold. `rsqm_ot_thr` was widened to 1.0e-4 as a practical mitigation — still not a calibrated value from a real neonatal probe/patient.
 
@@ -1178,10 +1178,18 @@ mirror without it).
 A gain change scales `v_tia` by `k = RF_new/RF_old`, making prior measurements meaningless, so
 `_hgac_change_rf()` **resets** the domain's two EMAs (rather than rescaling them analytically) and
 arms `_rsqm_settling_countdown` (≈150 ms, `afe_settle_time_s`) — the producer of
-`RSQM_DIAG_HW_SETTLING` (§5.6.3). After the reset the EMAs re-warm (`valid()==false`), so no action
-is taken until they mature — this warmup **doubles as a cooldown** between consecutive steps (no
-cascade), and it comfortably absorbs the HW settling window. SpO2's own EMAs are **not** touched:
-SpO2 consumes gain-invariant OT (§5.1), so an RF change is not a discontinuity in its input.
+`RSQM_DIAG_HW_SETTLING` (§5.6.3). SpO2's own EMAs are **not** touched: SpO2 consumes gain-invariant
+OT (§5.1), so an RF change is not a discontinuity in its input.
+
+**Settling and EMA warmup are SEQUENTIAL, not overlapped (corrected 2026-08-16 — see §14):** Gate
+G0 (below) closes off whenever `RSQM_DIAG_HW_SETTLING` is active, and while gated off it `reset()`s
+the four EMAs **every sample** (not just once at the RF change) — so `count` stays pinned at 0 for
+the entire settling window, and no `EmaChannel::update()` is ever called during it. The EMA warmup
+counter (`count` vs. `3·τ·fs` in `valid()`) therefore does not start advancing until the settling
+countdown reaches 0 and the gate re-opens. The total delay before a domain can act again after an
+RF change is the **sum**, not the max, of the two windows:
+- Guard (fast, τ=0.1s) operative again: `afe_settle_time_s` (0.15 s) + 3×0.1 s = **0.45 s**
+- Leveling/ambient (slow, τ=2.0s) operative again: 0.15 s + 3×2.0 s = **6.15 s**
 
 **Gate G0:** HGAC acts only while `probe_state` is `PROBE_APPLIED` or `PROBE_SATURATING` and no
 `RSQM_DIAG_HW_SETTLING` is active. The idle states (`PROBE_NOT_APPLIED`, `PROBE_DISCONNECTED`) are
@@ -1684,7 +1692,7 @@ See §5.8 for algorithm description.
 | Guard EMA τ (fast) | `setHgacEmaFastTauS()` | 0.1 s | 0.0–10.0 | HIGH2 estimator time constant; warmup = 3·τ |
 | Leveling EMA τ (slow) | `setHgacEmaSlowTauS()` | 2.0 s | 0.0–30.0 | HIGH1/LOW1 estimator time constant; warmup = 3·τ |
 | Ambient EMA τ | `setHgacEmaAmbientTauS()` | 2.0 s | 0.0–30.0 | ALED-phase estimator for the AMBIENT_HIGH alarm; sustained (avoids flicker); warmup = 3·τ |
-| Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; absorbed by the EMA warmup |
+| Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; EMA warmup does not start until this elapses (sequential, §5.8.4) |
 
 ---
 
@@ -1904,6 +1912,27 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.61-experiment (doc fix) | **§5.8.4 corrected: `afe_settle_time_s` and the EMA warmup are SEQUENTIAL, not overlapped.** |
+|         | No code change — the spec previously claimed the 3·τ EMA warmup "comfortably absorbs"  |
+|         | the 150 ms settling window (implying they run in parallel). Wrong: Gate G0             |
+|         | (`_hgac_update()`) closes off while `RSQM_DIAG_HW_SETTLING` is active and `reset()`s the |
+|         | four EMAs on EVERY sample during that window (not once) — `count` stays pinned at 0, so  |
+|         | `EmaChannel::update()` is never called and the warmup counter cannot advance until the  |
+|         | settling countdown reaches 0. Corrected total delay after an RF change: guard operative  |
+|         | again at `afe_settle_time_s` + 3×τ_fast = 0.45 s (was documented as 0.3 s); leveling/    |
+|         | ambient at + 3×τ_slow = 6.15 s (was 6 s). Found by Alex while reviewing the design.      |
+| v0.61-experiment | **ProbeState classifier: discriminate saturation by phase (probe-in-air vs external light).** |
+|         | Fixes HGAC driving RF to the floor when the finger is removed. Was: *any* positive     |
+|         | saturation → PROBE_SATURATING → HGAC acts. Now (`_rsqm_update`): if not saturated, OT   |
+|         | classifies presence as before; if saturated, look at WHICH phase clips — an ambient    |
+|         | (ALED) phase also clipping → external light → PROBE_SATURATING (HGAC corrects); only    |
+|         | LED phases clipping, ambient clean → the LED's own light hits the PD with no tissue →   |
+|         | **PROBE_NOT_APPLIED** (probe in air), so HGAC freezes RF instead of chasing it down.    |
+|         | OT is the discriminator's basis (ambient-invariant, subtracts ALED). Limitation:       |
+|         | LED-only clip can't tell air from a rare no-ambient tissue over-saturation → assumed    |
+|         | air. Spec §5.6.2 rewritten; PROBE_SATURATING enum comment updated. HGAC unchanged.      |
+|         | test_hgac: the old "LED-dominated → descend" test became "LED-only sat = probe in air → |
+|         | HGAC frozen". 38/38 native tests, ESP32-S3 V16 build OK.                                 |
 | v0.60-experiment | **Move the ambient alarm out of `_hgac_track()` (separate actuation/diagnostic).** |
 |         | `_hgac_track()` is pure actuation again (returns void); the AMBIENT_HIGH condition moves|
 |         | to a new `_hgac_ambient_high(color, ambient)` evaluated in `_hgac_update()`. Same        |

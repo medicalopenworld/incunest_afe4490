@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.60 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.61 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.60"
+#define INCUNEST_AFE4490_VERSION "0.61"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -73,13 +73,14 @@ enum class ProbeState {
     PROBE_DISCONNECTED,  // cable or probe connector not plugged in
     PROBE_NOT_APPLIED,   // probe connected, OT indicates no tissue in the optical path
     PROBE_APPLIED,       // probe on patient, normal measurement
-    PROBE_SATURATING     // OT is NOT trustworthy: a channel saturated from ABOVE — ADC at the
-                         // positive rail or v_tia past FS (as.anyPositiveSaturation()).
-                         // Presence is UNKNOWN: saturation can occur with or without a patient
-                         // (e.g. an unapplied probe under a phototherapy lamp), so it does NOT
-                         // imply PROBE_APPLIED. SpO2/HR1/HR2/HR3 and RSQI treat it like any
+    PROBE_SATURATING     // Saturation from ABOVE where the AMBIENT (ALED) phase also clips → the
+                         // saturation is driven by EXTERNAL light (lamp/phototherapy), not by the
+                         // LED's own light reaching the PD (that case — LED phase clips, ambient
+                         // clean — is finger-removed / probe-in-air → NOT_APPLIED; see v0.61
+                         // classifier, §5.6.2). Presence is still UNKNOWN (external light saturates
+                         // with or without a patient). SpO2/HR1/HR2/HR3 and RSQI treat it like any
                          // non-APPLIED state (invalid/reset); HGAC treats it like PROBE_APPLIED
-                         // (acts to clear the saturation).
+                         // (acts to clear the saturation — the ambient alarm may then fire).
 };
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
