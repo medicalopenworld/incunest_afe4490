@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.62
+# incunest_afe4490 — Specification v0.63
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1367,7 +1367,42 @@ Write path verified by a control: changing RF 100K → 50K halved V_TIA as expec
 **Consequences:**
 - The claim that a larger CF buys meaningful noise filtering **is not supported by measurement** in this configuration. v0.62's value is that it fixes an incomplete register grid, not that it improves SNR.
 - Settling is not the binding constraint either: the ADC sample phase is a ~449.5 µs window and the held value reflects its end, so the TIA has margin + window ≈ 500 µs — not the ~50 µs pre-window margin the auto-CF criterion assumes. At RF_100K / 250 pF the settling residual is ≈ e⁻²⁰ (~1 nV), which is why 250 pF reads identically to 5 pF.
-- The library's criterion (`5τ ≤ tia_margin`) is therefore roughly **10× stricter than the datasheet's own Equation 1** (`RF × CF ≤ Rx Sample Time / 10`), which at RF_100K / 500 Hz would permit up to ~449 pF (i.e. the whole grid).
+- The library's criterion (`5τ ≤ tia_margin`) is **≈4.5× stricter than the datasheet's own Equation 1** (`RF × CF ≤ Rx Sample Time / 10`):
+
+  ```
+  library:  5τ ≤ 0.10·q      → τ ≤ 0.02·q = 40 counts = 10 µs
+  Eq. 1:      τ ≤ window/10    window = q−2−margin = 1798 counts → τ ≤ 44.95 µs
+  ratio ≈ 4.5×   (uniform across RF — both bounds scale as 1/RF)
+  ```
+
+  At RF_100K / 500 Hz Eq. 1 would permit up to ~449 pF, i.e. the whole grid.
+
+#### Two constraints, not one — do not conflate them
+
+The `/10` in Equation 1 and the `0.10` in `tia_settle_fraction` are numerically similar and govern **different decisions**. Substituting one for the other is a category error:
+
+| Decision | Correct basis | Depends on |
+|---|---|---|
+| **When the sample window opens** (`LEDxSTC = q + margin`) | LED and cable turn-on transient — datasheet §8.3.1.3: *"To avoid settling effects resulting from the LED or cable, program S_LED2 to start after the LED turns on."* | the LED and the wiring — **not** on RF or CF |
+| **How large CF may be** | Equation 1: `τ ≤ Rx Sample Time / 10` | RF and the sample window |
+
+Note the datasheet attributes the sample-start delay to **LED/cable** settling, not TIA settling. The library sizes that margin from a TIA-settling rationale (5τ) and then reuses it as the auto-CF budget — which is why the two constraints became entangled. Eq. 1 cannot replace `tia_settle_fraction`: it says nothing about when the window should open, so substituting it would leave the margin with no criterion at all.
+
+**Decision: both numbers are kept as they are.** The margin is conservative but free (sampling here is not window-limited — see the measurements above), and shrinking it risks sampling before the LED has stabilised, which *would* bias the reading. Re-deriving it properly would require measuring the LED/cable turn-on transient, which has not been done.
+
+#### Equation 1 is checked, never enforced
+
+`_recalc_afe_tia_cf_led1/2()` applies only the 5τ rule, which is stricter, so **auto-CF can never violate Eq. 1** (locked by `test_autocf_always_within_eq1` across every RF and rate). A **manual `setTIACF*()` can**: it bypasses auto-CF and is deliberately not clamped. Example at 500 Hz: `RF_250K` + 250 pF gives RF×CF = 62.5 µs against the 44.95 µs limit.
+
+`getCFMaxEq1PF(rf)` returns that limit so callers can detect it. PulseNest's firmware calls it after every manual `$SET tiacf*` and emits
+
+```
+# WARN cf1=250 pF exceeds datasheet Eq.1 limit 180 pF (RF=250K) - applied anyway
+```
+
+as a comment line, not `$ERR` — the setting *is* applied. Rationale for warning rather than clamping: manual override exists precisely for bench experiments that need to leave the documented range, and silently clamping would make such an experiment lie about what the chip was doing.
+
+> **Probable origin of `tia_settle_fraction = 0.10`** (undocumented since v0.20): Equation 1's `/10` applied to the wrong quantity — turned from *"τ ≤ 10% of the sample window"* into *"reserve 10% of the LED window as dead time"*. The two are nearly the same size (0.10·q = 200 counts vs 0.10·window = 179.8 counts), which is why the substitution is easy to make and hard to notice. Compounding it with the separate 5τ requirement is what yields the 4.5× conservatism.
 
 **Decision: keep the conservative criterion.** Relaxing it would buy nothing measurable while spending settling margin, and the margin is free. Revisit only if a configuration is found where CF demonstrably affects noise — e.g. with `FLTRCNRSEL` raised to 1000 Hz, a much higher RF, or a probe/cable whose capacitance makes TIA loop stability the limiting factor (the one CF-related risk these measurements did *not* probe, since no ringing was observed even at 5 pF).
 
@@ -1973,6 +2008,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.63   | **Datasheet Equation 1 exposed as a check (no behaviour change).** New       |
+|         | `getCFMaxEq1PF(rf)` returns the chip's own CF ceiling                         |
+|         | (`RF × CF ≤ Rx Sample Time / 10`, §8.3.1.1), plus private                     |
+|         | `_compute_sample_window_counts()` (= q − 2 − margin). Auto-CF is ≈4.5×        |
+|         | stricter and provably stays inside Eq. 1 (`test_autocf_always_within_eq1`);   |
+|         | a MANUAL `setTIACF*()` can exceed it and is deliberately not clamped —        |
+|         | PulseNest now emits `# WARN … applied anyway` after such a $SET.              |
+|         | Spec §7.2 documents that `tia_settle_fraction` and Eq. 1's `/10` govern       |
+|         | DIFFERENT decisions and must not be substituted: per §8.3.1.3 the sample-     |
+|         | start delay exists for **LED/cable** settling, not TIA settling, so Eq. 1     |
+|         | (which only bounds CF) cannot supply a criterion for it. Both numbers kept    |
+|         | unchanged: the margin is conservative but free, and shrinking it without      |
+|         | measuring the LED/cable transient risks sampling before the LED settles.      |
+|         | Also corrects the strictness ratio stated in v0.62: ≈4.5×, not ~10×.          |
+|         | `test_tia_cf` grows 9 → 13 cases.                                            |
 | v0.62   | **TIA CF: expose all 32 register codes (was 6).** Found by Alex reviewing     |
 |         | `_recalc_afe_tia_cf_led1()` against datasheet Figure 114. `CF_LED[4:0]` is    |
 |         | not a 6-value enum: it switches five capacitors in parallel over a fixed 5 pF |
@@ -2000,7 +2050,7 @@ Key references for each algorithm implemented in this library.
 |         | internal 500 Hz filter (FLTRCNRSEL) dominates the noise bandwidth and sits    |
 |         | before the sampler. v0.62's value is fixing an incomplete register grid, not  |
 |         | improving SNR. See §7.2 "Measured behaviour" for the data, the write-path     |
-|         | control, and why the auto-CF criterion is ~10× stricter than datasheet Eq. 1. |
+|         | control, and why the auto-CF criterion is ≈4.5× stricter than datasheet Eq.1. |
 | v0.61-experiment (doc fix) | **§5.8.4 corrected: `afe_settle_time_s` and the EMA warmup are SEQUENTIAL, not overlapped.** |
 |         | No code change — the spec previously claimed the 3·τ EMA warmup "comfortably absorbs"  |
 |         | the 150 ms settling window (implying they run in parallel). Wrong: Gate G0             |

@@ -1613,11 +1613,39 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
 }
 
 uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
+    // Dead time between LED turn-on and the opening of the Rx sample window.
+    //
+    // NOTE ON PURPOSE (see spec §7.2): the datasheet's stated reason for this delay is the
+    // settling of the LED and CABLE, not of the TIA — §8.3.1.3: "To avoid settling effects
+    // resulting from the LED or cable, program S_LED2 to start after the LED turns on."
+    // That transient is a property of the LED/wiring, essentially independent of RF and CF.
+    // The library nonetheless also reuses this margin as the auto-CF budget (5τ ≤ margin),
+    // which is a SEPARATE and much stricter constraint than the datasheet's own Equation 1
+    // (see getCFMaxEq1PF()). Kept deliberately conservative: the margin costs nothing
+    // measurable here and shrinking it risks sampling before the LED has stabilised.
+    //
     // Settle window = max(tia_settle_min, tia_settle_fraction × LED-on window)
     // LED-on window = quarter period = afeclk / (4 × _afe_sample_rate_hz) counts
     uint32_t q      = (afeclk / _afe_sample_rate_hz) / 4u;
     uint32_t margin = (uint32_t)((float)q * tia_settle_fraction);
     return (margin < tia_settle_min) ? tia_settle_min : margin;
+}
+
+uint32_t INCUNEST_AFE4490::_compute_sample_window_counts() const {
+    // Rx sample window = LEDxENDC − LEDxSTC, mirroring _apply_timing_regs():
+    //   LED1: t8 − t7 = (2q − 2) − (q + margin) = q − 2 − margin
+    uint32_t q      = (afeclk / _afe_sample_rate_hz) / 4u;
+    uint32_t margin = _compute_settle_margin();
+    return (q > margin + 2u) ? (q - 2u - margin) : 0u;
+}
+
+float INCUNEST_AFE4490::getCFMaxEq1PF(AFE4490RF rf) const {
+    // Datasheet Equation 1 (§8.3.1.1): RF × CF ≤ Rx Sample Time / 10.
+    // This is the CHIP's own upper bound on CF. The library's auto-CF criterion is stricter
+    // (≈4.5×), so auto-selection can never exceed this — but a manual setTIACF*() can, which
+    // is what this accessor exists to let the caller check.
+    float window_s = (float)_compute_sample_window_counts() / (float)afeclk;
+    return ((window_s / 10.0f) / kAFE_RF_OHM[(int)rf]) * 1e12f;
 }
 
 void INCUNEST_AFE4490::_recalc_afe_tia_cf_led1() {

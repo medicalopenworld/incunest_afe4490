@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.62 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.63 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.62"
+#define INCUNEST_AFE4490_VERSION "0.63"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -645,6 +645,12 @@ public:
     void setLEDRange(uint8_t mA);           // 75 or 150 mA
     // Joint setters — apply the same value to both LED1 and LED2 channels; also sets ENSEPGAIN=0
     void setTIAGain(AFE4490RF gain);   // sets afe_tia_rf_led1 = afe_tia_rf_led2 = gain
+    // Datasheet Equation 1 (§8.3.1.1): RF × CF ≤ Rx Sample Time / 10 — the chip's own upper
+    // bound on CF. Returns that limit in pF for the given RF at the current sample rate.
+    // Auto-CF is stricter and can never exceed it; a manual setTIACF*() can, so callers that
+    // expose CF to a user should check against this and warn. Does not block anything.
+    float getCFMaxEq1PF(AFE4490RF rf) const;
+
     void setTIACF(float pF);                // sets both channels; quantised DOWN to the largest CF ≤ pF
     void setStage2Gain(AFE4490RG gain); // sets afe_stg2_rg_led1 = afe_stg2_rg_led2 = gain
     // Separate gain mode — enable independent LED1/LED2 TIA settings (ENSEPGAIN bit D15 in TIAGAIN)
@@ -915,8 +921,12 @@ private:
 
     // Recomputes rate-dependent algorithm parameters from _afe_sample_rate_hz
     void _recalc_rate_params();
-    // Returns TIA settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window)
+    // Returns the LED/cable settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window).
+    // Datasheet purpose is LED/cable settling (§8.3.1.3); the library also reuses it as the
+    // auto-CF budget, which is a separate and stricter constraint than Eq. 1 — see spec §7.2.
     uint32_t _compute_settle_margin() const;
+    // Rx sample window in AFECLK counts (LEDxENDC − LEDxSTC) = q − 2 − settle_margin.
+    uint32_t _compute_sample_window_counts() const;
     // Selects the largest CF code (of the 32) that settles within _compute_settle_margin() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
