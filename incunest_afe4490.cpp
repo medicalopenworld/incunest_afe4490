@@ -221,9 +221,19 @@ namespace {
     // Physical CF values: use kAFE_CF_PF[] from header (single source of truth)
 
     // Auto-CF settling parameters
-    constexpr float    tia_settle_fraction = 0.10f;  // 10% of LED-on window reserved for TIA settling
-    constexpr uint32_t tia_settle_min      = 50;     // floor: 12.5 µs @ 4 MHz (covers RF_500K/CF_5P at high Fs)
-    constexpr float    tia_n_tau           = 5.0f;   // 5τ → <0.7% settling error
+    // PROVENANCE (spec §7.2): none of these three comes from the AFE4490 datasheet. They are
+    // kept deliberately — the combination errs conservative — but do NOT "align them with TI"
+    // one at a time: they only make sense together (raising tia_n_tau 5→10 to match the
+    // datasheet's implied count, while keeping the margin basis, makes the criterion twice as
+    // STRICT, halving the allowed CF).
+    constexpr float    tia_settle_fraction = 0.10f;  // 10% of LED-on window reserved as dead time.
+                                                     // Probably Eq. 1's "/10" misapplied: it bounds τ
+                                                     // against the SAMPLE WINDOW, not a dead-time fraction.
+    constexpr uint32_t tia_settle_min      = 50;     // floor: 12.5 µs @ 4 MHz. Matches TI's Table 2
+                                                     // example (t1 = t3 + 50), not a stated requirement.
+    constexpr float    tia_n_tau           = 5.0f;   // generic 5-time-constants rule of thumb.
+                                                     // "<0.7% error" is e^-5 restated, not the reason.
+                                                     // Datasheet's own implied count is 10τ (Eq. 1).
 
     // TIAGAIN: STG2GAIN bits D[10:8] only — STAGE2EN (D14) is set separately via _afe_stg2_en_led1/2
     constexpr uint32_t stg2_gain_code[5] = {

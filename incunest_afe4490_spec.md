@@ -1402,7 +1402,27 @@ Note the datasheet attributes the sample-start delay to **LED/cable** settling, 
 
 as a comment line, not `$ERR` — the setting *is* applied. Rationale for warning rather than clamping: manual override exists precisely for bench experiments that need to leave the documented range, and silently clamping would make such an experiment lie about what the chip was doing.
 
-> **Probable origin of `tia_settle_fraction = 0.10`** (undocumented since v0.20): Equation 1's `/10` applied to the wrong quantity — turned from *"τ ≤ 10% of the sample window"* into *"reserve 10% of the LED window as dead time"*. The two are nearly the same size (0.10·q = 200 counts vs 0.10·window = 179.8 counts), which is why the substitution is easy to make and hard to notice. Compounding it with the separate 5τ requirement is what yields the 4.5× conservatism.
+#### Provenance of the three settle constants — none is from the datasheet
+
+All three entered together in v0.20 (`incunest_afe4490.cpp`, anonymous namespace). None has a basis in the AFE4490 datasheet; this is recorded so nobody re-derives them from a source that does not exist, or "aligns them with TI" in the wrong direction.
+
+| Constant | Value | Actual provenance |
+|---|---|---|
+| `tia_settle_min` | 50 counts (12.5 µs) | Matches the example value in datasheet Table 2 (p.36: `t1 = 6050` = `t3` + 50 at PRF 500 Hz / 25% duty), adopted as a floor after comparing the TI EVM (80 counts, judged excessive) and Protocentral (0, no guard). An example value, not a stated requirement. |
+| `tia_settle_fraction` | 0.10 | **Probably Equation 1's `/10` applied to the wrong quantity** — turned from *"τ ≤ 10% of the sample window"* into *"reserve 10% of the LED window as dead time"*. The two are nearly the same size (0.10·q = 200 counts vs 0.10·window = 179.8), which is why the substitution is easy to make and hard to notice. Added in v0.20 to make the fixed 50-count margin scale with PRF. |
+| `tia_n_tau` | 5.0 | The generic **five-time-constants rule of thumb**. The code comment *"5τ → < 0.7% settling error"* is not a derivation: 0.7% **is** e⁻⁵ (0.674%) restated, so it states the consequence as though it were the requirement. The datasheet never mentions 5τ. |
+
+**The datasheet's own implied time-constant count is 10, not 5** — Equation 1 (`τ ≤ Rx Sample Time / 10`) demands the window be at least 10τ, i.e. settling to e⁻¹⁰ ≈ 45 ppm. The library is therefore *laxer* in τ-count (5 vs 10) but applies it against a far shorter interval (the 50 µs margin instead of the 449.5 µs window). Net: 4.5× stricter.
+
+⚠️ **The three constants only make sense together.** Changing one in isolation moves the operating point, sometimes opposite to the intent:
+
+| Criterion | τ max | CF max at RF_100K |
+|---|---|---|
+| Current (`5τ ≤ margin` = 50 µs) | 10 µs | **100 pF** |
+| Raise `tia_n_tau` 5 → 10 "to match TI", keeping the margin basis | 5 µs | 50 pF — *twice as strict* |
+| Datasheet Eq. 1 (`10τ ≤ window`) | 44.95 µs | 449 pF |
+
+None of this is wrong or unsafe — the combination errs conservative, which is the right side to err on — but the justification is weaker than the code comments suggest. See the decision above: all three are kept unchanged.
 
 **Decision: keep the conservative criterion.** Relaxing it would buy nothing measurable while spending settling margin, and the margin is free. Revisit only if a configuration is found where CF demonstrably affects noise — e.g. with `FLTRCNRSEL` raised to 1000 Hz, a much higher RF, or a probe/cable whose capacitance makes TIA loop stability the limiting factor (the one CF-related risk these measurements did *not* probe, since no ringing was observed even at 5 pF).
 
@@ -2023,6 +2043,14 @@ Key references for each algorithm implemented in this library.
 |         | measuring the LED/cable transient risks sampling before the LED settles.      |
 |         | Also corrects the strictness ratio stated in v0.62: ≈4.5×, not ~10×.          |
 |         | `test_tia_cf` grows 9 → 13 cases.                                            |
+|         | §7.2 additionally records the provenance of all three settle constants:       |
+|         | NONE comes from the datasheet. `tia_settle_min`=50 is TI's Table 2 example    |
+|         | value; `tia_settle_fraction`=0.10 is probably Eq. 1's `/10` misapplied;       |
+|         | `tia_n_tau`=5.0 is the generic five-time-constants rule of thumb (its         |
+|         | "< 0.7% error" comment is circular — 0.7% IS e⁻⁵). The datasheet's implied    |
+|         | count is 10τ, so raising `tia_n_tau` 5→10 "to match TI" while keeping the     |
+|         | margin basis would make the criterion twice as STRICT, not laxer — the three  |
+|         | constants only make sense together. All kept unchanged.                       |
 | v0.62   | **TIA CF: expose all 32 register codes (was 6).** Found by Alex reviewing     |
 |         | `_recalc_afe_tia_cf_led1()` against datasheet Figure 114. `CF_LED[4:0]` is    |
 |         | not a 6-value enum: it switches five capacitors in parallel over a fixed 5 pF |
