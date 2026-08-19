@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.63 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.64 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.63"
+#define INCUNEST_AFE4490_VERSION "0.64"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -898,7 +898,7 @@ private:
     bool              hgac_enable          = false; // OFF by default until bench-validated
     float             hgac_v_tia_high2     = tia_axis::HIGH2_V; // V — guard (fast EMA); clamped ≤ FS_V by setter
     float             hgac_v_tia_high1     = 0.75f;             // V — leveling upper (slow EMA)
-    float             hgac_v_tia_low1      = 0.25f;             // V — leveling lower (slow EMA)
+    float             hgac_v_tia_low1      = 0.20f;             // V — leveling lower (slow EMA)
     float             hgac_ema_fast_tau_s  = 0.1f;              // s — guard EMA: integrates severity×time
     float             hgac_ema_slow_tau_s  = 2.0f;              // s — leveling EMA: clean DC (f_c << HR_min)
     float             hgac_ema_ambient_tau_s = 2.0f;            // s — ambient (ALED) EMA: sustained, avoids flicker

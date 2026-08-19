@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.63
+# incunest_afe4490 — Specification v0.64
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1156,10 +1156,14 @@ Three thresholds on `v_tia_led` (per domain), all runtime-tunable:
 |---|---|---|---|---|
 | `hgac_v_tia_high2` | 0.90 V | `tia_axis::HIGH2_V` (clamped ≤ FS_V) | fast EMA | guard: `RF--` urgently |
 | `hgac_v_tia_high1` | 0.75 V | policy literal | slow EMA | leveling: `RF--` |
-| `hgac_v_tia_low1`  | 0.25 V | policy literal | slow EMA | leveling: `RF++` |
+| `hgac_v_tia_low1`  | 0.20 V | policy literal | slow EMA | leveling: `RF++` |
 
-`[LOW1, HIGH1]` is a dead-band (no action). Stability invariant: `HIGH1/LOW1 = 3.0 > 2.5×` (the
+`[LOW1, HIGH1]` is a dead-band (no action). Stability invariant: `HIGH1/LOW1 = 3.75 > 2.5×` (the
 largest RF LUT step), so a single step never crosses from one band edge to the other (no hunting).
+LOW1 was chosen lower than HIGH1's symmetric counterpart (0.30 would match the 3.0 ratio) rather
+than raising HIGH1 to widen the band: HIGH1 is capped by its 0.15 V margin to HIGH2/GUARD (0.90 V,
+a safety margin against saturation), while LOW1 has no symmetric lower guard (`v_tia_diff ≥ 0`
+always) — widening costs only SNR, never safety.
 
 #### 5.8.2 Two EMA per domain (fast guard / slow leveling)
 
@@ -2028,6 +2032,16 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.64   | **HGAC: `hgac_v_tia_low1` default 0.25→0.20 V** (§5.8.1). Widens the        |
+|         | leveling dead-band by lowering LOW1, not raising HIGH1: HIGH1 is capped by   |
+|         | its 0.15 V margin to HIGH2/GUARD (safety against saturation), while LOW1 has |
+|         | no symmetric lower guard (`v_tia_diff ≥ 0` always) — widening there only     |
+|         | costs SNR, never safety. Also fixes the tightest anti-hunting margin (0.05 V |
+|         | at the RF ×2.5 step boundaries) found for the old value; new stability      |
+|         | invariant `HIGH1/LOW1 = 3.75 > 2.5×` (was 3.0). PulseNest's `test_hgac.cpp`  |
+|         | no longer hardcodes a raw ADC code for its weak-signal case — it derives it  |
+|         | from the object's own `hgac_v_tia_low1` (via `getConfig()`), so this default |
+|         | can move again without silently breaking the test.                          |
 | v0.63   | **Datasheet Equation 1 exposed as a check (no behaviour change).** New       |
 |         | `getCFMaxEq1PF(rf)` returns the chip's own CF ceiling                         |
 |         | (`RF × CF ≤ Rx Sample Time / 10`, §8.3.1.1), plus private                     |
