@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.67
+# incunest_afe4490 — Specification v0.68
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1235,6 +1235,16 @@ At the default 500 Hz / 25% duty config: LED window ≈ 449.5 µs, ambient windo
 and traceable to the datasheet instead of a guess (see §14 v0.65, and the `afe_settle_time_s`
 provenance note in §7.2).
 
+**CF/RF atomicity (reviewed 2026-08-20, no bug found):** a natural worry when RF changes at
+runtime is whether `C_F` could transiently lag behind the new `R_F`, breaking the 5τ criterion.
+It can't: `RF_LEDx` and `CF_LEDx` for one color share the **same 24-bit register** (`TIAGAIN` for
+LED1, `TIA_AMB_GAIN` for LED2, datasheet p.57), and `setTIAGainLED1/2()` (which `_hgac_change_rf()`
+calls) recomputes CF for the new RF (`_recalc_afe_tia_cf_led1/2()`) *before* `_apply_analog_regs()`
+writes both fields in a single SPI transaction. The chip only ever sees (old RF, old CF) or
+(new RF, new CF) — never a mix — and both writes happen under `_spi_mutex`, which `getConfig()`
+also takes for these fields, so no torn read either. Locked in by
+`test_hgac_change_rf_recalculates_cf` (PulseNest `test_hgac.cpp`).
+
 **Settling and EMA warmup are SEQUENTIAL, not overlapped (corrected 2026-08-16 — see §14):** Gate
 G0 (below) closes off whenever `RSQM_DIAG_HW_SETTLING` is active, and while gated off it `reset()`s
 the four EMAs **every sample** (not just once at the RF change) — so `count` stays pinned at 0 for
@@ -2064,6 +2074,19 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.68   | **CF/RF atomicity reviewed (§5.8.4) — no bug, closes an open question from  |
+|         | the v0.65 settling work.** `RF_LEDx`/`CF_LEDx` share the same 24-bit         |
+|         | register (`TIAGAIN`/`TIA_AMB_GAIN`), and `setTIAGainLED1/2()` recomputes CF  |
+|         | for the new RF *before* the single SPI write in `_apply_analog_regs()` — the |
+|         | chip never observes a transient RF-new/CF-old combination, and `getConfig()` |
+|         | reads both fields under the same `_spi_mutex` (no torn read either).         |
+|         | Documented inline in `_hgac_change_rf()` and in §5.8.4. New regression test  |
+|         | `test_hgac_change_rf_recalculates_cf` (PulseNest `test_hgac.cpp`) exercises  |
+|         | CF recalculation through the HGAC entry point specifically (previously only  |
+|         | covered via the public `setTIAGain()` in `test_tia_cf.cpp`). Also fixes      |
+|         | `INCUNEST_AFE4490_VERSION` macro, stuck at "0.64" since v0.65 (comment/      |
+|         | `library.json` were bumped correctly each time, this `#define` was missed). |
+|         | Comments/tests only, no behaviour change.                                    |
 | v0.67   | **Rename: `_compute_settle_margin()` → `_compute_led_on_to_sample_margin_counts()`** |
 |         | (found by Alex reviewing v0.66). "Settle" was ambiguous two ways: (1) the    |
 |         | datasheet's stated cause is LED/cable settling (§8.3.1.3), but the library   |

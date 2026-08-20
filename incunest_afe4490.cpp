@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.67 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.68 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1325,6 +1325,14 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
 void INCUNEST_AFE4490::_hgac_change_rf(HgacColor color, AFE4490RF new_rf) {
     const AFE4490RF old_rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
     if (new_rf == old_rf) return;
+    // CF/RF atomicity (2026-08-20 review, no bug found — recorded so it isn't re-litigated):
+    // setTIAGainLED1/2() recalculates CF for the NEW rf (_recalc_afe_tia_cf_led1/2()) BEFORE
+    // _apply_analog_regs() writes it — and RF/CF for one color share the SAME 24-bit register
+    // (TIAGAIN / TIA_AMB_GAIN, datasheet p.57), written in a single SPI transaction. The chip can
+    // therefore never observe a transient (new RF, old CF) or (old RF, new CF) combination; the
+    // 5τ auto-CF criterion holds for whichever RF the chip currently has. getConfig() reads both
+    // fields under the same _spi_mutex, so no torn read either. See test_hgac_change_rf_recalculates_cf
+    // (PulseNest test_hgac.cpp) and spec §5.8.4.
     if (color == HgacColor::IR) {
         setTIAGainLED1(new_rf);   // takes _spi_mutex internally; safe nested under caller's _state_mutex
         _hgac_ema_fast_led1.reset();
