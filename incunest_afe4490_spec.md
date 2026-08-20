@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.65
+# incunest_afe4490 — Specification v0.66
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -2064,6 +2064,16 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.66   | **Rename: `_compute_sample_window_counts()` only ever covered the LED phase** |
+|         | (found by Alex reviewing v0.65) — renamed to `_compute_led_sample_window_counts()`, |
+|         | paired with a new symmetric `_compute_ambient_sample_window_counts()` (was  |
+|         | inline arithmetic duplicated inside `_compute_afe_settle_samples()`). Both now |
+|         | delegate to a shared `_window_counts(margin)` clamp, removing the duplicated |
+|         | `(q > margin+2) ? q-2-margin : 0` formula. `_compute_afe_settle_samples()` is  |
+|         | now `min(led(), ambient())` — no inline `q`/margin arithmetic left in it.    |
+|         | `getCFMaxEq1PF()` updated to the new LED-window name (datasheet Eq. 1's "Rx  |
+|         | Sample Time" is specifically the LED window, per Fig. 58 — never ambient).   |
+|         | Internal-only, no behaviour change; `pio test -e native` unaffected.        |
 | v0.65   | **`afe_settle_time_s` (0.15 s fixed guess) replaced by `_compute_afe_settle_samples()`,** |
 |         | derived from datasheet §7.7 t5 (p.17): "> 3 ms of cumulative sampling time  |
 |         | in each phase" after any signal-chain change, footnote (1) naming "TIA     |

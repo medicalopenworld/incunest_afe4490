@@ -1,7 +1,7 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.65 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.66 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -921,8 +921,14 @@ private:
     // Datasheet purpose is LED/cable settling (§8.3.1.3); the library also reuses it as the
     // auto-CF budget, which is a separate and stricter constraint than Eq. 1 — see spec §7.2.
     uint32_t _compute_settle_margin() const;
-    // Rx sample window in AFECLK counts (LEDxENDC − LEDxSTC) = q − 2 − settle_margin.
-    uint32_t _compute_sample_window_counts() const;
+    // Shared clamp for a phase window: quarter-period − 2 (ADC reset) − the given margin.
+    uint32_t _window_counts(uint32_t margin) const;
+    // LED-phase Rx sample window in AFECLK counts (LEDxENDC − LEDxSTC) = q − 2 − tia_margin.
+    // LED1 == LED2 (symmetric). This is the datasheet's "Rx Sample Time" (Eq. 1, Fig. 58).
+    uint32_t _compute_led_sample_window_counts() const;
+    // Ambient-phase Rx sample window in AFECLK counts (ALEDxENDC − ALEDxSTC) = q − 2 − afe_ambient_margin_counts.
+    // ALED1 == ALED2 (symmetric). NOT part of datasheet Eq. 1 — library-only margin, see §7.2.
+    uint32_t _compute_ambient_sample_window_counts() const;
     // Samples (PRP cycles) to hold RSQM_DIAG_HW_SETTLING after ANY signal-chain register change
     // (RF, CF, stage2 gain, AMBDAC) — datasheet §7.7 t5 (p.17) + footnote (1): "> 3 ms of
     // cumulative sampling time in each phase", explicitly generalised there to "TIA gain and so

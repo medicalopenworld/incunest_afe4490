@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.65 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.66 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1654,12 +1654,25 @@ uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
     return (margin < tia_settle_min) ? tia_settle_min : margin;
 }
 
-uint32_t INCUNEST_AFE4490::_compute_sample_window_counts() const {
-    // Rx sample window = LEDxENDC − LEDxSTC, mirroring _apply_timing_regs():
-    //   LED1: t8 − t7 = (2q − 2) − (q + margin) = q − 2 − margin
-    uint32_t q      = (afeclk / _afe_sample_rate_hz) / 4u;
-    uint32_t margin = _compute_settle_margin();
+uint32_t INCUNEST_AFE4490::_window_counts(uint32_t margin) const {
+    // Shared clamp: a phase window = quarter-period − 2 (ADC reset) − its own settle margin.
+    // Never negative — degenerate configs (margin close to q) return 0.
+    uint32_t q = (afeclk / _afe_sample_rate_hz) / 4u;
     return (q > margin + 2u) ? (q - 2u - margin) : 0u;
+}
+
+uint32_t INCUNEST_AFE4490::_compute_led_sample_window_counts() const {
+    // Rx sample window = LEDxENDC − LEDxSTC, mirroring _apply_timing_regs():
+    //   LED1: t8 − t7 = (2q − 2) − (q + tia_margin) = q − 2 − tia_margin
+    // LED1 == LED2 (symmetric register layout, see _apply_timing_regs()) — one figure for both.
+    return _window_counts(_compute_settle_margin());
+}
+
+uint32_t INCUNEST_AFE4490::_compute_ambient_sample_window_counts() const {
+    // Ambient sample window = ALEDxENDC − ALEDxSTC, mirroring _apply_timing_regs():
+    //   ALED1: t12 − t11 = (3q − 2) − (2q + afe_ambient_margin_counts) = q − 2 − afe_ambient_margin_counts
+    // ALED1 == ALED2 (symmetric) — one figure for both.
+    return _window_counts(afe_ambient_margin_counts);
 }
 
 uint32_t INCUNEST_AFE4490::_compute_afe_settle_samples() const {
@@ -1669,16 +1682,11 @@ uint32_t INCUNEST_AFE4490::_compute_afe_settle_samples() const {
     // valid. Every phase delivers exactly one sample per PRP cycle, so the number of cycles
     // (= samples, = what _rsqm_settling_countdown counts down in) to discard is
     // ceil(3 ms / phase_window_s) — evaluated on the SHORTEST of the four windows, since that
-    // one is the last to reach 3 ms.
-    //
-    // LED window (LED1 == LED2, symmetric)   = _compute_sample_window_counts() = q-2-tia_margin
-    // Ambient window (ALED1 == ALED2, symmetric) = q-2-afe_ambient_margin_counts
-    // Neither depends on RF (only on _afe_sample_rate_hz via q and tia_margin), so this single
-    // figure covers an RF step on either HGAC color domain — see spec §5.8.4.
-    uint32_t q               = (afeclk / _afe_sample_rate_hz) / 4u;
-    uint32_t led_window      = _compute_sample_window_counts();
-    uint32_t amb_window      = (q > afe_ambient_margin_counts + 2u) ? (q - 2u - afe_ambient_margin_counts) : 0u;
-    uint32_t worst_window    = (led_window < amb_window) ? led_window : amb_window;
+    // one is the last to reach 3 ms. Neither window depends on RF (only on _afe_sample_rate_hz),
+    // so this single figure covers an RF step on either HGAC color domain — see spec §5.8.4.
+    uint32_t led_window   = _compute_led_sample_window_counts();
+    uint32_t amb_window   = _compute_ambient_sample_window_counts();
+    uint32_t worst_window = (led_window < amb_window) ? led_window : amb_window;
     if (worst_window == 0u) return 1u;  // degenerate config guard — never divide by zero
     float worst_window_s = (float)worst_window / (float)afeclk;
     uint32_t samples     = (uint32_t)ceilf(afe_t5_cumulative_sample_time_s / worst_window_s);
@@ -1686,11 +1694,13 @@ uint32_t INCUNEST_AFE4490::_compute_afe_settle_samples() const {
 }
 
 float INCUNEST_AFE4490::getCFMaxEq1PF(AFE4490RF rf) const {
-    // Datasheet Equation 1 (§8.3.1.1): RF × CF ≤ Rx Sample Time / 10.
+    // Datasheet Equation 1 (§8.3.1.1): RF × CF ≤ Rx Sample Time / 10. "Rx Sample Time" is the
+    // datasheet's own term for the LED phase window (Fig. 58) — the ambient window is a separate,
+    // library-only margin (§7.2), not part of Eq. 1.
     // This is the CHIP's own upper bound on CF. The library's auto-CF criterion is stricter
     // (≈4.5×), so auto-selection can never exceed this — but a manual setTIACF*() can, which
     // is what this accessor exists to let the caller check.
-    float window_s = (float)_compute_sample_window_counts() / (float)afeclk;
+    float window_s = (float)_compute_led_sample_window_counts() / (float)afeclk;
     return ((window_s / 10.0f) / kAFE_RF_OHM[(int)rf]) * 1e12f;
 }
 
