@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.68
+# incunest_afe4490 — Specification v0.69
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -50,19 +50,21 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 ```
 4 raw ADC codes (led1, led2, aled1, aled2)  +  2 SW-subtracted (led1_sub, led2_sub)
     │
-    ├─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA, I_PD, OT)  — see §3c
-    │       ├─→ _rsqm_update()      (probe state, DiagCode, RSQI)
-    │       └─→ _hgac_update()      (RF guard/leveling, two EMA per domain, §5.8)
-    │
-    ├─→ selected channel (setPPGChannel)
-    │       └─→ bandpass filter (setPPGDispFilter) → ppg + HR1 (peak detection)
-    │
-    ├─→ LED1-ALED1 (IR corr.) → bandpass 0.5–5 Hz → decimate ×10 → HR2 (autocorrelation)
-    │
-    ├─→ LED1-ALED1 (IR corr.) → LP 10 Hz → decimate ×10 → 512-sample Hann → FFT → HPS → HR3
-    │
-    └─→ LED1-ALED1 (IR corr.) + LED2-ALED2 (RED corr.) → AC/DC → SpO2
+    └─→ _compute_analog_state()  →  AFE4490AnalogState (V_ADC, V_TIA, I_PD, OT)  — see §3c
+            ├─→ _rsqm_update()      (probe state, DiagCode, RSQI)
+            ├─→ _hgac_update()      (RF guard/leveling, two EMA per domain, §5.8)
+            │
+            └─→ ot_led1 / ot_led2 (gain-invariant, §5.1) →
+                    ├─→ selected channel (setPPGChannel: LED1/LED2) → bandpass filter
+                    │       (setPPGDispFilter) → negate → ppg_disp (display only, v0.69, §2.1)
+                    ├─→ HR1 (peak detection)
+                    ├─→ bandpass 0.5–5 Hz → decimate ×10 → HR2 (autocorrelation)
+                    ├─→ LP 10 Hz → decimate ×10 → 512-sample Hann → FFT → HPS → HR3
+                    └─→ AC/DC → SpO2
 ```
+**v0.69: `ppg_disp` joined the OT-domain migration** that HR1/HR2/HR3/SpO2 already went through
+(§5.1/§5.2) — it was the last consumer of the raw ambient-corrected `led1_sub`/`led2_sub`, and the
+only one that still showed a scaling discontinuity whenever HGAC changed RF. See §2.1.
 
 ---
 
@@ -73,15 +75,20 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 struct AFE4490Data {
     // Field order mirrors the $M1/$P1 serial frame: raw signals first, then processed outputs
     // Raw ADC outputs (6 signals from AFE4490)
-    int32_t led2;       // LED2VAL  — RED raw           (frame: RED)
-    int32_t led1;       // LED1VAL  — IR raw            (frame: IR)
-    int32_t aled2;      // ALED2VAL — ambient after LED2 (frame: RED_Amb)
-    int32_t aled1;      // ALED1VAL — ambient after LED1 (frame: IR_Amb)
-    int32_t led2_aled2; // LED2-ALED2 — RED ambient-corrected (frame: RED_Sub)
-    int32_t led1_aled1; // LED1-ALED1 — IR ambient-corrected  (frame: IR_Sub)
+    int32_t led2;       // LED2VAL  — RED raw           (frame: LED2)
+    int32_t led1;       // LED1VAL  — IR raw            (frame: LED1)
+    int32_t aled2;      // ALED2VAL — ambient after LED2 (frame: ALED2)
+    int32_t aled1;      // ALED1VAL — ambient after LED1 (frame: ALED1)
+    int32_t led2_sub;   // LED2-ALED2 — RED ambient-corrected (frame: LED2_SUB)
+    int32_t led1_sub;   // LED1-ALED1 — IR ambient-corrected  (frame: LED1_SUB)
     // Processed outputs
-    int32_t ppg;        // filtered PPG of selected channel (IR, for HR1 peak detection)
-    float   ppg_disp;   // PPG for display only: normalized [0..1], PI-weighted (low PI → range < 1). Never use for SpO2 or HR calculations.
+    float   ppg_disp;   // PPG display signal, OT domain (v0.69): BPF(ot_led1/ot_led2) + negated.
+                        // A/A units, tiny magnitude (~1e-5..1e-6) — NOT normalized (candidate
+                        // ppg_disp_norm, PI-weighted [0..1], is backlog). Gain-invariant like the
+                        // algorithms below — no discontinuity when HGAC changes RF, unlike the
+                        // raw-ADC-code led1_sub/led2_sub it replaced. Display only, no algorithm
+                        // consumes it (there is no separate `ppg` field — removed pre-v0.69, HR1
+                        // reads ot_led1 directly, see §1.3).
     float   spo2;       // SpO2 in %
     float   spo2_sqi;   // SpO2 Signal Quality Index [0–1]: PI-based; 0=no finger, 1=PI ≥ 2%
     float   spo2_r;     // R ratio: (AC_red/DC_red)/(AC_ir/DC_ir) — for calibration
@@ -120,7 +127,7 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 | Stage 2 gain   | disabled                      |
 | ENSEPGAIN      | 0 (single gain)               |
 | NUMAV          | 7 (8 averages, max 9 at 500Hz)|
-| PPG channel    | LED1_ALED1                    |
+| PPG channel    | LED1 (ot_led1)                |
 | Filter         | BUTTERWORTH, 0.5–20 Hz        |
 
 ### 2.3 Chip configuration
@@ -346,13 +353,15 @@ After `stop()`, `begin()` can be called again to restart from a clean state. Con
 ## 3. Enumerations
 
 ```cpp
+// PPG display source channel (setPPGChannel() / ppg_disp, §2.1). v0.69: OT domain — only IR/RED
+// remain selectable. The four single-ended raw options this enum used to have (bare LED1/LED2/
+// ALED1/ALED2, without ambient subtraction — and, before that, LED1_ALED1/LED2_ALED2 for the
+// ambient-corrected pair) had no OT equivalent: OT is structurally an ambient-corrected ratio
+// (AFE4490AnalogState has no ot_aled1/ot_aled2), so they were dropped rather than kept
+// meaningless. Named LED1/LED2 (not IR/RED) for consistency with ot_led1/ot_led2.
 enum class AFE4490Channel {
-    LED1,        // IR raw
-    LED2,        // RED raw
-    ALED1,       // ambient after LED1
-    ALED2,       // ambient after LED2
-    LED1_ALED1,  // IR ambient-corrected (default)
-    LED2_ALED2   // RED ambient-corrected
+    LED1,  // ot_led1 (IR)  — default
+    LED2   // ot_led2 (RED)
 };
 
 
@@ -1739,7 +1748,7 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 | Parameter | Constant | Value | Used by | Effect |
 |---|---|---|---|---|
 | DC removal time constant | `spo2_ema_mean_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 2.0 s (SpO2), 1.6 s (HR1) | SpO2, HR1 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
-| Input channel selection | `setPPGChannel()` default | LED1_ALED1 | All algorithms | Selects which of the 6 raw signals enters the processing chain |
+| Input channel selection | `setPPGChannel()` default | LED1 | `ppg_disp` only (v0.69) | Selects ot_led1 vs ot_led2 for the display waveform; HR1/HR2/HR3/SpO2 always consume both OT channels directly, not gated by this selector |
 | Decimation factor | `hr2_decim_factor`, `hr3_decim_factor` | ×10 | HR2, HR3 | Reduces 500 Hz → 50 Hz before autocorrelation / FFT; sets effective frequency resolution |
 
 ---
@@ -2074,6 +2083,34 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.69   | **`ppg_disp` migrated to the OT domain — the last consumer of raw           |
+|         | `led1_sub`/`led2_sub` joins the gain-invariance migration HR1/HR2/HR3/SpO2  |
+|         | already went through (§5.1/§5.2, since v0.38).** Found by Alex: `ppg_disp`  |
+|         | was the only signal still scaled by RF, so it visibly jumped whenever HGAC  |
+|         | changed gain — the exact artefact OT fixed everywhere else.                 |
+|         | `AFE4490Data::ppg_disp`: `int32_t` → `float` (OT magnitude ~1e-5..1e-6      |
+|         | truncates to 0 as an int). Source: bandpass-filtered `ot_led1`/`ot_led2`    |
+|         | (was `led1_sub`/`led2_sub`). `AFE4490Channel` enum shrunk from 6 values to  |
+|         | 2 (`LED1`/`LED2`): the four single-ended raw options (bare LED1/LED2/       |
+|         | ALED1/ALED2) have no OT equivalent — OT is structurally an ambient-         |
+|         | corrected ratio (`AFE4490AnalogState` has no `ot_aled1`/`ot_aled2`) — and   |
+|         | `setPPGChannel()` was their only consumer, so they were dropped rather than |
+|         | kept meaningless. NOT normalized for display (deliberately deferred — a    |
+|         | candidate `ppg_disp_norm`, PI-weighted [0..1], is backlog, not this         |
+|         | change). §1.3/§2.1/§3 corrected in the same pass: fixed pre-existing spec   |
+|         | drift found while touching this code — stale field names                   |
+|         | (`led2_aled2`/`led1_aled1`, actual code has used `led2_sub`/`led1_sub` for  |
+|         | some time), a phantom `int32_t ppg` struct field that no longer exists in   |
+|         | the header, and a processing-chain diagram that still routed HR1 through    |
+|         | `setPPGChannel()` when it has consumed `ot_led1` directly since v0.38.      |
+|         | PulseNest: wire frames `$M1`-`$M4` change `PPG_DISP`'s format from `%ld`    |
+|         | to `%.4e` (units A/A, was ADC counts); `channel_str()` in `main.cpp`        |
+|         | updated for the 2-value enum. `pulsenest_lab.py`/`pulsenest_lab_spec.md`:   |
+|         | `PPG_DISP` tooltip/type corrected (parsing was already `float(x)`, no      |
+|         | code change needed there); `LED1_SUB`/`LED2_SUB` tooltips also corrected    |
+|         | in the same pass — they still claimed to feed HR1/HR2/HR3/SpO2, another    |
+|         | pre-existing drift from the same v0.38 OT migration that was never         |
+|         | reflected in the lab's tooltips.                                            |
 | v0.68   | **CF/RF atomicity reviewed (§5.8.4) — no bug, closes an open question from  |
 |         | the v0.65 settling work.** `RF_LEDx`/`CF_LEDx` share the same 24-bit         |
 |         | register (`TIAGAIN`/`TIA_AMB_GAIN`), and `setTIAGainLED1/2()` recomputes CF  |

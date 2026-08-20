@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.68 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.69 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.68"
+#define INCUNEST_AFE4490_VERSION "0.69"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -124,7 +124,12 @@ struct AFE4490Data {
     int32_t led2_sub;  // LED2-ALED2 — RED ambient-corrected (frame: LED2_SUB)
     int32_t led1_sub;  // LED1-ALED1 — IR ambient-corrected  (frame: LED1_SUB)
     // Processed outputs
-    int32_t ppg_disp;         // PPG display signal (BPF + negated; display only — not an input to algorithms)
+    float   ppg_disp;         // PPG display signal, OT domain (v0.69): BPF(ot_led1/ot_led2) + negated.
+                              // A/A units, tiny magnitude (~1e-5..1e-6) — NOT normalized for display
+                              // (see backlog: candidate ppg_disp_norm, PI-weighted [0..1]).
+                              // Gain-invariant like the algorithms (§5.1/§5.2): no discontinuity when
+                              // HGAC changes RF, unlike the raw-ADC-code led1_sub/led2_sub it replaced.
+                              // Display only — not an input to algorithms.
     float   spo2;        // SpO2 in %
     float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based; 0=invalid/no finger, 1=full quality (PI ≥ 2%)
     float   spo2_r;      // R ratio used for SpO2 calculation: (AC_red/DC_red)/(AC_ir/DC_ir)
@@ -142,13 +147,14 @@ struct AFE4490Data {
 };
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
+// PPG display source channel (setPPGChannel() / ppg_disp). v0.69: OT domain (see AFE4490Data::
+// ppg_disp) — only IR/RED remain selectable. The four single-ended raw options (bare LED1/LED2/
+// ALED1/ALED2, without ambient subtraction) had no OT equivalent (OT is structurally an
+// ambient-corrected ratio, AFE4490AnalogState has no ot_aled1/ot_aled2) and were dropped rather
+// than kept meaningless. Named LED1/LED2 (not IR/RED) for consistency with ot_led1/ot_led2.
 enum class AFE4490Channel {
-    LED1,       // IR raw
-    LED2,       // RED raw
-    ALED1,      // ambient after LED1
-    ALED2,      // ambient after LED2
-    LED1_SUB, // IR ambient-corrected (default)
-    LED2_SUB  // RED ambient-corrected
+    LED1,  // ot_led1 (IR)  — default
+    LED2   // ot_led2 (RED)
 };
 
 enum class AFE4490RF {

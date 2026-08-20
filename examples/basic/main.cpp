@@ -1,5 +1,5 @@
 // incunest_afe4490 — Basic Example
-// Library version: v0.68 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.69 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
@@ -50,9 +50,10 @@ void ReaderTask(void *pvParameters) {
 
     for (;;) {
         if (afe.getData(data)) {
-            // PPG waveform — raw ADC counts, bandpass-filtered
+            // PPG waveform — OT domain (A/A, v0.69), bandpass-filtered; default float precision
+            // (2 decimals) would print 0.00 at this magnitude, so request more digits.
             Serial.print("PPG: ");
-            Serial.print(data.ppg_disp);
+            Serial.print(data.ppg_disp, 6);
 
             // SpO2 — valid flag indicates enough samples have been accumulated
             Serial.print("  SpO2: ");

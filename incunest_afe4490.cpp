@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.68 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.69 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -301,7 +301,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_stg2_rg_led2(AFE4490RG::RG_100K),
       _afe_stg2_en_led2(true),
       _afe_ambdac_uA(0),
-      _ppgdisp_channel(AFE4490Channel::LED1_SUB),
+      _ppgdisp_channel(AFE4490Channel::LED1),
       _ppgdisp_bpf(),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_dc_alpha(0.0f),
@@ -1882,20 +1882,13 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // HGAC runs next — Phase 1: RF-only saturation guard + descent (see incunest_afe4490_spec.md §5.8)
     _hgac_update(as);
 
-    // Select PPG source
-    float raw_ppg;
-    switch (_ppgdisp_channel) {
-        case AFE4490Channel::LED1:       raw_ppg = (float)led1;       break;
-        case AFE4490Channel::LED2:       raw_ppg = (float)led2;       break;
-        case AFE4490Channel::ALED1:      raw_ppg = (float)aled1;      break;
-        case AFE4490Channel::ALED2:      raw_ppg = (float)aled2;      break;
-        case AFE4490Channel::LED2_SUB: raw_ppg = (float)led2_sub; break;
-        default: /* LED1_SUB */        raw_ppg = (float)led1_sub; break;
-    }
+    // Select PPG source — OT domain (v0.69, gain-invariant, same rationale as SpO2/HR1/HR2/HR3
+    // in §5.1/§5.2: an RF change from HGAC no longer creates a scaling discontinuity here).
+    float raw_ppg = (_ppgdisp_channel == AFE4490Channel::LED2) ? as.ot_led2 : as.ot_led1;
 
     float filtered = _ppgdisp_bpf.process(raw_ppg);
 
-    _current_data.ppg_disp        = -(int32_t)filtered;  // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up)
+    _current_data.ppg_disp        = -filtered;  // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up)
     _current_data.led1       = led1;
     _current_data.led2       = led2;
     _current_data.aled1      = aled1;
