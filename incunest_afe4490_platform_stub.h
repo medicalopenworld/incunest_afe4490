@@ -1,6 +1,6 @@
 #pragma once
 // incunest_afe4490_platform_stub.h — Arduino + FreeRTOS type stubs for native (offline) builds
-// Library version: v0.64 — native/offline (no hardware)
+// Library version: v0.65 — native/offline (no hardware)
 // Spec: incunest_afe4490_spec.md §9
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 

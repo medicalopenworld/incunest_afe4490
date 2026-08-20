@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.64 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.65 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -234,6 +234,17 @@ namespace {
     constexpr float    tia_n_tau           = 5.0f;   // generic 5-time-constants rule of thumb.
                                                      // "<0.7% error" is e^-5 restated, not the reason.
                                                      // Datasheet's own implied count is 10τ (Eq. 1).
+
+    // Ambient-phase settle margin: LED OFF decay before ambient sampling starts (t5/t11).
+    // No datasheet-cited value; empirical, raised 200->400 for the 50 mA default (v0.47, see
+    // spec §7.2). Named so _apply_timing_regs() and _compute_afe_settle_samples() share one source.
+    constexpr uint32_t afe_ambient_margin_counts = 400;  // counts (100 µs)
+
+    // Datasheet §7.7, row t5 (p.17): "> 3 ms of cumulative sampling time in each phase" after any
+    // SPI command changing the signal chain — footnote (1) names "TIA gain" explicitly, so this
+    // is the datasheet's OWN figure for how long to distrust data after an HGAC RF step. Replaces
+    // the untraceable afe_settle_time_s (0.15 s, no derivation — see spec §5.8.4 history).
+    constexpr float    afe_t5_cumulative_sample_time_s = 0.003f;  // 3 ms, datasheet minimum
 
     // TIAGAIN: STG2GAIN bits D[10:8] only — STAGE2EN (D14) is set separately via _afe_stg2_en_led1/2
     constexpr uint32_t stg2_gain_code[5] = {
@@ -1327,7 +1338,8 @@ void INCUNEST_AFE4490::_hgac_change_rf(HgacColor color, AFE4490RF new_rf) {
     }
     // Arm HW_SETTLING for the analog front-end to re-settle after the gain step — first real
     // producer of RSQM_DIAG_HW_SETTLING (previously dead code, see incunest_afe4490.h comment).
-    _rsqm_settling_countdown = (uint32_t)roundf(afe_settle_time_s * (float)_afe_sample_rate_hz);
+    // Sample count from datasheet §7.7 t5, not a fixed guess — see _compute_afe_settle_samples().
+    _rsqm_settling_countdown = _compute_afe_settle_samples();
 }
 
 // One gain domain (color) — pure actuation. fast EMA drives the HIGH2 guard (urgent, integrates
@@ -1494,11 +1506,12 @@ void INCUNEST_AFE4490::_apply_timing_regs() {
     // Datasheet Table 2 formulas, PRF = _afe_sample_rate_hz
     // AFECLK = 4 MHz → 1 count = 0.25 µs  (afeclk is in the anonymous namespace)
     const uint32_t tia_margin = _compute_settle_margin();  // TIA settling after LED ON
-    const uint32_t ambient_margin  = 400;  // counts (100 µs) — LED OFF decay before ambient sampling.
-                                           // Raised from 200 (50 µs) for the 50 mA drive default (v0.47):
-                                           // higher current → longer LED extinction / CF discharge tail
-                                           // (see leakage note). Valid for PRF ≤ ~2 kHz (at 500 Hz the
-                                           // ambient sample window is 400..q-2 = 400..1998, still ample).
+    const uint32_t ambient_margin  = afe_ambient_margin_counts;  // LED OFF decay before ambient
+                                           // sampling. Raised from 200 (50 µs) for the 50 mA drive
+                                           // default (v0.47): higher current → longer LED extinction
+                                           // / CF discharge tail (see leakage note). Valid for
+                                           // PRF ≤ ~2 kHz (at 500 Hz the ambient sample window is
+                                           // 400..q-2 = 400..1998, still ample).
     const uint32_t adc_reset       = 3;    // counts (0.75 µs → -60 dB crosstalk)
 
     uint32_t phase = afeclk / _afe_sample_rate_hz;
@@ -1647,6 +1660,29 @@ uint32_t INCUNEST_AFE4490::_compute_sample_window_counts() const {
     uint32_t q      = (afeclk / _afe_sample_rate_hz) / 4u;
     uint32_t margin = _compute_settle_margin();
     return (q > margin + 2u) ? (q - 2u - margin) : 0u;
+}
+
+uint32_t INCUNEST_AFE4490::_compute_afe_settle_samples() const {
+    // Datasheet §7.7 t5 (p.17) + footnote (1): after any change to a signal-chain control
+    // ("LED current setting, TIA gain, and so forth"), each of the four switched-RC phases
+    // (LED1, LED2, ALED1, ALED2) needs >= 3 ms of CUMULATIVE sampling time before its data is
+    // valid. Every phase delivers exactly one sample per PRP cycle, so the number of cycles
+    // (= samples, = what _rsqm_settling_countdown counts down in) to discard is
+    // ceil(3 ms / phase_window_s) — evaluated on the SHORTEST of the four windows, since that
+    // one is the last to reach 3 ms.
+    //
+    // LED window (LED1 == LED2, symmetric)   = _compute_sample_window_counts() = q-2-tia_margin
+    // Ambient window (ALED1 == ALED2, symmetric) = q-2-afe_ambient_margin_counts
+    // Neither depends on RF (only on _afe_sample_rate_hz via q and tia_margin), so this single
+    // figure covers an RF step on either HGAC color domain — see spec §5.8.4.
+    uint32_t q               = (afeclk / _afe_sample_rate_hz) / 4u;
+    uint32_t led_window      = _compute_sample_window_counts();
+    uint32_t amb_window      = (q > afe_ambient_margin_counts + 2u) ? (q - 2u - afe_ambient_margin_counts) : 0u;
+    uint32_t worst_window    = (led_window < amb_window) ? led_window : amb_window;
+    if (worst_window == 0u) return 1u;  // degenerate config guard — never divide by zero
+    float worst_window_s = (float)worst_window / (float)afeclk;
+    uint32_t samples     = (uint32_t)ceilf(afe_t5_cumulative_sample_time_s / worst_window_s);
+    return (samples < 1u) ? 1u : samples;
 }
 
 float INCUNEST_AFE4490::getCFMaxEq1PF(AFE4490RF rf) const {

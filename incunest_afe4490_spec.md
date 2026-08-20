@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.64
+# incunest_afe4490 — Specification v0.65
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1211,9 +1211,29 @@ mirror without it).
 
 A gain change scales `v_tia` by `k = RF_new/RF_old`, making prior measurements meaningless, so
 `_hgac_change_rf()` **resets** the domain's two EMAs (rather than rescaling them analytically) and
-arms `_rsqm_settling_countdown` (≈150 ms, `afe_settle_time_s`) — the producer of
+arms `_rsqm_settling_countdown` via `_compute_afe_settle_samples()` — the producer of
 `RSQM_DIAG_HW_SETTLING` (§5.6.3). SpO2's own EMAs are **not** touched: SpO2 consumes gain-invariant
 OT (§5.1), so an RF change is not a discontinuity in its input.
+
+**Settling window (v0.65): datasheet §7.7 t5, replacing the untraceable `afe_settle_time_s`.**
+The datasheet's own row for "time between an SPI command and valid data" (§7.7, p.17) requires
+**> 3 ms of cumulative sampling time in each [of the four switched-RC] phase[s]**, and footnote (1)
+generalises it explicitly: *"The same time is applicable whenever there is a change to any of the
+signal chain controls (for example, LED current setting, **TIA gain**, and so forth)."* This is the
+only datasheet-traceable figure for this wait — unlike the three auto-CF constants (§7.2), it did
+not need to be reverse-engineered, TI states it directly.
+
+`_compute_afe_settle_samples()` turns that into a sample count: since each phase delivers exactly
+one sample per PRP cycle, `ceil(3 ms / phase_window_s)` cycles must elapse. The four phase windows
+are pairwise symmetric (LED1≡LED2, ALED1≡ALED2) and depend only on `_afe_sample_rate_hz` — not on
+RF — so a single number covers an RF step on either color domain. The ambient window is normally
+the shorter of the two (its 400-count margin, §7.2, exceeds the LED window's `tia_margin`), so it
+is normally the limiting phase; the function takes the min of both rather than assuming which.
+
+At the default 500 Hz / 25% duty config: LED window ≈ 449.5 µs, ambient window ≈ 399.5 µs →
+`ceil(3 ms / 399.5 µs) = 8` samples ≈ **16 ms** — about **9× shorter** than the old fixed 0.15 s,
+and traceable to the datasheet instead of a guess (see §14 v0.65, and the `afe_settle_time_s`
+provenance note in §7.2).
 
 **Settling and EMA warmup are SEQUENTIAL, not overlapped (corrected 2026-08-16 — see §14):** Gate
 G0 (below) closes off whenever `RSQM_DIAG_HW_SETTLING` is active, and while gated off it `reset()`s
@@ -1221,9 +1241,10 @@ the four EMAs **every sample** (not just once at the RF change) — so `count` s
 the entire settling window, and no `EmaChannel::update()` is ever called during it. The EMA warmup
 counter (`count` vs. `3·τ·fs` in `valid()`) therefore does not start advancing until the settling
 countdown reaches 0 and the gate re-opens. The total delay before a domain can act again after an
-RF change is the **sum**, not the max, of the two windows:
-- Guard (fast, τ=0.1s) operative again: `afe_settle_time_s` (0.15 s) + 3×0.1 s = **0.45 s**
-- Leveling/ambient (slow, τ=2.0s) operative again: 0.15 s + 3×2.0 s = **6.15 s**
+RF change is the **sum**, not the max, of the two windows (figures below at the default 500 Hz
+config — recompute via `_compute_afe_settle_samples()` at other sample rates):
+- Guard (fast, τ=0.1s) operative again: settling (~16 ms) + 3×0.1 s = **~0.32 s** (was 0.45 s)
+- Leveling/ambient (slow, τ=2.0s) operative again: ~16 ms + 3×2.0 s = **~6.02 s** (was 6.15 s)
 
 **Gate G0:** HGAC acts only while `probe_state` is `PROBE_APPLIED` or `PROBE_SATURATING` and no
 `RSQM_DIAG_HW_SETTLING` is active. The idle states (`PROBE_NOT_APPLIED`, `PROBE_DISCONNECTED`) are
@@ -1427,6 +1448,17 @@ All three entered together in v0.20 (`incunest_afe4490.cpp`, anonymous namespace
 | Datasheet Eq. 1 (`10τ ≤ window`) | 44.95 µs | 449 pF |
 
 None of this is wrong or unsafe — the combination errs conservative, which is the right side to err on — but the justification is weaker than the code comments suggest. See the decision above: all three are kept unchanged.
+
+#### `afe_settle_time_s` (v0.65: replaced, not just documented)
+
+Unlike the three constants above, `afe_settle_time_s` (0.15 s, arming `RSQM_DIAG_HW_SETTLING`
+after an HGAC RF change, §5.8.4) had **no derivation at all**, traceable or not: it entered in
+v0.37 (HGAC's first commit) as a bare guess, and its own code comment said so explicitly
+("approximate... NOT derived from `_compute_settle_margin()`"). Rather than record its provenance
+as "none" and keep it, v0.65 replaces it outright with `_compute_afe_settle_samples()`, built from
+datasheet §7.7 t5 — see §5.8.4 for the full derivation. The two are unrelated in origin and in
+magnitude (0.15 s fixed vs. ~16 ms computed at 500 Hz): the old value was conservative by
+coincidence, not by design.
 
 **Decision: keep the conservative criterion.** Relaxing it would buy nothing measurable while spending settling margin, and the margin is free. Revisit only if a configuration is found where CF demonstrably affects noise — e.g. with `FLTRCNRSEL` raised to 1000 Hz, a much higher RF, or a probe/cable whose capacitance makes TIA loop stability the limiting factor (the one CF-related risk these measurements did *not* probe, since no ringing was observed even at 5 pF).
 
@@ -1812,7 +1844,7 @@ See §5.8 for algorithm description.
 | Guard EMA τ (fast) | `setHgacEmaFastTauS()` | 0.1 s | 0.0–10.0 | HIGH2 estimator time constant; warmup = 3·τ |
 | Leveling EMA τ (slow) | `setHgacEmaSlowTauS()` | 2.0 s | 0.0–30.0 | HIGH1/LOW1 estimator time constant; warmup = 3·τ |
 | Ambient EMA τ | `setHgacEmaAmbientTauS()` | 2.0 s | 0.0–30.0 | ALED-phase estimator for the AMBIENT_HIGH alarm; sustained (avoids flicker); warmup = 3·τ |
-| Settling time (fixed, not `$SET`-tunable) | `afe_settle_time_s` (private) | 0.15 s | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; EMA warmup does not start until this elapses (sequential, §5.8.4) |
+| Settling time (computed, not `$SET`-tunable) | `_compute_afe_settle_samples()` (private) | ~16 ms @ 500 Hz (datasheet §7.7 t5: ≥3 ms/phase) | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; EMA warmup does not start until this elapses (sequential, §5.8.4) |
 
 ---
 
@@ -2032,6 +2064,19 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.65   | **`afe_settle_time_s` (0.15 s fixed guess) replaced by `_compute_afe_settle_samples()`,** |
+|         | derived from datasheet §7.7 t5 (p.17): "> 3 ms of cumulative sampling time  |
+|         | in each phase" after any signal-chain change, footnote (1) naming "TIA     |
+|         | gain" explicitly. New private method computes `ceil(3 ms / phase_window_s)` |
+|         | from the shorter of the LED/ambient sample windows (both symmetric between  |
+|         | LED1/LED2, so one figure covers either HGAC color domain); depends only on  |
+|         | `_afe_sample_rate_hz`, recomputed live instead of hardcoded. At the default  |
+|         | 500 Hz config this yields 8 samples (~16 ms) vs. the old 150 ms — ≈9×       |
+|         | shorter and, unlike the old value, traceable to the datasheet instead of an |
+|         | undocumented guess (§5.8.4, §7.2). New named constant                      |
+|         | `afe_ambient_margin_counts` (was a bare `400` literal in                    |
+|         | `_apply_timing_regs()`) shared by both call sites. §5.8.4 total-delay        |
+|         | figures (guard/leveling re-arm after an RF step) updated accordingly.       |
 | v0.64   | **HGAC: `hgac_v_tia_low1` default 0.25→0.20 V** (§5.8.1). Widens the        |
 |         | leveling dead-band by lowering LOW1, not raising HIGH1: HIGH1 is capped by   |
 |         | its 0.15 V margin to HIGH2/GUARD (safety against saturation), while LOW1 has |

@@ -1,7 +1,7 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.64 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.65 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -902,12 +902,8 @@ private:
     float             hgac_ema_fast_tau_s  = 0.1f;              // s — guard EMA: integrates severity×time
     float             hgac_ema_slow_tau_s  = 2.0f;              // s — leveling EMA: clean DC (f_c << HR_min)
     float             hgac_ema_ambient_tau_s = 2.0f;            // s — ambient (ALED) EMA: sustained, avoids flicker
-    // Fixed (not $SET-tunable in v1, like rsqm_diag_period_ms): approximate analog front-end
-    // + downstream settling time after an RF change, used to arm RSQM_DIAG_HW_SETTLING.
-    // NOT derived from _compute_settle_margin() (that figure is a sub-sample-period AFECLK-count
-    // budget used only for CF auto-selection within one PRP cycle) — this is a separate,
-    // coarser, sample-granularity window for diagnostic/telemetry purposes.
-    static constexpr float afe_settle_time_s  = 0.15f;    // s — ~150 ms
+    // Settling window after an RF change (arms RSQM_DIAG_HW_SETTLING) is no longer a fixed
+    // guess — see _compute_afe_settle_samples() below, derived from datasheet §7.7 t5.
 
     // ── SPI primitives ────────────────────────────────────────────────────────
 #ifndef INCUNEST_OFFLINE
@@ -927,6 +923,12 @@ private:
     uint32_t _compute_settle_margin() const;
     // Rx sample window in AFECLK counts (LEDxENDC − LEDxSTC) = q − 2 − settle_margin.
     uint32_t _compute_sample_window_counts() const;
+    // Samples (PRP cycles) to hold RSQM_DIAG_HW_SETTLING after ANY signal-chain register change
+    // (RF, CF, stage2 gain, AMBDAC) — datasheet §7.7 t5 (p.17) + footnote (1): "> 3 ms of
+    // cumulative sampling time in each phase", explicitly generalised there to "TIA gain and so
+    // forth". Uses the shorter of the LED/ambient sample windows (both symmetric between LED1
+    // and LED2, so one figure covers either color domain) — see spec §5.8.4/§7.2.
+    uint32_t _compute_afe_settle_samples() const;
     // Selects the largest CF code (of the 32) that settles within _compute_settle_margin() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
