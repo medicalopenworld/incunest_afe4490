@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.66
+# incunest_afe4490 — Specification v0.67
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -2064,6 +2064,19 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.67   | **Rename: `_compute_settle_margin()` → `_compute_led_on_to_sample_margin_counts()`** |
+|         | (found by Alex reviewing v0.66). "Settle" was ambiguous two ways: (1) the    |
+|         | datasheet's stated cause is LED/cable settling (§8.3.1.3), but the library   |
+|         | also reuses the same figure as the TIA-τ budget for auto-CF — a name        |
+|         | asserting either cause alone would be partly wrong for the other call site;  |
+|         | (2) it collided with the unrelated `_compute_afe_settle_samples()` (v0.65,   |
+|         | the datasheet-t5 post-register-change wait) — same word, different          |
+|         | timescale (µs-level per-phase margin vs. ms-level post-config countdown).    |
+|         | New name describes what the value structurally IS (`LEDxSTC = LEDxLEDSTC +` |
+|         | this margin) without taking a side on WHY, and adds the `_counts` suffix    |
+|         | for consistency with `_compute_led_sample_window_counts()` /                |
+|         | `_compute_ambient_sample_window_counts()` (v0.66). Internal-only, no        |
+|         | behaviour change.                                                           |
 | v0.66   | **Rename: `_compute_sample_window_counts()` only ever covered the LED phase** |
 |         | (found by Alex reviewing v0.65) — renamed to `_compute_led_sample_window_counts()`, |
 |         | paired with a new symmetric `_compute_ambient_sample_window_counts()` (was  |

@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.66 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.67 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1505,7 +1505,7 @@ void INCUNEST_AFE4490::_chip_init() {
 void INCUNEST_AFE4490::_apply_timing_regs() {
     // Datasheet Table 2 formulas, PRF = _afe_sample_rate_hz
     // AFECLK = 4 MHz → 1 count = 0.25 µs  (afeclk is in the anonymous namespace)
-    const uint32_t tia_margin = _compute_settle_margin();  // TIA settling after LED ON
+    const uint32_t tia_margin = _compute_led_on_to_sample_margin_counts();  // dead time after LED ON
     const uint32_t ambient_margin  = afe_ambient_margin_counts;  // LED OFF decay before ambient
                                            // sampling. Raised from 200 (50 µs) for the 50 mA drive
                                            // default (v0.47): higher current → longer LED extinction
@@ -1635,8 +1635,9 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _recalc_afe_tia_cf_led2();
 }
 
-uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
-    // Dead time between LED turn-on and the opening of the Rx sample window.
+uint32_t INCUNEST_AFE4490::_compute_led_on_to_sample_margin_counts() const {
+    // Dead time between LED turn-on and the opening of the Rx sample window (positions
+    // LEDxSTC = LEDxLEDSTC + this margin, see _apply_timing_regs()).
     //
     // NOTE ON PURPOSE (see spec §7.2): the datasheet's stated reason for this delay is the
     // settling of the LED and CABLE, not of the TIA — §8.3.1.3: "To avoid settling effects
@@ -1644,10 +1645,12 @@ uint32_t INCUNEST_AFE4490::_compute_settle_margin() const {
     // That transient is a property of the LED/wiring, essentially independent of RF and CF.
     // The library nonetheless also reuses this margin as the auto-CF budget (5τ ≤ margin),
     // which is a SEPARATE and much stricter constraint than the datasheet's own Equation 1
-    // (see getCFMaxEq1PF()). Kept deliberately conservative: the margin costs nothing
-    // measurable here and shrinking it risks sampling before the LED has stabilised.
+    // (see getCFMaxEq1PF()) — deliberately named without asserting "TIA" or "LED/cable" alone,
+    // since it serves both roles (see the two call sites below and _recalc_afe_tia_cf_led1/2()).
+    // Kept deliberately conservative: the margin costs nothing measurable here and shrinking it
+    // risks sampling before the LED has stabilised.
     //
-    // Settle window = max(tia_settle_min, tia_settle_fraction × LED-on window)
+    // Margin = max(tia_settle_min, tia_settle_fraction × LED-on window)
     // LED-on window = quarter period = afeclk / (4 × _afe_sample_rate_hz) counts
     uint32_t q      = (afeclk / _afe_sample_rate_hz) / 4u;
     uint32_t margin = (uint32_t)((float)q * tia_settle_fraction);
@@ -1665,7 +1668,7 @@ uint32_t INCUNEST_AFE4490::_compute_led_sample_window_counts() const {
     // Rx sample window = LEDxENDC − LEDxSTC, mirroring _apply_timing_regs():
     //   LED1: t8 − t7 = (2q − 2) − (q + tia_margin) = q − 2 − tia_margin
     // LED1 == LED2 (symmetric register layout, see _apply_timing_regs()) — one figure for both.
-    return _window_counts(_compute_settle_margin());
+    return _window_counts(_compute_led_on_to_sample_margin_counts());
 }
 
 uint32_t INCUNEST_AFE4490::_compute_ambient_sample_window_counts() const {
@@ -1706,7 +1709,7 @@ float INCUNEST_AFE4490::getCFMaxEq1PF(AFE4490RF rf) const {
 
 void INCUNEST_AFE4490::_recalc_afe_tia_cf_led1() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF_LED1)
-    float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
+    float settle_s  = (float)_compute_led_on_to_sample_margin_counts() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
     float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_rf_led1]) * 1e12f;
     // Same quantise-DOWN rule as the public setter: largest of the 32 achievable CF ≤ cf_max_pF.
@@ -1715,7 +1718,7 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led1() {
 
 void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
     // Constraint: 5τ ≤ settle_time  →  CF ≤ settle_time / (5 × RF_LED2)
-    float settle_s  = (float)_compute_settle_margin() / (float)afeclk;
+    float settle_s  = (float)_compute_led_on_to_sample_margin_counts() / (float)afeclk;
     float tau_max   = settle_s / tia_n_tau;
     float cf_max_pF = (tau_max / kAFE_RF_OHM[(int)_afe_tia_rf_led2]) * 1e12f;
     // Same quantise-DOWN rule as the public setter: largest of the 32 achievable CF ≤ cf_max_pF.

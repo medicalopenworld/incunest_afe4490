@@ -1,7 +1,7 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.66 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.67 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -917,10 +917,12 @@ private:
 
     // Recomputes rate-dependent algorithm parameters from _afe_sample_rate_hz
     void _recalc_rate_params();
-    // Returns the LED/cable settle margin in AFECLK counts: max(tia_settle_min, 10% of LED-on window).
-    // Datasheet purpose is LED/cable settling (§8.3.1.3); the library also reuses it as the
-    // auto-CF budget, which is a separate and stricter constraint than Eq. 1 — see spec §7.2.
-    uint32_t _compute_settle_margin() const;
+    // Dead time between LED turn-on and the opening of the Rx sample window, in AFECLK counts:
+    // max(tia_settle_min, 10% of LED-on window). Datasheet purpose is LED/cable settling
+    // (§8.3.1.3); the library also reuses it as the auto-CF budget, a separate and stricter
+    // constraint than Eq. 1 — see spec §7.2. Named without asserting "TIA" or "LED/cable" alone
+    // since it serves both roles.
+    uint32_t _compute_led_on_to_sample_margin_counts() const;
     // Shared clamp for a phase window: quarter-period − 2 (ADC reset) − the given margin.
     uint32_t _window_counts(uint32_t margin) const;
     // LED-phase Rx sample window in AFECLK counts (LEDxENDC − LEDxSTC) = q − 2 − tia_margin.
@@ -935,7 +937,7 @@ private:
     // forth". Uses the shorter of the LED/ambient sample windows (both symmetric between LED1
     // and LED2, so one figure covers either color domain) — see spec §5.8.4/§7.2.
     uint32_t _compute_afe_settle_samples() const;
-    // Selects the largest CF code (of the 32) that settles within _compute_settle_margin() for the given RF.
+    // Selects the largest CF code (of the 32) that settles within _compute_led_on_to_sample_margin_counts() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
     void _recalc_afe_tia_cf_led2();   // updates _afe_tia_cf_led2 from _afe_tia_rf_led2
