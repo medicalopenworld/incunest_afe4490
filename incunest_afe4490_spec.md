@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.72
+# incunest_afe4490 — Specification v0.73
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1536,6 +1536,31 @@ All three entered together in v0.20 (`incunest_afe4490.cpp`, anonymous namespace
 
 None of this is wrong or unsafe — the combination errs conservative, which is the right side to err on — but the justification is weaker than the code comments suggest. See the decision above: all three are kept unchanged.
 
+#### `tia_settle_min` does not depend on PRF — and that is almost certainly correct
+
+Reviewed 2026-08-21 (Alex): `tia_settle_min` is a flat `constexpr` (50 AFECLK counts), not a
+function of `_afe_sample_rate_hz`. Since AFECLK is fixed at 4 MHz regardless of PRF, 50 counts is
+also a fixed **12.5 µs in wall-clock time** at every sample rate — it only ever "wins" the
+`max(tia_settle_min, tia_settle_fraction × q)` at high PRF, where `q` (which does scale with PRF)
+shrinks below it.
+
+**Table 2's own footnote (1), p.36, sharpens the provenance above:** *"Values are based off a
+pulse repetition frequency (PRF) = 500 Hz and duty cycle = 25%."* Every number in that table —
+including the `t1 = t3 + 50` example `tia_settle_min` was lifted from — is TI's worked example at
+one specific PRF, not a stated rule for any other rate. TI never says "always reserve 50 counts";
+that is the library's own extrapolation from a single data point.
+
+**Despite that weak origin for the exact number, keeping the *shape* PRF-independent (a fixed
+count, not a fixed fraction of the window) is the physically sound choice.** The stated purpose of
+this margin is LED/cable turn-on settling (§8.3.1.3) — a property of the LED and the wiring's own
+electrical time constants, which does not care how often the AFE pulses them. A fixed wall-clock
+floor models that correctly; a floor that shrank at high PRF (e.g. if it were expressed as a
+fraction of `q` instead of a count) would not. So: the formula's structure (fixed floor +
+PRF-proportional term, combined via `max()`) is well-designed; only the specific magnitude "50" is
+inherited from one PRF-500 Hz data point TI never validated elsewhere — the same class of weak
+justification already recorded above for `tia_settle_fraction`/`tia_n_tau`, now with the precise
+textual reason (the table's own scope footnote) why it is single-PRF and not a general rule.
+
 #### `afe_settle_time_s` (v0.65: replaced, not just documented)
 
 Unlike the three constants above, `afe_settle_time_s` (0.15 s, arming `RSQM_DIAG_HW_SETTLING`
@@ -2151,6 +2176,17 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.73   | **Docs only: `tia_settle_min` PRF dependence reviewed (§7.2).** Confirmed   |
+|         | it does NOT scale with PRF (flat `constexpr`, always 12.5 µs regardless of  |
+|         | `_afe_sample_rate_hz`) — and that this is almost certainly the right shape, |
+|         | since its purpose (LED/cable turn-on settling, §8.3.1.3) is a hardware      |
+|         | property independent of pulse rate. Sharpened the existing provenance note  |
+|         | (`9fb2831`): datasheet Table 2's own footnote (1), p.36, states its values  |
+|         | are "based off PRF = 500 Hz and duty cycle = 25%" — the "50" `tia_settle_min` |
+|         | was lifted from is TI's single worked example, never stated as a rule for  |
+|         | any other rate. No code change: the formula's structure (fixed floor +     |
+|         | PRF-proportional term) was already correct, only the exact magnitude has   |
+|         | weak provenance, same class of finding as `tia_settle_fraction`/`tia_n_tau`. |
 | v0.72   | **`RSQM_DIAG_HW_SETTLING` is now enforced, not just labelled** (found by    |
 |         | Alex from a visible spike in `ppg_disp` whenever HGAC changes RF).         |
 |         | `_task_body()`'s freeze condition — `_diag_active \|\| _diag_holdoff_samples`|
