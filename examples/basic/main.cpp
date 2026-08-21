@@ -1,5 +1,5 @@
 // incunest_afe4490 — Basic Example
-// Library version: v0.69 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.70 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
@@ -135,9 +135,9 @@ void setup() {
     // This configures the chip registers, attaches the DRDY interrupt and
     // launches the internal processing task. Default settings:
     //   - Sample rate : 500 Hz
-    //   - PPG channel : LED1_SUB (IR ambient-corrected)
+    //   - PPG channel : LED1 (ot_led1, IR — OT domain since v0.69)
     //   - Filter      : Butterworth bandpass 0.5–20 Hz
-    //   - TIA gain    : 500 kΩ
+    //   - TIA gain    : 100 kΩ
     //   - SpO2 formula: SpO2 = 104 - 17·R  (generic, assumes ~940 nm IR LED)
     afe.begin(AFE4490_CS_PIN, AFE4490_DRDY_PIN);
 

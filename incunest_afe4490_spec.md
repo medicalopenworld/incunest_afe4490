@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.69
+# incunest_afe4490 — Specification v0.70
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1254,6 +1254,33 @@ writes both fields in a single SPI transaction. The chip only ever sees (old RF,
 also takes for these fields, so no torn read either. Locked in by
 `test_hgac_change_rf_recalculates_cf` (PulseNest `test_hgac.cpp`).
 
+**500 Hz post-stage2 filter pole vs. the settle window (reviewed 2026-08-21):** the `FLTRCNRSEL`
+low-pass filter (Fig. 55, between Stage 2 and the sampler; corner 500 Hz always in this library,
+`kAFE_FLTRCNRSEL`=0, §7.2) has its own settling time — `5τ = 5/(2π·500) ≈ 1.59 ms` — independent
+of RF/CF. Computed numerically across the full documented `setSampleRate()` range (63–5000 Hz):
+
+| fs (Hz) | `_compute_afe_settle_samples()` window | vs. 5τ (1.59 ms) |
+|---|---|---|
+| 63–2000 (covers the 500 Hz default and everything the ambient-margin note below already scopes as valid) | 15–61.5 ms | **10×–39× margin** |
+| ≥ ~2487 | collapses to 1 sample (≈ 0.2–0.4 ms) | **fails — see caveat below** |
+
+For every sample rate this library is actually configured at (500 Hz, the only value used in this
+project), the settle window covers the filter pole with roughly an order of magnitude to spare —
+**closes this open question, no fix needed at the rates in use.**
+
+⚠️ **Found while checking this: the settle-window calculation itself collapses above ~2487 Hz**
+(within the documented valid range of `setSampleRate()`), which is a **more severe re-statement**
+of the pre-existing "Valid for PRF ≤ ~2 kHz" caveat already on `ambient_margin` in
+`_apply_timing_regs()` (§7.2) — not a new problem, but a newly-quantified one. Above that
+threshold, `_compute_ambient_sample_window_counts()` returns 0 (the fixed 400-count ambient margin
+exceeds the available per-phase window), which (a) makes `_compute_afe_settle_samples()` hit its
+`worst_window == 0` guard and return the floor of 1 sample — far below even the raw 3 ms datasheet
+requirement it exists to satisfy, not just the filter's 5τ — and (b) at the register level,
+`_apply_timing_regs()` would write `ALEDxSTC` (=400) *after* `ALEDxENDC` (=`q−2`, <400 in this
+regime): an inverted timer-compare pair on real hardware, not just a software miscalculation.
+Not fixed here — out of scope (this library only runs at 500 Hz in this project) — tracked in
+memory (`project_high_prf_ambient_window_collapse_task`).
+
 **Settling and EMA warmup are SEQUENTIAL, not overlapped (corrected 2026-08-16 — see §14):** Gate
 G0 (below) closes off whenever `RSQM_DIAG_HW_SETTLING` is active, and while gated off it `reset()`s
 the four EMAs **every sample** (not just once at the RF change) — so `count` stays pinned at 0 for
@@ -2083,6 +2110,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.70   | **500 Hz post-stage2 filter pole vs. settle window (§5.8.4) reviewed —      |
+|         | closes the last open item from the v0.65 settling work.** Computed          |
+|         | numerically across the full `setSampleRate()` range (63–5000 Hz): at every  |
+|         | rate this library is actually used at (500 Hz default), the settle window  |
+|         | covers the filter's 5τ (1.59 ms) with 10×–39× margin. Docs only, no code    |
+|         | change for this part.                                                       |
+|         | **Found in the process (docs only, not fixed):** the settle-window          |
+|         | calculation itself collapses above ~2487 Hz (still within the documented   |
+|         | valid range of `setSampleRate()`) — a more severe, now-quantified           |
+|         | re-statement of the pre-existing "Valid for PRF ≤ ~2 kHz" caveat already on |
+|         | `ambient_margin`. Above that threshold `_compute_ambient_sample_window_counts()` |
+|         | returns 0, collapsing `_compute_afe_settle_samples()` to its 1-sample floor  |
+|         | (under even the raw 3 ms datasheet requirement) and, at the register level,  |
+|         | `_apply_timing_regs()` would write an inverted `ALEDxSTC > ALEDxENDC` pair.  |
+|         | Out of scope here (this project only runs at 500 Hz) — tracked in memory.   |
 | v0.69   | **`ppg_disp` migrated to the OT domain — the last consumer of raw           |
 |         | `led1_sub`/`led2_sub` joins the gain-invariance migration HR1/HR2/HR3/SpO2  |
 |         | already went through (§5.1/§5.2, since v0.38).** Found by Alex: `ppg_disp`  |

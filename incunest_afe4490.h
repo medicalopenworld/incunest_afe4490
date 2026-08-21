@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.69 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.70 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.69"
+#define INCUNEST_AFE4490_VERSION "0.70"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -1295,5 +1295,7 @@ public:
     void test_hgac_change_rf_led1(AFE4490RF new_rf) { _hgac_change_rf(HgacColor::IR, new_rf); }
     void test_hgac_change_rf_led2(AFE4490RF new_rf) { _hgac_change_rf(HgacColor::RED, new_rf); }
     uint32_t test_diag_code() const { return _current_data.diag_code; }
+    // Settle-window sample count (datasheet t5) at the current sample rate — see spec §5.8.4.
+    uint32_t test_compute_afe_settle_samples() const { return _compute_afe_settle_samples(); }
 #endif
 };
