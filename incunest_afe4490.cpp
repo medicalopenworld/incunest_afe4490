@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.71 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.72 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -280,9 +280,9 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _initialized(false),
       _diag_active(false),
       _diag_holdoff_samples(0),
-      _diag_last_led1(0), _diag_last_led2(0),
-      _diag_last_aled1(0), _diag_last_aled2(0),
-      _diag_last_led1_sub(0), _diag_last_led2_sub(0),
+      _last_valid_led1(0), _last_valid_led2(0),
+      _last_valid_aled1(0), _last_valid_aled2(0),
+      _last_valid_led1_sub(0), _last_valid_led2_sub(0),
       _hr2_compute_sem(nullptr), _hr3_compute_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _diag_task_handle(nullptr),
@@ -1789,18 +1789,27 @@ void INCUNEST_AFE4490::_task_body() {
             continue;
         }
 
-        if (_diag_active || _diag_holdoff_samples > 0) {
+        if (_should_freeze_input()) {
             // During diagnostics the chip produces no valid ADC data (~10 ms, ≈5 samples).
-            // During post-diagnostic holdoff the analog front-end is re-settling.
-            // In both cases: feed frozen last-valid raw values into _process_sample() so
-            // filters advance continuously. A constant input is absorbed by IIR/BPF/LP
-            // filters with near-zero AC contribution — far less disruptive than an outlier.
-            // The two states are mutually exclusive; decrement only applies to holdoff.
+            // During post-diagnostic holdoff, OR after an HGAC RF change (_rsqm_settling_countdown,
+            // RSQM_DIAG_HW_SETTLING, spec §5.8.4), the analog front-end is re-settling — same
+            // physical phenomenon, two different triggers. In all cases: feed frozen last-valid
+            // raw values into _process_sample() so filters advance continuously. A constant input
+            // is absorbed by IIR/BPF/LP filters with near-zero AC contribution — far less
+            // disruptive than a transient outlier. This is what actually enforces
+            // RSQM_DIAG_HW_SETTLING as "don't trust this window", not just a label on data that
+            // still flows through unfiltered — before this, SpO2/HR1/HR2/HR3/ppg_disp all kept
+            // processing the real (transient) values during an RF-change settling window, since
+            // none of them gate on this bit (only probe_state). Found by Alex (2026-08-21) from a
+            // visible spike in ppg_disp; SpO2/HR1-3 were silently exposed to the same transient.
+            // _rsqm_settling_countdown is decremented inside _process_sample() (_rsqm_update()),
+            // unconditionally, whether fed frozen or fresh inputs — no separate decrement needed
+            // here, unlike _diag_holdoff_samples (which only exists in this loop).
             if (_diag_holdoff_samples > 0) --_diag_holdoff_samples;
             xSemaphoreTake(_state_mutex, portMAX_DELAY);
-            _process_sample(_diag_last_led1, _diag_last_led2,
-                            _diag_last_aled1, _diag_last_aled2,
-                            _diag_last_led1_sub, _diag_last_led2_sub);
+            _process_sample(_last_valid_led1, _last_valid_led2,
+                            _last_valid_aled1, _last_valid_aled2,
+                            _last_valid_led1_sub, _last_valid_led2_sub);
             xSemaphoreGive(_state_mutex);
             continue;
         }
@@ -1830,12 +1839,12 @@ void INCUNEST_AFE4490::_task_body() {
 
         // Save raw values for use during any subsequent diagnostic holdoff.
         // Written and read exclusively from _task_body() — no mutex required.
-        _diag_last_led1       = led1;
-        _diag_last_led2       = led2;
-        _diag_last_aled1      = aled1;
-        _diag_last_aled2      = aled2;
-        _diag_last_led1_sub = led1_diff;
-        _diag_last_led2_sub = led2_diff;
+        _last_valid_led1       = led1;
+        _last_valid_led2       = led2;
+        _last_valid_aled1      = aled1;
+        _last_valid_aled2      = aled2;
+        _last_valid_led1_sub = led1_diff;
+        _last_valid_led2_sub = led2_diff;
 
         // _state_mutex: protects internal processing state (_ppgdisp_channel, filter
         // buffers, SpO2/HR accumulators) against concurrent config setter calls.

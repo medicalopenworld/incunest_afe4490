@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.71
+# incunest_afe4490 — Specification v0.72
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -303,7 +303,18 @@ Runs the AFE4490 hardware self-test sequence (datasheet section 8.4.3.3, Table 3
 5. Sets `_diag_holdoff_samples = diag_holdoff_ms × sample_rate / 1000`, then sets `_diag_active = false`. The holdoff counter is written before the flag is cleared to prevent a race where `_task_body()` could slip through with a real SPI read between the two assignments.
 
 **Post-diagnostic holdoff (`_diag_holdoff_samples > 0`):**
-After DIAG_EN is cleared the analog front-end (TIA, stage 2) needs a few PRP cycles to re-settle. During holdoff, `_task_body()` skips the SPI read and instead calls `_process_sample()` with the frozen last-valid raw ADC values (`_diag_last_led1/2`, `_diag_last_aled1/2`, `_diag_last_led1/2_aled1/2`). A constant input is absorbed by all IIR/BPF/LP filters with near-zero AC contribution, making it far less disruptive to HR1/HR2/HR3/SpO2 than a transient outlier. The raw values are saved on every normal `_task_body()` cycle and are only accessed from that same task — no mutex is needed.
+After DIAG_EN is cleared the analog front-end (TIA, stage 2) needs a few PRP cycles to re-settle. During holdoff, `_task_body()` skips the SPI read and instead calls `_process_sample()` with the frozen last-valid raw ADC values (`_last_valid_led1/2`, `_last_valid_aled1/2`, `_last_valid_led1/2_sub`). A constant input is absorbed by all IIR/BPF/LP filters with near-zero AC contribution, making it far less disruptive to HR1/HR2/HR3/SpO2 than a transient outlier. The raw values are saved on every normal `_task_body()` cycle and are only accessed from that same task — no mutex is needed.
+
+**Same mechanism now also covers HGAC RF-change settling (v0.72, found by Alex from a visible
+spike in `ppg_disp`):** `_task_body()`'s freeze condition is `_diag_active || _diag_holdoff_samples
+> 0 || _rsqm_settling_countdown > 0` — the third term reuses the identical frozen-input path for
+the settling window that opens after `_hgac_change_rf()` (§5.8.4), the "same physical phenomenon,
+two different triggers" as the diagnostic holdoff. Before this, `RSQM_DIAG_HW_SETTLING` was a label
+with no enforcement: it was set in `diag_code`, but nothing actually stopped SpO2/HR1/HR2/HR3/
+`ppg_disp` from processing the real (transient, not-yet-settled) values during that window — only
+HGAC's own Gate G0 checked the bit, to pause its own actuation. `_rsqm_settling_countdown` is
+decremented inside `_process_sample()` (`_rsqm_update()`) unconditionally, whether fed frozen or
+fresh inputs, so no extra bookkeeping was needed in `_task_body()` beyond the OR term itself.
 
 **`_diag_active` flag — design rationale:**
 `_task_body()` writes `CONTROL0=0` after every ADC burst read. Without the flag, it would clear DIAG_EN mid-sequence and abort the diagnostic. The flag avoids holding `_spi_mutex` for the full 10 ms sleep (which is bad FreeRTOS practice and causes priority inversion). Instead, `_task_body()` checks `_diag_active` after `xSemaphoreTake(_drdy_sem)` and, when set, repeats the last valid `_current_data` into the queue (under `_state_mutex`) before looping. Repeating the last sample rather than dropping it preserves temporal equi-spacing for the autocorrelation (HR2) and FFT (HR3) algorithms and reduces IIR filter discontinuity at resumption. The chip physically cannot produce valid ADC data during diagnostics; the ~10 ms window (≈5 samples at 500 Hz) is unavoidable but transparent to the consumer.
@@ -430,7 +441,9 @@ constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 
 // Bit 14 = RSQM_DIAG_AMBIENT_HIGH (HGAC ambient alarm, v0.59; previously SIGNAL_WEAK, removed v0.56).
 constexpr uint32_t RSQM_DIAG_AMB_SAT      = 0x00002000UL;  // bit 13 — ambient channel near positive rail
 constexpr uint32_t RSQM_DIAG_AMBIENT_HIGH = 0x00004000UL;  // bit 14 — ambient saturates at RF floor (HGAC)
-constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change
+constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change.
+// v0.72: enforced, not just labelled — _task_body() freezes inputs (last-valid raw values) for
+// the whole window this bit is set, same mechanism as the diagnostic holdoff (§2.6b/§5.6.3).
 // bits 16–31 reserved
 ```
 
@@ -1129,7 +1142,7 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 |---|---|---|
 | 0x2000 | `RSQM_DIAG_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `adc::SAT_POS` = 2 096 700) |
 | 0x4000 | `RSQM_DIAG_AMBIENT_HIGH` | HGAC alarm: RF at the floor (`RF_10K`) AND the ambient (ALED) EMA ≥ HIGH2 on either domain → ambient light alone saturates ("TOO MUCH AMBIENT LIGHT"). Preventive (EMA @ HIGH2), distinct from `AMB_SAT`'s per-sample hard rail. (Was `SIGNAL_WEAK` until v0.56.) |
-| 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`) |
+| 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`). **Enforced since v0.72**: while set, `_task_body()` feeds frozen last-valid raw values instead of the real transient ones (§2.6b) — not just a label on data that still flows through. |
 
 HGAC publishes no DiagCode bit (the former bit 16 `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — no consumer decoded it; the "at RF floor and still saturating" condition is derivable at the point of use as `rf == RF_10K` while TIAGUARD persists, and its actuator, ILED, is Phase 4).
 
@@ -2138,6 +2151,24 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.72   | **`RSQM_DIAG_HW_SETTLING` is now enforced, not just labelled** (found by    |
+|         | Alex from a visible spike in `ppg_disp` whenever HGAC changes RF).         |
+|         | `_task_body()`'s freeze condition — `_diag_active \|\| _diag_holdoff_samples`|
+|         | `> 0 \|\| _rsqm_settling_countdown > 0` — now also covers the settling window |
+|         | opened by `_hgac_change_rf()` (§5.8.4), reusing the exact same frozen-      |
+|         | last-valid-input mechanism already used for the post-diagnostic holdoff:   |
+|         | "same physical phenomenon (analog front-end re-settling), two different    |
+|         | triggers." Before this, the bit was set in `diag_code` but nothing         |
+|         | actually stopped SpO2/HR1/HR2/HR3/`ppg_disp` from processing the real      |
+|         | (transient) values during that window — only HGAC's own Gate G0 checked    |
+|         | it, to pause its own actuation. `_rsqm_settling_countdown` is decremented   |
+|         | inside `_process_sample()` (`_rsqm_update()`) unconditionally, whether fed  |
+|         | frozen or fresh inputs, so no extra bookkeeping was needed beyond the OR    |
+|         | term. Renamed `_diag_last_*` → `_last_valid_*` (no longer diagnostics-      |
+|         | specific) across `.h`/`.cpp`. Fixes `ppg_disp`'s visible spike AND a        |
+|         | latent, previously-unreported issue: SpO2/HR1/HR2/HR3 were silently        |
+|         | exposed to the same RF-change transient. Verified: `pio test -e native`;   |
+|         | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
 | v0.71   | **Docs only: plausible physical derivation of `tia_axis::LIN_V` = 1.8 V**   |
 |         | (§3c), previously purely empirical (`tia_linearity_sweep.py`, no theory     |
 |         | recorded). Alex connected two independently-documented datasheet facts      |

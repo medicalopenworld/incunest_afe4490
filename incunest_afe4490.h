@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.71 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.72 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.71"
+#define INCUNEST_AFE4490_VERSION "0.72"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -111,7 +111,9 @@ constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 
 //   from AMB_SAT's per-sample hard rail. (Bit 14 previously held SIGNAL_WEAK, removed v0.56.)
 constexpr uint32_t RSQM_DIAG_AMB_SAT      = 0x00002000UL;  // bit 13 — ambient channel near positive rail
 constexpr uint32_t RSQM_DIAG_AMBIENT_HIGH = 0x00004000UL;  // bit 14 — ambient saturates at RF floor (HGAC alarm)
-constexpr uint32_t RSQM_DIAG_HW_SETTLING  = 0x00008000UL;  // bit 15 — hardware settling after config change
+constexpr uint32_t RSQM_DIAG_HW_SETTLING  = 0x00008000UL;  // bit 15 — hardware settling after config change.
+// v0.72: enforced, not just labelled — _task_body() freezes inputs (last-valid raw values) for
+// the whole window this bit is set, same mechanism as the diagnostic holdoff (§5.6.3).
 
 // ── Public data struct ────────────────────────────────────────────────────────
 struct AFE4490Data {
@@ -960,6 +962,14 @@ private:
     uint32_t _build_tia_amb_gain_led2();   // TIA_AMB_GAIN register value (LED2 fields + AMBDAC)
 #endif
 
+    // True while the analog front-end is known to be re-settling (diagnostics or an HGAC RF
+    // change, §5.6.3/§5.8.4) — _task_body() freezes its input (feeds _last_valid_* instead of a
+    // real SPI read) for as long as this holds. Not gated by INCUNEST_OFFLINE — it's pure member
+    // reads, no SPI — so the condition itself is unit-testable without a running task.
+    bool _should_freeze_input() const {
+        return _diag_active || _diag_holdoff_samples > 0 || _rsqm_settling_countdown > 0;
+    }
+
     // FreeRTOS task
 #ifndef INCUNEST_OFFLINE
     static void _task_trampoline(void* pv);
@@ -1058,9 +1068,14 @@ private:
     uint32_t          _diag_code         { 0 };  // combined diag state: bits 0-12 = AFE DIAG reg, bits 13+ = RSQM flags
     volatile bool     _diag_active;          // true while runAfeDiagnostics() holds DIAG_EN; _task_body() skips reads
     volatile uint32_t _diag_holdoff_samples; // countdown after diagnostics end; _task_body() feeds frozen raw input
-    int32_t _diag_last_led1, _diag_last_led2;          // last valid raw ADC values, saved on every normal cycle
-    int32_t _diag_last_aled1, _diag_last_aled2;
-    int32_t _diag_last_led1_sub, _diag_last_led2_sub;
+    // Last valid raw ADC values, saved on every normal (non-frozen) cycle. Fed back into
+    // _process_sample() by _task_body() whenever the analog front-end is known to be
+    // re-settling — after runAfeDiagnostics() (_diag_holdoff_samples) or after an HGAC RF
+    // change (_rsqm_settling_countdown, RSQM_DIAG_HW_SETTLING) — instead of the real transient
+    // values, so SpO2/HR1/HR2/HR3/ppg_disp absorb a constant input rather than an outlier.
+    int32_t _last_valid_led1, _last_valid_led2;
+    int32_t _last_valid_aled1, _last_valid_aled2;
+    int32_t _last_valid_led1_sub, _last_valid_led2_sub;
 
     // ── HR2/HR3 async computation tasks ──────────────────────────────────────
     // Task A (_task_body) runs the fast per-sample path and signals Task B/C when
@@ -1297,5 +1312,7 @@ public:
     uint32_t test_diag_code() const { return _current_data.diag_code; }
     // Settle-window sample count (datasheet t5) at the current sample rate — see spec §5.8.4.
     uint32_t test_compute_afe_settle_samples() const { return _compute_afe_settle_samples(); }
+    // Whether _task_body() would freeze its input this cycle (§5.6.3/§5.8.4) — see v0.72.
+    bool test_should_freeze_input() const { return _should_freeze_input(); }
 #endif
 };
