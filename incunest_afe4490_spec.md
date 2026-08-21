@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.70
+# incunest_afe4490 — Specification v0.71
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -619,6 +619,34 @@ struct AFE4490AnalogState {
 **Invalidity policy (value-always, v0.35):** every field is always computed from the raw codes — no NaN, no sentinels. The validity masks tell the consumer whether each value is a *measurement* (`CH_VALID_RANGE`), a probably-correct value outside TI guarantee (`CH_EXTENDED_RANGE`, empirically linear band 1.0–1.8 V diff), or a *bound* (`CH_CLIPPED_RANGE`: ADC sat pos → real ≥ stored; sat neg → real ≤ stored; TIA over lin → TIA compresses). Rationale: an OFF_SPEC value is still the best estimate; a clipped value is an actionable bound for HGAC; and traces remain plottable. Consumers must use the helpers, never the raw masks — packing is per-stage today (option A) but may become per-channel (option B).
 
 **Thresholds — single source of truth (`namespace tia_axis` for v_tia, `namespace adc` for ADC; v0.48, aliases removed v0.51, ADC constants consolidated into `adc`):** the four ordered `v_tia` thresholds live once in `tia_axis` — `IDEAL_V` 0.6 / `GUARD_V` 0.9 / `FS_V` 1.0 / `LIN_V` 1.8 — with a `static_assert` enforcing strict ascending order, including `adc::FSR` (1.2 V, the ADC full-scale mapped onto the v_tia axis at unity gain) between `FS_V` and `LIN_V`. All consumers reference `tia_axis::` / `adc::` directly (no per-struct aliases): the `tia_over_fs`/`tia_over_lin` masks compare against `tia_axis::FS_V`/`LIN_V`, the `adc_sat_pos`/`adc_sat_neg` masks against `adc::SAT_POS`/`SAT_NEG`, and HGAC policy (`hgac_v_tia_thr`/`hgac_v_tia_ideal`, runtime-tunable `AFE4490Config` fields) takes its defaults from `tia_axis`, with `setHgacVTiaThr()` clamping to ≤ `FS_V`. The ADC full-scale (`adc::FSR`) is nominal — the operative saturation flag is `adc::SAT_POS`, an empirical rail in adc_code (`POS_RAIL_ACTUAL − SAT_GUARD`), not derived from the voltage axis.
+
+**Plausible physical derivation of `LIN_V` = 1.8 V (Alex, 2026-08-21) — previously purely empirical.**
+`LIN_V` was found on the bench (`tia_linearity_sweep.py`, 2026-07-08: linear to ~1.8 V diff, hard
+clip ~1.94 V diff) with no theoretical basis recorded anywhere in this spec. Two datasheet facts,
+each independently documented but never connected before, predict it:
+
+1. **§8.3.4 (Fig. 65, "Receiver Subsystem Power Routing"):** `RX_ANA_SUP` is regulated internally
+   to **1.8 V** before feeding the receive analog blocks (TIA, Stage 2, ambient DAC, filter) — the
+   real analog rail for this whole chain is 1.8 V, not the external supply (2.0–3.6 V).
+2. **§8.3.1.1 + Electrical Characteristics (p.11):** the TIA's common-mode is **0.9 V, "set
+   internally"** — exactly half of that 1.8 V rail, the natural bias point for a fully-differential
+   stage to maximise symmetric headroom. §8.3.1.1 states the ambient DAC's purpose is precisely to
+   *recentre* the DC-biased signal to this ±0.9 V mid-point — i.e. common-mode positioning doesn't
+   appear in the differential reading directly, but it sets how much room is left before either
+   single-ended node hits its own rail.
+
+For a symmetric fully-differential output biased at 0.9 V on a 0–1.8 V rail, the two single-ended
+nodes move in opposite directions from that centre; the differential swing reaches its maximum
+exactly when one node hits 1.8 V while the other hits 0 V — a differential of **1.8 − 0 = 1.8 V**.
+That matches `LIN_V` exactly. The TI-*guaranteed* `FS_V` = 1.0 V (`V_OD(fs)`, p.11) sits well inside
+this 1.8 V rail-limited maximum, consistent with TI specifying guaranteed performance with
+guardband below the physical ceiling. The small gap between this 1.8 V prediction and the
+*measured* hard clip (~1.94 V) is expected, not a contradiction: real output stages rarely
+saturate at the exact rail (dropout in the output transistors, regulator tolerance), so a little
+headroom past the theoretical 1.8 V before true hard clipping is normal.
+
+Not verified against a schematic or TI application engineer — recorded as the most plausible
+explanation found for a number that was, until now, unexplained.
 
 **`CH_EXTENDED_RANGE` observability is ADC-gated (not the full (1.0, 1.8] band):** `tia_axis::FS_V` (1.0 V) and `tia_axis::LIN_V` (1.8 V) are *TIA* properties — the silicon's extended-linearity band — independent of the downstream chain. What is actually *observable* as `CH_EXTENDED_RANGE` depends on Stage 2 gain and AMBDAC, because `chState()` gives `adcSat` precedence (`CLIPPED > OFF_SPEC`) and the ADC full-scale is only ±1.2 V:
 
@@ -2110,6 +2138,19 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.71   | **Docs only: plausible physical derivation of `tia_axis::LIN_V` = 1.8 V**   |
+|         | (§3c), previously purely empirical (`tia_linearity_sweep.py`, no theory     |
+|         | recorded). Alex connected two independently-documented datasheet facts      |
+|         | never linked before: §8.3.4 regulates the receive analog rail to 1.8 V      |
+|         | internally, and §8.3.1.1's ambient-DAC common-mode (0.9 V, "set             |
+|         | internally", p.11) is exactly half of it. A symmetric fully-differential    |
+|         | output centred at 0.9 V on a 0–1.8 V rail reaches its maximum differential  |
+|         | swing (one node at 1.8 V, the other at 0 V) at exactly 1.8 V — matching     |
+|         | `LIN_V` exactly, with `FS_V` (1.0 V, TI-guaranteed) sitting inside it as    |
+|         | guardband, and the measured hard clip (~1.94 V) slightly past it as         |
+|         | expected real-silicon headroom, not a contradiction. Not verified against a |
+|         | schematic — recorded as the most plausible explanation found, not a         |
+|         | certainty. No code change.                                                  |
 | v0.70   | **500 Hz post-stage2 filter pole vs. settle window (§5.8.4) reviewed —      |
 |         | closes the last open item from the v0.65 settling work.** Computed          |
 |         | numerically across the full `setSampleRate()` range (63–5000 Hz): at every  |

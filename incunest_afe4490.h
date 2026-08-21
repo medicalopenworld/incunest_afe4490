@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.70 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.71 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.70"
+#define INCUNEST_AFE4490_VERSION "0.71"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
