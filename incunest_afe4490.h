@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.76 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.77 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.76"
+#define INCUNEST_AFE4490_VERSION "0.77"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -952,9 +952,10 @@ private:
     // so one figure covers either color domain) — see spec §5.8.4/§7.2.
     uint32_t _compute_switched_rc_settling_samples() const;
     // Arms _switched_rc_settling_countdown (RSQM_DIAG_SWITCHED_RC_SETTLING) after ANY signal-chain
-    // change — called from setTIAGain()/setTIAGainLED1/2(), setLED1/2Current(), setAmbDac(), and
-    // setStage2Gain()/setStage2GainLED1/2() (a manual $SET included) as well as from _hgac_change_rf(),
-    // so a manual RF change gets the same input-freeze protection (§2.6b/§5.8.4) as an HGAC one.
+    // change — called from setTIAGain()/setTIAGainLED1/2(), setLED1/2Current(), setAmbDac(),
+    // setStage2Gain()/setStage2GainLED1/2(), and setStage2En1/2() (a manual $SET included) as well
+    // as from _hgac_change_rf(), so a manual change gets the same input-freeze protection
+    // (§2.6b/§5.8.4) as an HGAC one.
     void _arm_switched_rc_settling() { _switched_rc_settling_countdown = _compute_switched_rc_settling_samples(); }
     // Selects the largest CF code (of the 32) that settles within _compute_led_on_to_sample_margin_counts() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.

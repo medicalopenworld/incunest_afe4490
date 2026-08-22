@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.76
+# incunest_afe4490 — Specification v0.77
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1304,14 +1304,17 @@ up through v0.75. `setLED1Current()`/`setLED2Current()`, `setAmbDac()`, and
 `setStage2Gain()`/`setStage2GainLED1/2()` now call `_arm_switched_rc_settling()` themselves too
 (same no-op guard as RF: re-applying the same value doesn't re-arm). AMBDAC and RG (Stage 2) sit
 in the identical feedback path as RF (Eq. 2, §3c) — a step in either produces the same kind of
-front-end transient. `setTIACF*()` and `setStage2En1/2()` are **not** included: CF only shapes
-transient response, not the DC operating point (Eq. 2 has no CF term — the steady-state output
-depends on `I_PD`, `RF`, `I_CANCEL`, `RG`, none of which CF touches), so a CF-only change doesn't
-step the DC level the way RF/ILED/AMBDAC/RG do; `setStage2En1/2()` (bypassing Stage 2 entirely,
-which *does* step the effective gain between unity and `RG`) was noticed but left for a follow-up
-decision rather than folded in silently. `setLEDRange()` (which shifts `TX_REF`) is a different, much longer (~1 s) settling window
-(§7.7 t6 footnote (2)) that this mechanism does not cover at all — see the settling catalog memory
-for that still-open item.
+front-end transient. `setTIACF*()` is **not** included: CF only shapes transient response, not the
+DC operating point (Eq. 2 has no CF term — the steady-state output depends on `I_PD`, `RF`,
+`I_CANCEL`, `RG`, none of which CF touches), so a CF-only change doesn't step the DC level the way
+RF/ILED/AMBDAC/RG do. `setLEDRange()` (which shifts `TX_REF`) is a different, much longer (~1 s)
+settling window (§7.7 t6 footnote (2)) that this mechanism does not cover at all — see the
+settling catalog memory for that still-open item.
+
+**`setStage2En1/2()` included too (v0.77, Alex).** Bypassing Stage 2 (`STAGE2EN=0` → unity gain)
+vs. enabling it (`STAGE2EN=1` → gain `RG`) steps the effective gain exactly like `setStage2Gain()`
+itself does — noticed in v0.76 and deliberately left for a follow-up decision rather than folded
+in silently; now wired up the same way (guard: toggling to the *same* enable state is a no-op).
 
 Arms `_switched_rc_settling_countdown` via `_compute_switched_rc_settling_samples()` — the producer of
 `RSQM_DIAG_SWITCHED_RC_SETTLING` (§5.6.3).
@@ -2227,6 +2230,15 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.77   | **`setStage2En1()`/`setStage2En2()` also arm switched-RC settling (§5.8.4)  |
+|         | — the follow-up decision left open in v0.76.** Bypassing Stage 2            |
+|         | (`STAGE2EN=0` → unity gain) vs. enabling it (`STAGE2EN=1` → gain `RG`)      |
+|         | steps the effective gain exactly like `setStage2Gain()` itself, so the same |
+|         | protection applies (same no-op guard: toggling to the current enable state  |
+|         | doesn't re-arm). New tests `test_stage2_en_toggle_arms_settling`,           |
+|         | `test_setting_same_stage2_en_does_not_rearm_settling` (PulseNest            |
+|         | `test_hgac.cpp`). Verified: `pio test -e native`; ESP32-S3 build            |
+|         | (`incunest_V16`) SUCCESS.                                                    |
 | v0.76   | **Switched-RC settling extended to ILED, AMBDAC, and RG — not just RF       |
 |         | (§5.8.4).** Datasheet §7.7 t5 footnote (1) names "LED current setting, TIA  |
 |         | gain, and so forth" as triggers — RF was the only one wired up through      |

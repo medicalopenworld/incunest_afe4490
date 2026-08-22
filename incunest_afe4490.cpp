@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.76 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.77 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -702,7 +702,10 @@ void INCUNEST_AFE4490::setStage2En1(bool en) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (en != _afe_stg2_en_led1);
     _afe_stg2_en_led1 = en;
+    // Bypassing Stage 2 steps the effective gain between unity and RG, same as setStage2Gain().
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -715,7 +718,10 @@ void INCUNEST_AFE4490::setStage2En2(bool en) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (en != _afe_stg2_en_led2);
     _afe_stg2_en_led2 = en;
+    // Bypassing Stage 2 steps the effective gain between unity and RG, same as setStage2Gain().
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
