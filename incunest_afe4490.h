@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.79 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.80 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.79"
+#define INCUNEST_AFE4490_VERSION "0.80"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -956,6 +956,18 @@ private:
     // setStage2Gain()/setStage2GainLED1/2(), and setStage2En1/2() (a manual $SET included) as well
     // as from _hgac_change_rf(), so a manual change gets the same input-freeze protection
     // (§2.6b/§5.8.4) as an HGAC one.
+    // CONTRACT (v0.80): every caller above MUST call this BEFORE mutating its own circuit-parameter
+    // member (e.g. _afe_tia_rf_led1) — never after. A manual setter runs on Cmd_Task, a different
+    // FreeRTOS task from _process_sample()'s; arming first guarantees that by the time the new
+    // parameter value becomes visible to _process_sample(), the countdown is already non-zero, so
+    // _should_freeze_input() can only ever see "old parameter, not yet armed" or "new parameter,
+    // already armed" — never "new parameter, not yet armed", which is what let a fresh
+    // _compute_analog_state() combine a stale raw ADC code with the already-new parameter and
+    // latch the wrong value into _last_valid_analog_state for the whole settling window (found by
+    // Alex, 2026-08-22, from a $SET-triggered RF change; the HGAC path was never affected, since it
+    // mutates and arms sequentially within the same _process_sample() call, under _state_mutex).
+    // Safe regardless of order for the countdown VALUE itself: _compute_switched_rc_settling_samples()
+    // depends only on _afe_sample_rate_hz, never on the parameter being changed. See spec §5.8.4.
     void _arm_switched_rc_settling() { _switched_rc_settling_countdown = _compute_switched_rc_settling_samples(); }
     // Selects the largest CF code (of the 32) that settles within _compute_led_on_to_sample_margin_counts() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
@@ -1260,8 +1272,12 @@ private:
     // _arm_switched_rc_settling(), callable both from _task_body()'s own thread (via _hgac_change_rf()) and
     // from ANY other task calling setTIAGain*() directly (e.g. Cmd_Task on a manual $SET) — and
     // read/decremented in _process_sample() (_task_body()'s thread). A plain word store/decrement
-    // race here is benign (worst case +-1 sample of settle duration, never a corrupted state),
-    // matching the existing _diag_holdoff_samples pattern — no mutex needed. See spec §5.8.4.
+    // race on THIS counter is benign (worst case +-1 sample of settle duration, never a corrupted
+    // state), matching the existing _diag_holdoff_samples pattern — no mutex needed. That benignity
+    // depends on _arm_switched_rc_settling() always running BEFORE its caller mutates the circuit
+    // parameter (v0.80 — see the CONTRACT note on _arm_switched_rc_settling() above); reversed, the
+    // same cross-thread race would corrupt _last_valid_analog_state itself, not just the countdown.
+    // See spec §5.8.4.
     volatile uint32_t _switched_rc_settling_countdown;
 
     // ── HGAC state (RF-only, two EMA per gain domain) ────────────────────────

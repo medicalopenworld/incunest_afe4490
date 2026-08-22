@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.79
+# incunest_afe4490 — Specification v0.80
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1348,6 +1348,40 @@ shift it.
 Arms `_switched_rc_settling_countdown` via `_compute_switched_rc_settling_samples()` — the producer of
 `RSQM_DIAG_SWITCHED_RC_SETTLING` (§5.6.3).
 
+**Second bug found and fixed (v0.80, Alex, suspected from a real capture "a veces parece que
+FW_OT_LED1 se congela con la RF nueva"): a cross-thread race, distinct from the v0.79 bug above.**
+v0.79 fixed *recomputation* while frozen (reusing `_last_valid_analog_state` verbatim). It did not
+cover how that snapshot gets *saved* in the first place. Every setter that arms the settling window
+(`setTIAGainLED1/2()`, `setLED1/2Current()`, `setAmbDac()`, `setStage2Gain()`/`setStage2GainLED1/2()`,
+`setStage2En1/2()`) ran, until v0.80: mutate the live circuit-parameter member, *then* call
+`_arm_switched_rc_settling()`. That two-step sequence is protected only by `_spi_mutex` — never
+`_state_mutex`, the lock `_process_sample()` runs under. A manual `$SET` reaches these setters from
+`Cmd_Task`, a FreeRTOS task distinct from `_task_body()`'s. If `_task_body()`'s thread executes
+`_process_sample()` in the gap between the parameter write and the arm call, `_should_freeze_input()`
+still sees the countdown at 0 → takes the "compute fresh" branch → combines the *old* raw ADC code
+(read moments earlier, still under the old analog state) with the circuit parameter, which is
+*already new* → produces exactly the same kind of wrongly-scaled `AFE4490AnalogState` the v0.79 fix
+eliminated for the *recompute-while-frozen* case — except here it gets written straight into
+`_last_valid_analog_state` as the "good" value, and *that* is what the settling window then holds
+constant for its whole duration. The HGAC-driven path was never exposed: `_hgac_change_rf()` mutates
+and arms sequentially inside the very `_process_sample()` call that also computes/saves `as`, all
+under `_state_mutex`, on a single thread — no second thread can interleave.
+
+**Fix: reorder to arm-before-mutate in all six setters above.** Verified safe: the countdown's
+*value* doesn't depend on which parameter changed (`_compute_switched_rc_settling_samples()` reads
+only `_afe_sample_rate_hz`, confirmed in its own comment), only on *whether* it changed and *when*
+it's armed relative to the mutation. With arm-first, `_should_freeze_input()` can only ever observe
+"old parameter + not yet armed" or "new parameter + already armed" — the unsafe combination ("new
+parameter + not yet armed") can no longer occur, because arming strictly precedes the write on every
+code path, cross-thread or not. No new locks, no lock-order/deadlock risk (the alternative — taking
+`_state_mutex` inside the setters — was rejected: `_hgac_change_rf()` already nests a setter call
+under a caller-held `_state_mutex`, and `Cmd_Task` independently taking `_spi_mutex` then
+`_state_mutex` would invert that order → real deadlock). See
+`test_should_freeze_input`/`test_analog_state_stays_flat_during_settle_window` (PulseNest
+`test_hgac.cpp`) for the existing single-thread coverage; the cross-thread race itself is not
+exercised by the native test suite (single-threaded), so this fix relies on the ordering argument
+above, not on a new failing-then-passing test.
+
 **Settling window (v0.65): datasheet §7.7 t5, replacing the untraceable `afe_settle_time_s`.**
 The datasheet's own row for "time between an SPI command and valid data" (§7.7, p.17) requires
 **> 3 ms of cumulative sampling time in each [of the four switched-RC] phase[s]**, and footnote (1)
@@ -2259,6 +2293,32 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.80   | **Bug fix: cross-thread race let a manual `$SET` gain/current/AMBDAC       |
+|         | change get combined with a stale raw ADC code before the settling window    |
+|         | was even armed (§5.8.4).** Distinct from v0.79: that fix covered            |
+|         | *recomputing* while already frozen; this one covers how the frozen snapshot |
+|         | gets *saved* in the first place. The six arming setters mutated their live  |
+|         | circuit-parameter member, *then* called `_arm_switched_rc_settling()` —     |
+|         | protected only by `_spi_mutex`, never `_state_mutex` (`_process_sample()`'s |
+|         | lock). A manual `$SET` runs on `Cmd_Task`, a different FreeRTOS task; if    |
+|         | `_task_body()` ran `_process_sample()` in the mutate→arm gap, it saw the    |
+|         | countdown still at 0, recomputed fresh, and combined an old raw code with   |
+|         | the already-new parameter — latching the wrong value into                  |
+|         | `_last_valid_analog_state` for the whole settling window. HGAC was never    |
+|         | exposed (mutates+arms sequentially, single-threaded, under `_state_mutex`). |
+|         | Suspected by Alex from a real capture ("a veces FW_OT_LED1 parece congelado |
+|         | con la RF nueva"). Fix: reorder to arm-before-mutate in all six setters     |
+|         | (`setTIAGainLED1/2`, `setLED1/2Current`, `setAmbDac`,                       |
+|         | `setStage2Gain`/`setStage2GainLED1/2`, `setStage2En1/2`) — safe because the |
+|         | countdown value depends only on `_afe_sample_rate_hz`, never on which       |
+|         | parameter changed. No new locks (rejected taking `_state_mutex` in the      |
+|         | setters: `_hgac_change_rf()` already nests a setter call under a           |
+|         | caller-held `_state_mutex`, so `Cmd_Task` acquiring `_spi_mutex` then       |
+|         | `_state_mutex` would invert the lock order → deadlock). Not covered by a    |
+|         | new automated test — the native suite is single-threaded and can't          |
+|         | reproduce cross-thread interleaving; the fix rests on the ordering argument |
+|         | above. Verified: `pio test -e native` 63/64 (unrelated pre-existing         |
+|         | `test_biquad` failure untouched); ESP32-S3 build (`incunest_V16`) SUCCESS.  |
 | v0.79   | **Bug fix: freezing raw ADC codes during switched-RC settling wasn't        |
 |         | enough — `_compute_analog_state()` still combined them with LIVE (already   |
 |         | changed) circuit parameters, producing a stepped `OT` instead of a flat one |
