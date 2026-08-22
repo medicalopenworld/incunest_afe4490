@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.73
+# incunest_afe4490 — Specification v0.74
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1260,10 +1260,34 @@ mirror without it).
 #### 5.8.4 Reset on RF change (`_hgac_change_rf`) — no rescale
 
 A gain change scales `v_tia` by `k = RF_new/RF_old`, making prior measurements meaningless, so
-`_hgac_change_rf()` **resets** the domain's two EMAs (rather than rescaling them analytically) and
-arms `_rsqm_settling_countdown` via `_compute_afe_settle_samples()` — the producer of
-`RSQM_DIAG_HW_SETTLING` (§5.6.3). SpO2's own EMAs are **not** touched: SpO2 consumes gain-invariant
-OT (§5.1), so an RF change is not a discontinuity in its input.
+`_hgac_change_rf()` **resets** the domain's two EMAs (rather than rescaling them analytically).
+SpO2's own EMAs are **not** touched: SpO2 consumes gain-invariant OT (§5.1), so an RF change is not
+a discontinuity in its input.
+
+**Settling is armed by the setter itself, not by the caller (v0.74) — a manual RF change is
+protected exactly like an HGAC one.** Reviewed 2026-08-22 (Alex): `_rsqm_settling_countdown` used
+to be armed only inside `_hgac_change_rf()`, so calling `setTIAGainLED1/2()`/`setTIAGain()`
+directly — e.g. a manual `$SET,tiagain1,...` from the host — changed RF without arming
+`RSQM_DIAG_HW_SETTLING` at all: the same physical front-end transient occurred, with **no**
+input-freeze protection (§2.6b). `_arm_settling()` now lives inside `setTIAGain()`/
+`setTIAGainLED1/2()` themselves (guarded so re-applying the *same* value is a no-op, matching
+`_hgac_change_rf()`'s own `new_rf == old_rf` early return) — `_hgac_change_rf()` gets it "for
+free" through the setter call it already makes, so its own separate arm was removed.
+
+**Why `_rsqm_settling_countdown` is `volatile` (no mutex):** with the arm moved into the public
+setters, it can now be written from a *different* thread than the one that reads/decrements it —
+e.g. `Cmd_Task` processing a manual `$SET` (PulseNest `main.cpp`) races against `_task_body()`'s
+own thread, which reads it in `_should_freeze_input()` and decrements it inside `_process_sample()`
+(`_rsqm_update()`). A full mutex was considered and rejected: both sides only ever perform a plain
+32-bit store or decrement, never a cross-thread read-modify-write, so the worst-case race outcome
+is benign — at most ±1 sample of settle duration (a decrement overwritten by a fresh arm, or an
+arm racing an in-flight decrement), never a corrupted or out-of-range value. `volatile` is enough
+to prevent the compiler from caching a stale value across the loop iteration boundary — the same
+pattern already used for `_diag_active`/`_diag_holdoff_samples` (§2.6b) for the identical reason
+(`runAfeDiagnostics()` is likewise callable from a different task than `_task_body()`).
+
+Arms `_rsqm_settling_countdown` via `_compute_afe_settle_samples()` — the producer of
+`RSQM_DIAG_HW_SETTLING` (§5.6.3).
 
 **Settling window (v0.65): datasheet §7.7 t5, replacing the untraceable `afe_settle_time_s`.**
 The datasheet's own row for "time between an SPI command and valid data" (§7.7, p.17) requires
@@ -2176,6 +2200,25 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.74   | **A manual RF change now arms the settle window too, not just an HGAC one   |
+|         | (§5.8.4).** Found by Alex: `_rsqm_settling_countdown` was only armed inside |
+|         | `_hgac_change_rf()` — calling `setTIAGainLED1/2()`/`setTIAGain()` directly  |
+|         | (e.g. a manual `$SET,tiagain1,...` from the host) changed RF with zero      |
+|         | input-freeze protection (v0.72), even though the same physical transient   |
+|         | occurs regardless of who initiated the change. New `_arm_settling()`        |
+|         | (guarded: re-applying the same value is a no-op) is now called from the     |
+|         | three public setters; `_hgac_change_rf()`'s own separate arm removed (gets  |
+|         | it for free through the setter it already calls).                          |
+|         | **`_rsqm_settling_countdown` is now `volatile`** — with the arm reachable   |
+|         | from any caller, it can be written from a different thread (e.g. `Cmd_Task` |
+|         | on a manual `$SET`) than the one that reads/decrements it (`_task_body()`). |
+|         | No mutex: both sides only ever do a plain 32-bit store or decrement, never  |
+|         | a cross-thread read-modify-write, so the worst-case race is benign (±1     |
+|         | sample of settle duration) — same reasoning already applied to             |
+|         | `_diag_active`/`_diag_holdoff_samples`.                                     |
+|         | New tests `test_manual_rf_change_also_arms_settling` and                   |
+|         | `test_setting_same_gain_does_not_rearm_settling` (PulseNest `test_hgac.cpp`). |
+|         | Verified: `pio test -e native`; ESP32-S3 build (`incunest_V16`) SUCCESS.    |
 | v0.73   | **Docs only: `tia_settle_min` PRF dependence reviewed (§7.2).** Confirmed   |
 |         | it does NOT scale with PRF (flat `constexpr`, always 12.5 µs regardless of  |
 |         | `_afe_sample_rate_hz`) — and that this is almost certainly the right shape, |

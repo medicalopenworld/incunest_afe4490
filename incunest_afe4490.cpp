@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.73 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.74 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -547,9 +547,11 @@ void INCUNEST_AFE4490::setTIAGain(AFE4490RF gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (gain != _afe_tia_rf_led1) || (gain != _afe_tia_rf_led2);
     _afe_tia_rf_led1 = _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
+    if (changed) _arm_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -603,8 +605,10 @@ void INCUNEST_AFE4490::setTIAGainLED1(AFE4490RF gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (gain != _afe_tia_rf_led1);
     _afe_tia_rf_led1 = gain;
     _recalc_afe_tia_cf_led1();
+    if (changed) _arm_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -644,8 +648,10 @@ void INCUNEST_AFE4490::setTIAGainLED2(AFE4490RF gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (gain != _afe_tia_rf_led2);
     _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led2();
+    if (changed) _arm_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -1344,10 +1350,8 @@ void INCUNEST_AFE4490::_hgac_change_rf(HgacColor color, AFE4490RF new_rf) {
         _hgac_ema_slow_led2.reset();
         _hgac_ema_ambient_led2.reset();
     }
-    // Arm HW_SETTLING for the analog front-end to re-settle after the gain step — first real
-    // producer of RSQM_DIAG_HW_SETTLING (previously dead code, see incunest_afe4490.h comment).
-    // Sample count from datasheet §7.7 t5, not a fixed guess — see _compute_afe_settle_samples().
-    _rsqm_settling_countdown = _compute_afe_settle_samples();
+    // HW_SETTLING is now armed by setTIAGainLED1/2() itself (v0.74) — any RF change gets the
+    // same protection, HGAC-driven or manual ($SET). No separate arm needed here.
 }
 
 // One gain domain (color) — pure actuation. fast EMA drives the HIGH2 guard (urgent, integrates

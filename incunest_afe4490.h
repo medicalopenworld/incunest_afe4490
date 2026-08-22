@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.73 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.74 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.73"
+#define INCUNEST_AFE4490_VERSION "0.74"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -945,6 +945,10 @@ private:
     // forth". Uses the shorter of the LED/ambient sample windows (both symmetric between LED1
     // and LED2, so one figure covers either color domain) — see spec §5.8.4/§7.2.
     uint32_t _compute_afe_settle_samples() const;
+    // Arms _rsqm_settling_countdown (RSQM_DIAG_HW_SETTLING) after ANY RF change — called from
+    // setTIAGain()/setTIAGainLED1/2() (a manual $SET included) as well as from _hgac_change_rf(),
+    // so a manual RF change gets the same input-freeze protection (§2.6b/§5.8.4) as an HGAC one.
+    void _arm_settling() { _rsqm_settling_countdown = _compute_afe_settle_samples(); }
     // Selects the largest CF code (of the 32) that settles within _compute_led_on_to_sample_margin_counts() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
@@ -1234,7 +1238,13 @@ private:
     ProbeState     _rsqm_probe_state_pending { ProbeState::PROBE_DISCONNECTED }; // last requested state (debounce accumulator)
     uint32_t       _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
     uint32_t       _rsqm_probe_state_min_samples { 100 };                        // placeholder; recomputed as roundf(rsqm_probe_state_min_s × fs) in _recalc_rate_params() (ctor + any rate/param change)
-    uint32_t       _rsqm_settling_countdown; // samples remaining in HW_SETTLING window (0 = inactive)
+    // Samples remaining in the HW_SETTLING window (0 = inactive). volatile: armed by
+    // _arm_settling(), callable both from _task_body()'s own thread (via _hgac_change_rf()) and
+    // from ANY other task calling setTIAGain*() directly (e.g. Cmd_Task on a manual $SET) — and
+    // read/decremented in _process_sample() (_task_body()'s thread). A plain word store/decrement
+    // race here is benign (worst case +-1 sample of settle duration, never a corrupted state),
+    // matching the existing _diag_holdoff_samples pattern — no mutex needed. See spec §5.8.4.
+    volatile uint32_t _rsqm_settling_countdown;
 
     // ── HGAC state (RF-only, two EMA per gain domain) ────────────────────────
     // Fast EMA → HIGH2 guard; slow EMA → HIGH1/LOW1 leveling. Fed v_tia_led per sample while the
