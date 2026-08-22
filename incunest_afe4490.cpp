@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.75 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.76 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -500,7 +500,10 @@ void INCUNEST_AFE4490::setLED1Current(float mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_led1_current_mA = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
+    float new_val = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
+    bool changed = (new_val != _afe_led1_current_mA);
+    _afe_led1_current_mA = new_val;
+    if (changed) _arm_switched_rc_settling();  // datasheet §7.7 t5 footnote (1) names "LED current setting" explicitly
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -513,7 +516,10 @@ void INCUNEST_AFE4490::setLED2Current(float mA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
-    _afe_led2_current_mA = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
+    float new_val = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
+    bool changed = (new_val != _afe_led2_current_mA);
+    _afe_led2_current_mA = new_val;
+    if (changed) _arm_switched_rc_settling();  // datasheet §7.7 t5 footnote (1) names "LED current setting" explicitly
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -577,7 +583,9 @@ void INCUNEST_AFE4490::setStage2Gain(AFE4490RG gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (gain != _afe_stg2_rg_led1) || (gain != _afe_stg2_rg_led2);
     _afe_stg2_rg_led1 = _afe_stg2_rg_led2 = gain;
+    if (changed) _arm_switched_rc_settling();  // RG is part of the same feedback path as RF
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -634,7 +642,9 @@ void INCUNEST_AFE4490::setStage2GainLED1(AFE4490RG gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (gain != _afe_stg2_rg_led1);
     _afe_stg2_rg_led1 = gain;
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -677,7 +687,9 @@ void INCUNEST_AFE4490::setStage2GainLED2(AFE4490RG gain) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (gain != _afe_stg2_rg_led2);
     _afe_stg2_rg_led2 = gain;
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -717,7 +729,9 @@ void INCUNEST_AFE4490::setAmbDac(uint8_t uA) {
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 #endif
+    bool changed = (uA != _afe_ambdac_uA);
     _afe_ambdac_uA = uA;
+    if (changed) _arm_switched_rc_settling();  // same feedback path as RF/CF — datasheet's "and so forth"
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();

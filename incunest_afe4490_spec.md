@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.75
+# incunest_afe4490 — Specification v0.76
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1257,7 +1257,7 @@ ambient EMA → `valid()==false` holds the alarm off until it re-warms). HGAC se
 sample and refreshes `_current_data.diag_code` (it runs after `_rsqm_update()`, which wrote the
 mirror without it).
 
-#### 5.8.4 Reset on RF change (`_hgac_change_rf`) — no rescale
+#### 5.8.4 Reset on RF change (`_hgac_change_rf`) — no rescale; settling armed on any signal-chain change
 
 **Naming (v0.75, Alex):** renamed `_rsqm_settling_countdown`/`RSQM_DIAG_HW_SETTLING`/
 `_arm_settling()`/`_compute_afe_settle_samples()` to their `*_switched_rc_settling_*` equivalents.
@@ -1296,6 +1296,22 @@ arm racing an in-flight decrement), never a corrupted or out-of-range value. `vo
 to prevent the compiler from caching a stale value across the loop iteration boundary — the same
 pattern already used for `_diag_active`/`_diag_holdoff_samples` (§2.6b) for the identical reason
 (`runAfeDiagnostics()` is likewise callable from a different task than `_task_body()`).
+
+**Extended to ILED, AMBDAC, and RG (v0.76, Alex) — datasheet §7.7 t5 footnote (1) names all of
+them.** The footnote reads *"applicable whenever there is a change to any of the signal chain
+controls (for example, LED current setting, TIA gain, and so forth)"* — RF was the only one wired
+up through v0.75. `setLED1Current()`/`setLED2Current()`, `setAmbDac()`, and
+`setStage2Gain()`/`setStage2GainLED1/2()` now call `_arm_switched_rc_settling()` themselves too
+(same no-op guard as RF: re-applying the same value doesn't re-arm). AMBDAC and RG (Stage 2) sit
+in the identical feedback path as RF (Eq. 2, §3c) — a step in either produces the same kind of
+front-end transient. `setTIACF*()` and `setStage2En1/2()` are **not** included: CF only shapes
+transient response, not the DC operating point (Eq. 2 has no CF term — the steady-state output
+depends on `I_PD`, `RF`, `I_CANCEL`, `RG`, none of which CF touches), so a CF-only change doesn't
+step the DC level the way RF/ILED/AMBDAC/RG do; `setStage2En1/2()` (bypassing Stage 2 entirely,
+which *does* step the effective gain between unity and `RG`) was noticed but left for a follow-up
+decision rather than folded in silently. `setLEDRange()` (which shifts `TX_REF`) is a different, much longer (~1 s) settling window
+(§7.7 t6 footnote (2)) that this mechanism does not cover at all — see the settling catalog memory
+for that still-open item.
 
 Arms `_switched_rc_settling_countdown` via `_compute_switched_rc_settling_samples()` — the producer of
 `RSQM_DIAG_SWITCHED_RC_SETTLING` (§5.6.3).
@@ -2211,6 +2227,23 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.76   | **Switched-RC settling extended to ILED, AMBDAC, and RG — not just RF       |
+|         | (§5.8.4).** Datasheet §7.7 t5 footnote (1) names "LED current setting, TIA  |
+|         | gain, and so forth" as triggers — RF was the only one wired up through      |
+|         | v0.75. `setLED1Current()`/`setLED2Current()`, `setAmbDac()`, and            |
+|         | `setStage2Gain()`/`setStage2GainLED1/2()` now call                          |
+|         | `_arm_switched_rc_settling()` themselves too, with the same no-op guard as  |
+|         | RF (re-applying the same value doesn't re-arm). AMBDAC and RG sit in the    |
+|         | identical feedback path as RF (Eq. 2) — a step in either produces the same  |
+|         | kind of transient. `setTIACF*()` deliberately excluded: CF only shapes      |
+|         | transient response, not the DC operating point (no CF term in Eq. 2).       |
+|         | `setStage2En1/2()` (which also steps effective gain, unity↔RG) noticed but  |
+|         | left for a follow-up decision, not folded in silently. New tests            |
+|         | `test_led_current_change_arms_settling`, `test_ambdac_change_arms_settling`,|
+|         | `test_stage2_gain_change_arms_settling`,                                    |
+|         | `test_setting_same_led_ambdac_rg_does_not_rearm_settling` (PulseNest        |
+|         | `test_hgac.cpp`). Verified: `pio test -e native`; ESP32-S3 build            |
+|         | (`incunest_V16`) SUCCESS.                                                    |
 | v0.75   | **Rename: `_rsqm_settling_countdown`/`RSQM_DIAG_HW_SETTLING`/               |
 |         | `_arm_settling()`/`_compute_afe_settle_samples()` → their                   |
 |         | `*_switched_rc_settling_*` equivalents (§5.8.4).** Found by Alex: "settling"|

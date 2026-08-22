@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.75 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.76 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.75"
+#define INCUNEST_AFE4490_VERSION "0.76"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -112,7 +112,7 @@ constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 
 constexpr uint32_t RSQM_DIAG_AMB_SAT      = 0x00002000UL;  // bit 13 — ambient channel near positive rail
 constexpr uint32_t RSQM_DIAG_AMBIENT_HIGH = 0x00004000UL;  // bit 14 — ambient saturates at RF floor (HGAC alarm)
 constexpr uint32_t RSQM_DIAG_SWITCHED_RC_SETTLING  = 0x00008000UL;  // bit 15 — hardware settling
-// after ANY signal-chain register change (RF, CF, stage2 gain, AMBDAC). Named after the
+// after ANY signal-chain change (RF, ILED, stage2 gain/RG, AMBDAC — not CF, which only shapes transient response, not the DC level). Named after the
 // datasheet's own term for the affected circuitry (§7.7 t5 footnote (1): "four switched RC
 // filters") — not the TIA's own RC pole (τ=RF·CF, settles within one sample) nor the LED/cable
 // transient (_compute_led_on_to_sample_margin_counts()) — this one needs several PRP cycles
@@ -944,14 +944,16 @@ private:
     // Ambient-phase Rx sample window in AFECLK counts (ALEDxENDC − ALEDxSTC) = q − 2 − afe_ambient_margin_counts.
     // ALED1 == ALED2 (symmetric). NOT part of datasheet Eq. 1 — library-only margin, see §7.2.
     uint32_t _compute_ambient_sample_window_counts() const;
-    // Samples (PRP cycles) to hold RSQM_DIAG_SWITCHED_RC_SETTLING after ANY signal-chain register change
-    // (RF, CF, stage2 gain, AMBDAC) — datasheet §7.7 t5 (p.17) + footnote (1): "> 3 ms of
-    // cumulative sampling time in each phase", explicitly generalised there to "TIA gain and so
-    // forth". Uses the shorter of the LED/ambient sample windows (both symmetric between LED1
-    // and LED2, so one figure covers either color domain) — see spec §5.8.4/§7.2.
+    // Samples (PRP cycles) to hold RSQM_DIAG_SWITCHED_RC_SETTLING after ANY signal-chain change
+    // (RF, ILED, stage2 gain/RG, AMBDAC — not CF, which only shapes transient response, not the DC
+    // level) — datasheet §7.7 t5 (p.17) + footnote (1): "> 3 ms of cumulative sampling time in
+    // each phase", explicitly generalised there to "LED current setting, TIA gain, and so forth".
+    // Uses the shorter of the LED/ambient sample windows (both symmetric between LED1 and LED2,
+    // so one figure covers either color domain) — see spec §5.8.4/§7.2.
     uint32_t _compute_switched_rc_settling_samples() const;
-    // Arms _switched_rc_settling_countdown (RSQM_DIAG_SWITCHED_RC_SETTLING) after ANY RF change — called from
-    // setTIAGain()/setTIAGainLED1/2() (a manual $SET included) as well as from _hgac_change_rf(),
+    // Arms _switched_rc_settling_countdown (RSQM_DIAG_SWITCHED_RC_SETTLING) after ANY signal-chain
+    // change — called from setTIAGain()/setTIAGainLED1/2(), setLED1/2Current(), setAmbDac(), and
+    // setStage2Gain()/setStage2GainLED1/2() (a manual $SET included) as well as from _hgac_change_rf(),
     // so a manual RF change gets the same input-freeze protection (§2.6b/§5.8.4) as an HGAC one.
     void _arm_switched_rc_settling() { _switched_rc_settling_countdown = _compute_switched_rc_settling_samples(); }
     // Selects the largest CF code (of the 32) that settles within _compute_led_on_to_sample_margin_counts() for the given RF.
