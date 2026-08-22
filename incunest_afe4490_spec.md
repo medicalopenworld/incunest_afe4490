@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.78
+# incunest_afe4490 — Specification v0.79
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1316,6 +1316,35 @@ vs. enabling it (`STAGE2EN=1` → gain `RG`) steps the effective gain exactly li
 itself does — noticed in v0.76 and deliberately left for a follow-up decision rather than folded
 in silently; now wired up the same way (guard: toggling to the *same* enable state is a no-op).
 
+**Bug found and fixed (v0.79, Alex, from a real capture): freezing the raw codes wasn't enough —
+the reconstruction was still combining stale codes with live parameters.** `_task_body()` freezes
+the *raw ADC codes* (`_last_valid_led1/2/aled1/2`), but `_compute_analog_state()` reads the
+*circuit parameters* (`_afe_tia_rf_led1/2`, `_afe_stg2_rg_led1/2`, `_afe_stg2_en_led1/2`,
+`_afe_ambdac_uA`, `_afe_led1/2_current_mA`) as **live members** — which, for every frozen sample
+after the first, are already the **new** values (the setter that armed the freeze updates them
+immediately). Recomputing `V_TIA`/`I_PD`/`OT` from an OLD code with a NEW parameter produces an
+**artificially stepped** value — e.g. `OT_led1` scaled by roughly `RF_old/RF_new` — not the flat
+line the freeze was meant to produce. Symptom: `ppg_disp` showed a sharp pulse (two abrupt steps
+bracketing the settle window) instead of the intended smooth, low-AC decay — and RSQM/SpO2/HR1-3
+were silently exposed to the same wrongly-scaled `OT` for the whole window, not just the display.
+
+**Two designs were considered:** (A) freeze the circuit parameters too (mirror
+`_last_valid_led1/2/aled1/2` with `_last_valid_tia_rf_led1/2` etc., ~9 new members, thread them
+through `_compute_analog_state()`'s signature); (B) freeze the **entire computed**
+`AFE4490AnalogState`, and skip recomputation altogether while frozen. **B was chosen**: it fixes
+the mismatch by construction (no partial-freeze state where some parameters are stale and others
+live is even possible), needs one new member instead of nine, and leaves `_compute_analog_state()`
+untouched. `_process_sample()` now branches on `_should_freeze_input()` itself: reuse
+`_last_valid_analog_state` verbatim while frozen, or compute fresh and save it otherwise. As a side
+effect, `ppg_disp`'s bandpass filter now receives a genuinely constant input during the freeze (not
+a stepped one), which is what the original v0.72 design rationale ("absorbed with near-zero AC
+contribution") always assumed but didn't actually deliver until now.
+
+Proven with `test_analog_state_stays_flat_during_settle_window` (PulseNest `test_hgac.cpp`) the
+strong way: feeds a **deliberately bogus** raw code while frozen and asserts `OT_led1` doesn't
+move — if the bug were still present, recomputing that bogus code with the new RF would visibly
+shift it.
+
 Arms `_switched_rc_settling_countdown` via `_compute_switched_rc_settling_samples()` — the producer of
 `RSQM_DIAG_SWITCHED_RC_SETTLING` (§5.6.3).
 
@@ -2230,6 +2259,24 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.79   | **Bug fix: freezing raw ADC codes during switched-RC settling wasn't        |
+|         | enough — `_compute_analog_state()` still combined them with LIVE (already   |
+|         | changed) circuit parameters, producing a stepped `OT` instead of a flat one |
+|         | (§5.8.4).** Found by Alex from a real capture: `ppg_disp` showed an abrupt  |
+|         | pulse (two steps bracketing the settle window) instead of the intended      |
+|         | smooth decay — RSQM/SpO2/HR1-3 were silently exposed to the same wrongly-   |
+|         | scaled `OT` for the whole window, not just the display. Fix: new member    |
+|         | `_last_valid_analog_state` (the full `AFE4490AnalogState`, not just raw     |
+|         | codes) saved every normal cycle; `_process_sample()` reuses it verbatim     |
+|         | while `_should_freeze_input()` instead of recomputing from stale-code +    |
+|         | live-parameter combinations. Chosen over freezing all 9 individual circuit  |
+|         | parameters (RF/RG/EN/AMBDAC/ILED separately) — fixes the mismatch by       |
+|         | construction, one new member instead of nine, `_compute_analog_state()`     |
+|         | untouched. New test `test_analog_state_stays_flat_during_settle_window`     |
+|         | (PulseNest `test_hgac.cpp`) proves it the strong way: feeds a bogus raw     |
+|         | code while frozen and asserts `OT` doesn't move. Verified: `pio test -e     |
+|         | native` 63/64 (unrelated pre-existing `test_biquad` failure untouched);     |
+|         | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
 | v0.78   | **Docs only: comment on `_apply_analog_regs()` explaining why it's always   |
 |         | called unconditionally, even when a setter's value didn't change** — asked  |
 |         | by Alex while reviewing the `changed` guards added in v0.74-v0.77. Several  |

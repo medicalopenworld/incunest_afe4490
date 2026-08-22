@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.78 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.79 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.78"
+#define INCUNEST_AFE4490_VERSION "0.79"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -1088,6 +1088,16 @@ private:
     int32_t _last_valid_led1, _last_valid_led2;
     int32_t _last_valid_aled1, _last_valid_aled2;
     int32_t _last_valid_led1_sub, _last_valid_led2_sub;
+    // Last valid FULLY-COMPUTED analog state (not just raw codes), saved by _process_sample() on
+    // every normal cycle and reused as-is (never recomputed) while _should_freeze_input() is true.
+    // Reviewed 2026-08-22 (Alex): recomputing from the frozen raw codes above via
+    // _compute_analog_state() would combine an OLD raw ADC code with the NEW (already-changed)
+    // circuit parameters (RF/RG/AMBDAC/ILED live in _afe_* members, updated by the very setter
+    // that armed the freeze) — producing an artificially STEPPED v_tia/i_pd/ot, not a flat one, and
+    // exciting ppg_disp's bandpass filter with a sharp pulse instead of a benign constant. Reusing
+    // the whole struct sidesteps the mismatch by construction: there is no partial-freeze state
+    // where some parameters are stale and others live.
+    AFE4490AnalogState _last_valid_analog_state;
 
     // ── HR2/HR3 async computation tasks ──────────────────────────────────────
     // Task A (_task_body) runs the fast per-sample path and signals Task B/C when
@@ -1332,5 +1342,8 @@ public:
     uint32_t test_compute_switched_rc_settling_samples() const { return _compute_switched_rc_settling_samples(); }
     // Whether _task_body() would freeze its input this cycle (§5.6.3/§5.8.4) — see v0.72.
     bool test_should_freeze_input() const { return _should_freeze_input(); }
+    // OT_LED1 as of the most recently processed sample — equals the `as.ot_led1` just fed to
+    // RSQM/SpO2/HR1-3/ppg_disp, whether frozen or freshly computed (v0.79, §5.8.4).
+    float test_last_ot_led1() const { return _last_valid_analog_state.ot_led1; }
 #endif
 };

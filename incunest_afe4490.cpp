@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.78 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.79 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -283,6 +283,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _last_valid_led1(0), _last_valid_led2(0),
       _last_valid_aled1(0), _last_valid_aled2(0),
       _last_valid_led1_sub(0), _last_valid_led2_sub(0),
+      _last_valid_analog_state{},
       _hr2_compute_sem(nullptr), _hr3_compute_sem(nullptr),
       _hr2_task_handle(nullptr), _hr3_task_handle(nullptr),
       _diag_task_handle(nullptr),
@@ -1913,8 +1914,21 @@ void IRAM_ATTR INCUNEST_AFE4490::_drdy_isr() {
 
 void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
                                    int32_t led1_sub, int32_t led2_sub) {
-    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA, I_PD, OT)
-    const AFE4490AnalogState as = _compute_analog_state(led1, led2, aled1, aled2);
+    // Analog reconstruction — converts ADC codes to physical quantities (V_ADC, V_TIA, I_PD, OT).
+    // While the front-end is re-settling (_should_freeze_input()), REUSE the last fully-computed
+    // state instead of recomputing it from the frozen raw codes above: recomputing would combine
+    // an OLD raw ADC code with the NEW (already-changed) circuit parameters (RF/RG/AMBDAC/ILED —
+    // live members, updated by the very setter that armed this freeze), producing an artificially
+    // STEPPED v_tia/i_pd/ot rather than a flat one (found by Alex, 2026-08-22: an abrupt pulse in
+    // ppg_disp instead of a benign constant). Reusing the whole struct sidesteps the mismatch by
+    // construction — see spec §5.8.4 and the _last_valid_analog_state comment in the header.
+    AFE4490AnalogState as;
+    if (_should_freeze_input()) {
+        as = _last_valid_analog_state;
+    } else {
+        as = _compute_analog_state(led1, led2, aled1, aled2);
+        _last_valid_analog_state = as;
+    }
 
     // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
     _rsqm_update(led1, led2, aled1, aled2, led1_sub, led2_sub, as);
