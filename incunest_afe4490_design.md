@@ -132,9 +132,10 @@ the DC near ~50 % FS as a *consequence*, not a chased setpoint.
 - **0.9 rung:** keep GUARD (0.9) as a separate shorter-persistence descent, or use a single descent at
   0.75 (with 0.9/FS as the physical ceiling only)? Undecided.
 - **Anti-motion invalid-fraction gate** (2.7) — implement or not.
-- **`RSQM_DIAG_HW_SETTLING`:** it mirrors `_rsqm_settling_countdown` and is a self-imposed control
-  state, not a diagnostic → candidate to read the countdown directly and drop the DiagCode bit
-  (decision deferred).
+- **`RSQM_DIAG_SWITCHED_RC_SETTLING`:** it mirrors `_switched_rc_settling_countdown` and is a
+  self-imposed control state, not a diagnostic → candidate to read the countdown directly and drop
+  the DiagCode bit (decision deferred). (Renamed from `*_HW_SETTLING`/`_rsqm_*` v0.75 — see spec
+  §5.8.4: "settling" alone was ambiguous among three unrelated phenomena in this library.)
 
 ### 2.9 Deferred (Phase 4+)
 

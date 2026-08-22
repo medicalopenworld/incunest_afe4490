@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.74
+# incunest_afe4490 — Specification v0.75
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -101,7 +101,7 @@ struct AFE4490Data {
     float   hr3_sqi;    // HR3 Signal Quality Index [0–1]: spectral concentration at peak; 0=diffuse spectrum, 1=dominant tone
     // RSQM outputs (filled every sample by _rsqm_update)
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
-    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_HW_SETTLING | ...
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SWITCHED_RC_SETTLING | ...
     ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, PROBE_APPLIED, or PROBE_SATURATING
 };
 ```
@@ -307,12 +307,12 @@ After DIAG_EN is cleared the analog front-end (TIA, stage 2) needs a few PRP cyc
 
 **Same mechanism now also covers HGAC RF-change settling (v0.72, found by Alex from a visible
 spike in `ppg_disp`):** `_task_body()`'s freeze condition is `_diag_active || _diag_holdoff_samples
-> 0 || _rsqm_settling_countdown > 0` — the third term reuses the identical frozen-input path for
+> 0 || _switched_rc_settling_countdown > 0` — the third term reuses the identical frozen-input path for
 the settling window that opens after `_hgac_change_rf()` (§5.8.4), the "same physical phenomenon,
-two different triggers" as the diagnostic holdoff. Before this, `RSQM_DIAG_HW_SETTLING` was a label
+two different triggers" as the diagnostic holdoff. Before this, `RSQM_DIAG_SWITCHED_RC_SETTLING` was a label
 with no enforcement: it was set in `diag_code`, but nothing actually stopped SpO2/HR1/HR2/HR3/
 `ppg_disp` from processing the real (transient, not-yet-settled) values during that window — only
-HGAC's own Gate G0 checked the bit, to pause its own actuation. `_rsqm_settling_countdown` is
+HGAC's own Gate G0 checked the bit, to pause its own actuation. `_switched_rc_settling_countdown` is
 decremented inside `_process_sample()` (`_rsqm_update()`) unconditionally, whether fed frozen or
 fresh inputs, so no extra bookkeeping was needed in `_task_body()` beyond the OR term itself.
 
@@ -441,7 +441,7 @@ constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 
 // Bit 14 = RSQM_DIAG_AMBIENT_HIGH (HGAC ambient alarm, v0.59; previously SIGNAL_WEAK, removed v0.56).
 constexpr uint32_t RSQM_DIAG_AMB_SAT      = 0x00002000UL;  // bit 13 — ambient channel near positive rail
 constexpr uint32_t RSQM_DIAG_AMBIENT_HIGH = 0x00004000UL;  // bit 14 — ambient saturates at RF floor (HGAC)
-constexpr uint32_t RSQM_DIAG_HW_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change.
+constexpr uint32_t RSQM_DIAG_SWITCHED_RC_SETTLING = 0x00008000UL;  // bit 15 — hardware settling after config change.
 // v0.72: enforced, not just labelled — _task_body() freezes inputs (last-valid raw values) for
 // the whole window this bit is set, same mechanism as the diagnostic holdoff (§2.6b/§5.6.3).
 // bits 16–31 reserved
@@ -1142,13 +1142,13 @@ Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 
 |---|---|---|
 | 0x2000 | `RSQM_DIAG_AMB_SAT` | `as.adcSatPos(ALED1)` OR `as.adcSatPos(ALED2)` (code ≥ `adc::SAT_POS` = 2 096 700) |
 | 0x4000 | `RSQM_DIAG_AMBIENT_HIGH` | HGAC alarm: RF at the floor (`RF_10K`) AND the ambient (ALED) EMA ≥ HIGH2 on either domain → ambient light alone saturates ("TOO MUCH AMBIENT LIGHT"). Preventive (EMA @ HIGH2), distinct from `AMB_SAT`'s per-sample hard rail. (Was `SIGNAL_WEAK` until v0.56.) |
-| 0x8000 | `RSQM_DIAG_HW_SETTLING` | Countdown > 0 (`_rsqm_settling_countdown`). **Enforced since v0.72**: while set, `_task_body()` feeds frozen last-valid raw values instead of the real transient ones (§2.6b) — not just a label on data that still flows through. |
+| 0x8000 | `RSQM_DIAG_SWITCHED_RC_SETTLING` | Countdown > 0 (`_switched_rc_settling_countdown`). **Enforced since v0.72**: while set, `_task_body()` feeds frozen last-valid raw values instead of the real transient ones (§2.6b) — not just a label on data that still flows through. |
 
 HGAC publishes no DiagCode bit (the former bit 16 `HGAC_DIAG_GAIN_FLOOR` was removed in v0.50 — no consumer decoded it; the "at RF floor and still saturating" condition is derivable at the point of use as `rf == RF_10K` while TIAGUARD persists, and its actuator, ILED, is Phase 4).
 
 Multiple bits may be set simultaneously.
 
-**Update (v0.37):** `RSQM_DIAG_HW_SETTLING` is no longer unreachable — HGAC (§5.8) is its first real producer, arming `_rsqm_settling_countdown` after every RF step-down. `RSQM_DIAG_AMB_SAT` still has no programmatic consumer beyond the aggregate `rsqi` gate and human inspection.
+**Update (v0.37):** `RSQM_DIAG_SWITCHED_RC_SETTLING` is no longer unreachable — HGAC (§5.8) is its first real producer, arming `_switched_rc_settling_countdown` after every RF step-down. `RSQM_DIAG_AMB_SAT` still has no programmatic consumer beyond the aggregate `rsqi` gate and human inspection.
 
 #### 5.6.4 RSQI
 
@@ -1259,22 +1259,33 @@ mirror without it).
 
 #### 5.8.4 Reset on RF change (`_hgac_change_rf`) — no rescale
 
+**Naming (v0.75, Alex):** renamed `_rsqm_settling_countdown`/`RSQM_DIAG_HW_SETTLING`/
+`_arm_settling()`/`_compute_afe_settle_samples()` to their `*_switched_rc_settling_*` equivalents.
+"Settling" alone was ambiguous: this library has **three** unrelated settling phenomena that could
+all claim the word — the TIA's own RC pole (`τ=RF·CF`, settles within one sample, drives auto-CF),
+the LED/cable turn-on transient (`_compute_led_on_to_sample_margin_counts()`, also within one
+sample), and this one, which needs **several PRP cycles** (the datasheet's 3 ms minimum, not
+microseconds). "Switched RC" is the datasheet's own phrase for the affected circuitry (§7.7 t5
+footnote (1): "four switched RC filters") — chosen over alternatives like `gain_settling` (names
+the *trigger*, not the mechanism, and would misdescribe a future ILED-triggered case — ILED is a
+drive current, not a gain) or `sample_hold_settling` (avoids "RC" but isn't the datasheet's term).
+
 A gain change scales `v_tia` by `k = RF_new/RF_old`, making prior measurements meaningless, so
 `_hgac_change_rf()` **resets** the domain's two EMAs (rather than rescaling them analytically).
 SpO2's own EMAs are **not** touched: SpO2 consumes gain-invariant OT (§5.1), so an RF change is not
 a discontinuity in its input.
 
 **Settling is armed by the setter itself, not by the caller (v0.74) — a manual RF change is
-protected exactly like an HGAC one.** Reviewed 2026-08-22 (Alex): `_rsqm_settling_countdown` used
+protected exactly like an HGAC one.** Reviewed 2026-08-22 (Alex): `_switched_rc_settling_countdown` used
 to be armed only inside `_hgac_change_rf()`, so calling `setTIAGainLED1/2()`/`setTIAGain()`
 directly — e.g. a manual `$SET,tiagain1,...` from the host — changed RF without arming
-`RSQM_DIAG_HW_SETTLING` at all: the same physical front-end transient occurred, with **no**
-input-freeze protection (§2.6b). `_arm_settling()` now lives inside `setTIAGain()`/
+`RSQM_DIAG_SWITCHED_RC_SETTLING` at all: the same physical front-end transient occurred, with **no**
+input-freeze protection (§2.6b). `_arm_switched_rc_settling()` now lives inside `setTIAGain()`/
 `setTIAGainLED1/2()` themselves (guarded so re-applying the *same* value is a no-op, matching
 `_hgac_change_rf()`'s own `new_rf == old_rf` early return) — `_hgac_change_rf()` gets it "for
 free" through the setter call it already makes, so its own separate arm was removed.
 
-**Why `_rsqm_settling_countdown` is `volatile` (no mutex):** with the arm moved into the public
+**Why `_switched_rc_settling_countdown` is `volatile` (no mutex):** with the arm moved into the public
 setters, it can now be written from a *different* thread than the one that reads/decrements it —
 e.g. `Cmd_Task` processing a manual `$SET` (PulseNest `main.cpp`) races against `_task_body()`'s
 own thread, which reads it in `_should_freeze_input()` and decrements it inside `_process_sample()`
@@ -1286,8 +1297,8 @@ to prevent the compiler from caching a stale value across the loop iteration bou
 pattern already used for `_diag_active`/`_diag_holdoff_samples` (§2.6b) for the identical reason
 (`runAfeDiagnostics()` is likewise callable from a different task than `_task_body()`).
 
-Arms `_rsqm_settling_countdown` via `_compute_afe_settle_samples()` — the producer of
-`RSQM_DIAG_HW_SETTLING` (§5.6.3).
+Arms `_switched_rc_settling_countdown` via `_compute_switched_rc_settling_samples()` — the producer of
+`RSQM_DIAG_SWITCHED_RC_SETTLING` (§5.6.3).
 
 **Settling window (v0.65): datasheet §7.7 t5, replacing the untraceable `afe_settle_time_s`.**
 The datasheet's own row for "time between an SPI command and valid data" (§7.7, p.17) requires
@@ -1297,7 +1308,7 @@ signal chain controls (for example, LED current setting, **TIA gain**, and so fo
 only datasheet-traceable figure for this wait — unlike the three auto-CF constants (§7.2), it did
 not need to be reverse-engineered, TI states it directly.
 
-`_compute_afe_settle_samples()` turns that into a sample count: since each phase delivers exactly
+`_compute_switched_rc_settling_samples()` turns that into a sample count: since each phase delivers exactly
 one sample per PRP cycle, `ceil(3 ms / phase_window_s)` cycles must elapse. The four phase windows
 are pairwise symmetric (LED1≡LED2, ALED1≡ALED2) and depend only on `_afe_sample_rate_hz` — not on
 RF — so a single number covers an RF step on either color domain. The ambient window is normally
@@ -1324,7 +1335,7 @@ low-pass filter (Fig. 55, between Stage 2 and the sampler; corner 500 Hz always 
 `kAFE_FLTRCNRSEL`=0, §7.2) has its own settling time — `5τ = 5/(2π·500) ≈ 1.59 ms` — independent
 of RF/CF. Computed numerically across the full documented `setSampleRate()` range (63–5000 Hz):
 
-| fs (Hz) | `_compute_afe_settle_samples()` window | vs. 5τ (1.59 ms) |
+| fs (Hz) | `_compute_switched_rc_settling_samples()` window | vs. 5τ (1.59 ms) |
 |---|---|---|
 | 63–2000 (covers the 500 Hz default and everything the ambient-margin note below already scopes as valid) | 15–61.5 ms | **10×–39× margin** |
 | ≥ ~2487 | collapses to 1 sample (≈ 0.2–0.4 ms) | **fails — see caveat below** |
@@ -1338,7 +1349,7 @@ project), the settle window covers the filter pole with roughly an order of magn
 of the pre-existing "Valid for PRF ≤ ~2 kHz" caveat already on `ambient_margin` in
 `_apply_timing_regs()` (§7.2) — not a new problem, but a newly-quantified one. Above that
 threshold, `_compute_ambient_sample_window_counts()` returns 0 (the fixed 400-count ambient margin
-exceeds the available per-phase window), which (a) makes `_compute_afe_settle_samples()` hit its
+exceeds the available per-phase window), which (a) makes `_compute_switched_rc_settling_samples()` hit its
 `worst_window == 0` guard and return the floor of 1 sample — far below even the raw 3 ms datasheet
 requirement it exists to satisfy, not just the filter's 5τ — and (b) at the register level,
 `_apply_timing_regs()` would write `ALEDxSTC` (=400) *after* `ALEDxENDC` (=`q−2`, <400 in this
@@ -1347,18 +1358,18 @@ Not fixed here — out of scope (this library only runs at 500 Hz in this projec
 memory (`project_high_prf_ambient_window_collapse_task`).
 
 **Settling and EMA warmup are SEQUENTIAL, not overlapped (corrected 2026-08-16 — see §14):** Gate
-G0 (below) closes off whenever `RSQM_DIAG_HW_SETTLING` is active, and while gated off it `reset()`s
+G0 (below) closes off whenever `RSQM_DIAG_SWITCHED_RC_SETTLING` is active, and while gated off it `reset()`s
 the four EMAs **every sample** (not just once at the RF change) — so `count` stays pinned at 0 for
 the entire settling window, and no `EmaChannel::update()` is ever called during it. The EMA warmup
 counter (`count` vs. `3·τ·fs` in `valid()`) therefore does not start advancing until the settling
 countdown reaches 0 and the gate re-opens. The total delay before a domain can act again after an
 RF change is the **sum**, not the max, of the two windows (figures below at the default 500 Hz
-config — recompute via `_compute_afe_settle_samples()` at other sample rates):
+config — recompute via `_compute_switched_rc_settling_samples()` at other sample rates):
 - Guard (fast, τ=0.1s) operative again: settling (~16 ms) + 3×0.1 s = **~0.32 s** (was 0.45 s)
 - Leveling/ambient (slow, τ=2.0s) operative again: ~16 ms + 3×2.0 s = **~6.02 s** (was 6.15 s)
 
 **Gate G0:** HGAC acts only while `probe_state` is `PROBE_APPLIED` or `PROBE_SATURATING` and no
-`RSQM_DIAG_HW_SETTLING` is active. The idle states (`PROBE_NOT_APPLIED`, `PROBE_DISCONNECTED`) are
+`RSQM_DIAG_SWITCHED_RC_SETTLING` is active. The idle states (`PROBE_NOT_APPLIED`, `PROBE_DISCONNECTED`) are
 listed explicitly (a future ProbeState is NOT gated off — revisit when adding one). While gated
 off, the four EMAs are `reset()` so they re-warm cleanly when the probe is re-applied (otherwise
 stale probe-in-air values would leak into the first decisions). `PROBE_SATURATING` (§5.6.2) is a
@@ -1587,11 +1598,11 @@ textual reason (the table's own scope footnote) why it is single-PRF and not a g
 
 #### `afe_settle_time_s` (v0.65: replaced, not just documented)
 
-Unlike the three constants above, `afe_settle_time_s` (0.15 s, arming `RSQM_DIAG_HW_SETTLING`
+Unlike the three constants above, `afe_settle_time_s` (0.15 s, arming `RSQM_DIAG_SWITCHED_RC_SETTLING`
 after an HGAC RF change, §5.8.4) had **no derivation at all**, traceable or not: it entered in
 v0.37 (HGAC's first commit) as a bare guess, and its own code comment said so explicitly
 ("approximate... NOT derived from `_compute_settle_margin()`"). Rather than record its provenance
-as "none" and keep it, v0.65 replaces it outright with `_compute_afe_settle_samples()`, built from
+as "none" and keep it, v0.65 replaces it outright with `_compute_switched_rc_settling_samples()`, built from
 datasheet §7.7 t5 — see §5.8.4 for the full derivation. The two are unrelated in origin and in
 magnitude (0.15 s fixed vs. ~16 ms computed at 500 Hz): the old value was conservative by
 coincidence, not by design.
@@ -1980,7 +1991,7 @@ See §5.8 for algorithm description.
 | Guard EMA τ (fast) | `setHgacEmaFastTauS()` | 0.1 s | 0.0–10.0 | HIGH2 estimator time constant; warmup = 3·τ |
 | Leveling EMA τ (slow) | `setHgacEmaSlowTauS()` | 2.0 s | 0.0–30.0 | HIGH1/LOW1 estimator time constant; warmup = 3·τ |
 | Ambient EMA τ | `setHgacEmaAmbientTauS()` | 2.0 s | 0.0–30.0 | ALED-phase estimator for the AMBIENT_HIGH alarm; sustained (avoids flicker); warmup = 3·τ |
-| Settling time (computed, not `$SET`-tunable) | `_compute_afe_settle_samples()` (private) | ~16 ms @ 500 Hz (datasheet §7.7 t5: ≥3 ms/phase) | — | Arms `RSQM_DIAG_HW_SETTLING` after an RF change; EMA warmup does not start until this elapses (sequential, §5.8.4) |
+| Settling time (computed, not `$SET`-tunable) | `_compute_switched_rc_settling_samples()` (private) | ~16 ms @ 500 Hz (datasheet §7.7 t5: ≥3 ms/phase) | — | Arms `RSQM_DIAG_SWITCHED_RC_SETTLING` after an RF change; EMA warmup does not start until this elapses (sequential, §5.8.4) |
 
 ---
 
@@ -2200,6 +2211,22 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.75   | **Rename: `_rsqm_settling_countdown`/`RSQM_DIAG_HW_SETTLING`/               |
+|         | `_arm_settling()`/`_compute_afe_settle_samples()` → their                   |
+|         | `*_switched_rc_settling_*` equivalents (§5.8.4).** Found by Alex: "settling"|
+|         | alone was ambiguous among three unrelated phenomena in this library — the   |
+|         | TIA's own RC pole (τ=RF·CF, one sample), the LED/cable transient (also one  |
+|         | sample), and this one (several PRP cycles, the datasheet's 3 ms minimum).   |
+|         | "Switched RC" is the datasheet's own term (§7.7 t5 footnote (1): "four      |
+|         | switched RC filters"), chosen over `gain_settling` (names the trigger, not  |
+|         | the mechanism — would misdescribe a future ILED-triggered case, since ILED  |
+|         | is a current, not a gain) and `sample_hold_settling` (not the datasheet's   |
+|         | term). Also fixed the `RSQM_DIAG_*` bit comment (§3) to explain the         |
+|         | distinction from the other two settling phenomena. Historical changelog    |
+|         | rows below (v0.35–v0.72) intentionally still use the old names — they      |
+|         | describe what those commits did at the time, not the current identifiers.  |
+|         | Internal-only, no behaviour change. Verified: `pio test -e native`;         |
+|         | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
 | v0.74   | **A manual RF change now arms the settle window too, not just an HGAC one   |
 |         | (§5.8.4).** Found by Alex: `_rsqm_settling_countdown` was only armed inside |
 |         | `_hgac_change_rf()` — calling `setTIAGainLED1/2()`/`setTIAGain()` directly  |

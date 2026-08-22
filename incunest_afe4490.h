@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.74 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.75 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.74"
+#define INCUNEST_AFE4490_VERSION "0.75"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -111,7 +111,12 @@ constexpr uint32_t AFE_DIAG_MASK            = 0x00001FFFUL;  // mask for all 13 
 //   from AMB_SAT's per-sample hard rail. (Bit 14 previously held SIGNAL_WEAK, removed v0.56.)
 constexpr uint32_t RSQM_DIAG_AMB_SAT      = 0x00002000UL;  // bit 13 — ambient channel near positive rail
 constexpr uint32_t RSQM_DIAG_AMBIENT_HIGH = 0x00004000UL;  // bit 14 — ambient saturates at RF floor (HGAC alarm)
-constexpr uint32_t RSQM_DIAG_HW_SETTLING  = 0x00008000UL;  // bit 15 — hardware settling after config change.
+constexpr uint32_t RSQM_DIAG_SWITCHED_RC_SETTLING  = 0x00008000UL;  // bit 15 — hardware settling
+// after ANY signal-chain register change (RF, CF, stage2 gain, AMBDAC). Named after the
+// datasheet's own term for the affected circuitry (§7.7 t5 footnote (1): "four switched RC
+// filters") — not the TIA's own RC pole (τ=RF·CF, settles within one sample) nor the LED/cable
+// transient (_compute_led_on_to_sample_margin_counts()) — this one needs several PRP cycles
+// (v0.65: derived from the datasheet's 3 ms minimum, §5.8.4), unlike those two.
 // v0.72: enforced, not just labelled — _task_body() freezes inputs (last-valid raw values) for
 // the whole window this bit is set, same mechanism as the diagnostic holdoff (§5.6.3).
 
@@ -144,7 +149,7 @@ struct AFE4490Data {
     float   hr3_sqi;     // HR3 Signal Quality Index [0–1]: HPS peak prominence in search range; 0=diffuse HPS, 1=dominant peak
     // RSQM outputs
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
-    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_HW_SETTLING | ...
+    uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SWITCHED_RC_SETTLING | ...
     ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, PROBE_APPLIED, or PROBE_SATURATING
 };
 
@@ -910,8 +915,8 @@ private:
     float             hgac_ema_fast_tau_s  = 0.1f;              // s — guard EMA: integrates severity×time
     float             hgac_ema_slow_tau_s  = 2.0f;              // s — leveling EMA: clean DC (f_c << HR_min)
     float             hgac_ema_ambient_tau_s = 2.0f;            // s — ambient (ALED) EMA: sustained, avoids flicker
-    // Settling window after an RF change (arms RSQM_DIAG_HW_SETTLING) is no longer a fixed
-    // guess — see _compute_afe_settle_samples() below, derived from datasheet §7.7 t5.
+    // Settling window after an RF change (arms RSQM_DIAG_SWITCHED_RC_SETTLING) is no longer a fixed
+    // guess — see _compute_switched_rc_settling_samples() below, derived from datasheet §7.7 t5.
 
     // ── SPI primitives ────────────────────────────────────────────────────────
 #ifndef INCUNEST_OFFLINE
@@ -939,16 +944,16 @@ private:
     // Ambient-phase Rx sample window in AFECLK counts (ALEDxENDC − ALEDxSTC) = q − 2 − afe_ambient_margin_counts.
     // ALED1 == ALED2 (symmetric). NOT part of datasheet Eq. 1 — library-only margin, see §7.2.
     uint32_t _compute_ambient_sample_window_counts() const;
-    // Samples (PRP cycles) to hold RSQM_DIAG_HW_SETTLING after ANY signal-chain register change
+    // Samples (PRP cycles) to hold RSQM_DIAG_SWITCHED_RC_SETTLING after ANY signal-chain register change
     // (RF, CF, stage2 gain, AMBDAC) — datasheet §7.7 t5 (p.17) + footnote (1): "> 3 ms of
     // cumulative sampling time in each phase", explicitly generalised there to "TIA gain and so
     // forth". Uses the shorter of the LED/ambient sample windows (both symmetric between LED1
     // and LED2, so one figure covers either color domain) — see spec §5.8.4/§7.2.
-    uint32_t _compute_afe_settle_samples() const;
-    // Arms _rsqm_settling_countdown (RSQM_DIAG_HW_SETTLING) after ANY RF change — called from
+    uint32_t _compute_switched_rc_settling_samples() const;
+    // Arms _switched_rc_settling_countdown (RSQM_DIAG_SWITCHED_RC_SETTLING) after ANY RF change — called from
     // setTIAGain()/setTIAGainLED1/2() (a manual $SET included) as well as from _hgac_change_rf(),
     // so a manual RF change gets the same input-freeze protection (§2.6b/§5.8.4) as an HGAC one.
-    void _arm_settling() { _rsqm_settling_countdown = _compute_afe_settle_samples(); }
+    void _arm_switched_rc_settling() { _switched_rc_settling_countdown = _compute_switched_rc_settling_samples(); }
     // Selects the largest CF code (of the 32) that settles within _compute_led_on_to_sample_margin_counts() for the given RF.
     // Called automatically by _recalc_rate_params() and setTIAGain*(); setTIACF*() overrides.
     void _recalc_afe_tia_cf_led1();   // updates _afe_tia_cf_led1 from _afe_tia_rf_led1
@@ -971,7 +976,7 @@ private:
     // real SPI read) for as long as this holds. Not gated by INCUNEST_OFFLINE — it's pure member
     // reads, no SPI — so the condition itself is unit-testable without a running task.
     bool _should_freeze_input() const {
-        return _diag_active || _diag_holdoff_samples > 0 || _rsqm_settling_countdown > 0;
+        return _diag_active || _diag_holdoff_samples > 0 || _switched_rc_settling_countdown > 0;
     }
 
     // FreeRTOS task
@@ -1075,7 +1080,7 @@ private:
     // Last valid raw ADC values, saved on every normal (non-frozen) cycle. Fed back into
     // _process_sample() by _task_body() whenever the analog front-end is known to be
     // re-settling — after runAfeDiagnostics() (_diag_holdoff_samples) or after an HGAC RF
-    // change (_rsqm_settling_countdown, RSQM_DIAG_HW_SETTLING) — instead of the real transient
+    // change (_switched_rc_settling_countdown, RSQM_DIAG_SWITCHED_RC_SETTLING) — instead of the real transient
     // values, so SpO2/HR1/HR2/HR3/ppg_disp absorb a constant input rather than an outlier.
     int32_t _last_valid_led1, _last_valid_led2;
     int32_t _last_valid_aled1, _last_valid_aled2;
@@ -1239,12 +1244,12 @@ private:
     uint32_t       _rsqm_probe_state_count   { 0 };                              // consecutive samples with same requested state
     uint32_t       _rsqm_probe_state_min_samples { 100 };                        // placeholder; recomputed as roundf(rsqm_probe_state_min_s × fs) in _recalc_rate_params() (ctor + any rate/param change)
     // Samples remaining in the HW_SETTLING window (0 = inactive). volatile: armed by
-    // _arm_settling(), callable both from _task_body()'s own thread (via _hgac_change_rf()) and
+    // _arm_switched_rc_settling(), callable both from _task_body()'s own thread (via _hgac_change_rf()) and
     // from ANY other task calling setTIAGain*() directly (e.g. Cmd_Task on a manual $SET) — and
     // read/decremented in _process_sample() (_task_body()'s thread). A plain word store/decrement
     // race here is benign (worst case +-1 sample of settle duration, never a corrupted state),
     // matching the existing _diag_holdoff_samples pattern — no mutex needed. See spec §5.8.4.
-    volatile uint32_t _rsqm_settling_countdown;
+    volatile uint32_t _switched_rc_settling_countdown;
 
     // ── HGAC state (RF-only, two EMA per gain domain) ────────────────────────
     // Fast EMA → HIGH2 guard; slow EMA → HIGH1/LOW1 leveling. Fed v_tia_led per sample while the
@@ -1321,7 +1326,7 @@ public:
     void test_hgac_change_rf_led2(AFE4490RF new_rf) { _hgac_change_rf(HgacColor::RED, new_rf); }
     uint32_t test_diag_code() const { return _current_data.diag_code; }
     // Settle-window sample count (datasheet t5) at the current sample rate — see spec §5.8.4.
-    uint32_t test_compute_afe_settle_samples() const { return _compute_afe_settle_samples(); }
+    uint32_t test_compute_switched_rc_settling_samples() const { return _compute_switched_rc_settling_samples(); }
     // Whether _task_body() would freeze its input this cycle (§5.6.3/§5.8.4) — see v0.72.
     bool test_should_freeze_input() const { return _should_freeze_input(); }
 #endif

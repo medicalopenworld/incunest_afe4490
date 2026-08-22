@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.74 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.75 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -237,7 +237,7 @@ namespace {
 
     // Ambient-phase settle margin: LED OFF decay before ambient sampling starts (t5/t11).
     // No datasheet-cited value; empirical, raised 200->400 for the 50 mA default (v0.47, see
-    // spec §7.2). Named so _apply_timing_regs() and _compute_afe_settle_samples() share one source.
+    // spec §7.2). Named so _apply_timing_regs() and _compute_switched_rc_settling_samples() share one source.
     constexpr uint32_t afe_ambient_margin_counts = 400;  // counts (100 µs)
 
     // Datasheet §7.7, row t5 (p.17): "> 3 ms of cumulative sampling time in each phase" after any
@@ -333,7 +333,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
-      _rsqm_settling_countdown(0),
+      _switched_rc_settling_countdown(0),
       _debug_enabled(false)
 {
     // Quantize initial LED currents to the DAC grid (range already set in init list)
@@ -551,7 +551,7 @@ void INCUNEST_AFE4490::setTIAGain(AFE4490RF gain) {
     _afe_tia_rf_led1 = _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
-    if (changed) _arm_settling();
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -608,7 +608,7 @@ void INCUNEST_AFE4490::setTIAGainLED1(AFE4490RF gain) {
     bool changed = (gain != _afe_tia_rf_led1);
     _afe_tia_rf_led1 = gain;
     _recalc_afe_tia_cf_led1();
-    if (changed) _arm_settling();
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -651,7 +651,7 @@ void INCUNEST_AFE4490::setTIAGainLED2(AFE4490RF gain) {
     bool changed = (gain != _afe_tia_rf_led2);
     _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led2();
-    if (changed) _arm_settling();
+    if (changed) _arm_switched_rc_settling();
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
@@ -1122,7 +1122,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_result = 0.0f; _hr2_result_sqi = 0.0f;
     _hr3_result = 0.0f; _hr3_result_sqi = 0.0f;
     _rsqm_probe_state        = ProbeState::PROBE_DISCONNECTED;
-    _rsqm_settling_countdown = 0;
+    _switched_rc_settling_countdown = 0;
     _hgac_ema_fast_led1.reset(); _hgac_ema_slow_led1.reset(); _hgac_ema_ambient_led1.reset();
     _hgac_ema_fast_led2.reset(); _hgac_ema_slow_led2.reset(); _hgac_ema_ambient_led2.reset();
     _current_data = AFE4490Data{};
@@ -1300,10 +1300,10 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     if (as.adcSatPos(AFE4490Ch::ALED1) || as.adcSatPos(AFE4490Ch::ALED2))
         diag |= RSQM_DIAG_AMB_SAT;
 
-    // RSQM_DIAG_HW_SETTLING: set externally by HGAC or config change; counts down to 0
-    if (_rsqm_settling_countdown > 0) {
-        diag |= RSQM_DIAG_HW_SETTLING;
-        --_rsqm_settling_countdown;
+    // RSQM_DIAG_SWITCHED_RC_SETTLING: set externally by HGAC or config change; counts down to 0
+    if (_switched_rc_settling_countdown > 0) {
+        diag |= RSQM_DIAG_SWITCHED_RC_SETTLING;
+        --_switched_rc_settling_countdown;
     }
 
     // ── Merge RSQM flags into _diag_code (bits 13+), preserving AFE DIAG bits (0-12) ──
@@ -1398,7 +1398,7 @@ void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     // whenever a ProbeState is added.
     if (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED
      || _rsqm_probe_state == ProbeState::PROBE_DISCONNECTED
-     || (_diag_code & RSQM_DIAG_HW_SETTLING)) {
+     || (_diag_code & RSQM_DIAG_SWITCHED_RC_SETTLING)) {
         // Reset the EMAs while gated off so they re-warm cleanly when the probe is re-applied
         // (otherwise they'd carry stale probe-in-air values into the first decisions).
         _hgac_ema_fast_led1.reset(); _hgac_ema_slow_led1.reset(); _hgac_ema_ambient_led1.reset();
@@ -1690,12 +1690,12 @@ uint32_t INCUNEST_AFE4490::_compute_ambient_sample_window_counts() const {
     return _window_counts(afe_ambient_margin_counts);
 }
 
-uint32_t INCUNEST_AFE4490::_compute_afe_settle_samples() const {
+uint32_t INCUNEST_AFE4490::_compute_switched_rc_settling_samples() const {
     // Datasheet §7.7 t5 (p.17) + footnote (1): after any change to a signal-chain control
     // ("LED current setting, TIA gain, and so forth"), each of the four switched-RC phases
     // (LED1, LED2, ALED1, ALED2) needs >= 3 ms of CUMULATIVE sampling time before its data is
     // valid. Every phase delivers exactly one sample per PRP cycle, so the number of cycles
-    // (= samples, = what _rsqm_settling_countdown counts down in) to discard is
+    // (= samples, = what _switched_rc_settling_countdown counts down in) to discard is
     // ceil(3 ms / phase_window_s) — evaluated on the SHORTEST of the four windows, since that
     // one is the last to reach 3 ms. Neither window depends on RF (only on _afe_sample_rate_hz),
     // so this single figure covers an RF step on either HGAC color domain — see spec §5.8.4.
@@ -1795,18 +1795,18 @@ void INCUNEST_AFE4490::_task_body() {
 
         if (_should_freeze_input()) {
             // During diagnostics the chip produces no valid ADC data (~10 ms, ≈5 samples).
-            // During post-diagnostic holdoff, OR after an HGAC RF change (_rsqm_settling_countdown,
-            // RSQM_DIAG_HW_SETTLING, spec §5.8.4), the analog front-end is re-settling — same
+            // During post-diagnostic holdoff, OR after an HGAC RF change (_switched_rc_settling_countdown,
+            // RSQM_DIAG_SWITCHED_RC_SETTLING, spec §5.8.4), the analog front-end is re-settling — same
             // physical phenomenon, two different triggers. In all cases: feed frozen last-valid
             // raw values into _process_sample() so filters advance continuously. A constant input
             // is absorbed by IIR/BPF/LP filters with near-zero AC contribution — far less
             // disruptive than a transient outlier. This is what actually enforces
-            // RSQM_DIAG_HW_SETTLING as "don't trust this window", not just a label on data that
+            // RSQM_DIAG_SWITCHED_RC_SETTLING as "don't trust this window", not just a label on data that
             // still flows through unfiltered — before this, SpO2/HR1/HR2/HR3/ppg_disp all kept
             // processing the real (transient) values during an RF-change settling window, since
             // none of them gate on this bit (only probe_state). Found by Alex (2026-08-21) from a
             // visible spike in ppg_disp; SpO2/HR1-3 were silently exposed to the same transient.
-            // _rsqm_settling_countdown is decremented inside _process_sample() (_rsqm_update()),
+            // _switched_rc_settling_countdown is decremented inside _process_sample() (_rsqm_update()),
             // unconditionally, whether fed frozen or fresh inputs — no separate decrement needed
             // here, unlike _diag_holdoff_samples (which only exists in this loop).
             if (_diag_holdoff_samples > 0) --_diag_holdoff_samples;
