@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.77 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.78 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1612,6 +1612,13 @@ uint32_t INCUNEST_AFE4490::_build_tia_amb_gain_led2() {
     return reg;
 }
 
+// Rebuilds and writes all four analog registers from current in-memory state — unconditionally,
+// even from a setter whose value didn't change. Several fields share one register (e.g. TIAGAIN
+// packs RF_LED1+CF_LED1+STG2GAIN1+STAGE2EN1+ENSEPGAIN), so any SPI write already retransmits the
+// unchanged neighbours; writing the same bits back has no physical effect on the chip (no voltage
+// step, nothing re-settles) and doubles as a forced resync if hardware and software ever drift.
+// Unlike this, arming switched-RC settling (_arm_switched_rc_settling(), §5.8.4) IS guarded by
+// "did the value actually change" — that one has a real cost (freezes live data ~16 ms).
 void INCUNEST_AFE4490::_apply_analog_regs() {
     // TIAGAIN (0x20): LED1 gain fields + ENSEPGAIN flag.
     // When ENSEPGAIN=0: chip uses TIA_AMB_GAIN for both channels; LED1 fields in TIAGAIN are ignored.

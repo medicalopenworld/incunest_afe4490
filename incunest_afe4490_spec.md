@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.77
+# incunest_afe4490 — Specification v0.78
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -2230,6 +2230,15 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.78   | **Docs only: comment on `_apply_analog_regs()` explaining why it's always   |
+|         | called unconditionally, even when a setter's value didn't change** — asked  |
+|         | by Alex while reviewing the `changed` guards added in v0.74-v0.77. Several  |
+|         | fields share one register (e.g. `TIAGAIN` packs `RF_LED1`+`CF_LED1`+        |
+|         | `STG2GAIN1`+`STAGE2EN1`+`ENSEPGAIN`), so any SPI write already retransmits  |
+|         | unchanged neighbours; rewriting the same bits has no physical effect (no    |
+|         | voltage step, nothing re-settles) and doubles as a forced resync — unlike   |
+|         | `_arm_switched_rc_settling()`, which IS guarded because it has a real cost  |
+|         | (freezes live data ~16 ms). No code change.                                |
 | v0.77   | **`setStage2En1()`/`setStage2En2()` also arm switched-RC settling (§5.8.4)  |
 |         | — the follow-up decision left open in v0.76.** Bypassing Stage 2            |
 |         | (`STAGE2EN=0` → unity gain) vs. enabling it (`STAGE2EN=1` → gain `RG`)      |
