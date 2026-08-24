@@ -1,0 +1,8 @@
+# Normalize line endings to LF in the repository for all text files, regardless of a
+# contributor's local core.autocrlf. Same fix as PulseNest (2026-08-24) — see that repo's
+# conversation_log.md for the full diagnosis (mixed CRLF/LF history inflates unrelated diffs
+# to whole-file size).
+* text=auto eol=lf
+
+# Known binary formats in this repo — never line-ending-normalize or diff as text.
+*.lnk binary
