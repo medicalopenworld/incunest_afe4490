@@ -2003,8 +2003,8 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 
     // Update debug snapshot — always called under _state_mutex (held by _task_body() caller).
     _debug_data.analog                = as;
-    _debug_data.hgac_rf_led1          = _afe_tia_rf_led1;
-    _debug_data.hgac_rf_led2          = _afe_tia_rf_led2;
+    _debug_data.rf_led1               = _afe_tia_rf_led1;
+    _debug_data.rf_led2               = _afe_tia_rf_led2;
 
     // Push to queue; if full, drop oldest to keep most recent.
     // Debug mode: push combined DebugQueueItem for atomic getData(data,dbg) access.

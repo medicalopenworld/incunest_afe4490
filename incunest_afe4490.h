@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.80 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.81 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.80"
+#define INCUNEST_AFE4490_VERSION "0.81"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -479,8 +479,11 @@ private:
 /// Retrieved via getData(data, dbg); updated every sample under _state_mutex.
 struct AFE4490DebugData {
     AFE4490AnalogState analog;  // physical reconstruction: V_ADC, V_TIA, I_PD for all 4 channels
-    AFE4490RF hgac_rf_led1;         // current RF for LED1 (IR) domain — HGAC Phase 1 (RF-only descent)
-    AFE4490RF hgac_rf_led2;         // current RF for LED2 (RED) domain
+    // Current RF in use per domain — whatever set it (manual $SET or HGAC Phase 1 descent).
+    // Named without an "hgac_" prefix on purpose (v0.81): it's just the live config value,
+    // not something HGAC computes or owns; HGAC is only the usual (not the only) mutator.
+    AFE4490RF rf_led1;         // current RF for LED1 (IR) domain
+    AFE4490RF rf_led2;         // current RF for LED2 (RED) domain
 };
 
 // ── String codecs for enum ↔ $CFG/$SET protocol labels ───────────────────────

@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.80
+# incunest_afe4490 — Specification v0.81
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -691,10 +691,15 @@ Declared `public` in `incunest_afe4490.h`. Aggregates internal signals not publi
 ```cpp
 struct AFE4490DebugData {
     AFE4490AnalogState analog;  // V_ADC, V_TIA, I_PD for all 4 channels
-    AFE4490RF hgac_rf_led1;          // current RF, IR domain — HGAC Phase 1 (§5.8)
-    AFE4490RF hgac_rf_led2;          // current RF, RED domain
+    AFE4490RF rf_led1;          // current RF, IR domain — set via $SET or moved by HGAC (§5.8)
+    AFE4490RF rf_led2;          // current RF, RED domain
 };
 ```
+
+**Naming (v0.81):** `rf_led1`/`rf_led2` — no `hgac_` prefix. It's the live config value
+(mirrors `_afe_tia_rf_led1`/`_afe_tia_rf_led2` exactly), regardless of who last changed it —
+a manual `$SET` or HGAC's own descent. The field was originally named `hgac_rf_led1/led2`
+(v0.37), which wrongly implied HGAC always computed it.
 
 **Access:** `getData(data, &dbg)` — only valid when `begin(debug=true)`. When debug is inactive, `dbg` is not filled.
 
@@ -1467,8 +1472,9 @@ actuation primitives are only ever called from `_hgac_update()`.
 
 `AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_high2`, `hgac_v_tia_high1`, `hgac_v_tia_low1`,
 `hgac_ema_fast_tau_s`, `hgac_ema_slow_tau_s`, `hgac_ema_ambient_tau_s`. `$SET`/`$LCFG` wiring in PulseNest's `src/main.cpp`.
-`$M4` carries `HGAC_RF1,HGAC_RF2` (current RF per domain), from `AFE4490DebugData`
-`hgac_rf_led1`/`hgac_rf_led2` (§3d), populated alongside `analog` in `_process_sample()`.
+`$M4` carries `RF1,RF2` (current RF per domain, string), from `AFE4490DebugData`
+`rf_led1`/`rf_led2` (§3d, renamed from `hgac_rf_led1/led2` in v0.81), populated alongside
+`analog` in `_process_sample()`.
 
 ---
 
@@ -2293,6 +2299,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.81   | **Rename: `AFE4490DebugData::hgac_rf_led1/led2` → `rf_led1/led2` (§3d).**  |
+|         | Alex, reviewing the new PulseNest `HGAC_RF1/RF2` CSV columns: the name      |
+|         | implies HGAC computed the value, but it's just the live RF config          |
+|         | (identical to `_afe_tia_rf_led1/led2`) — it can equally come from a manual  |
+|         | `$SET`. Consumer-side rename in PulseNest (`main.cpp`, `pulsenest_lab.py`,  |
+|         | `pulsenest_lab_spec.md`) done in the same pass. No behaviour change.        |
 | v0.80   | **Bug fix: cross-thread race let a manual `$SET` gain/current/AMBDAC       |
 |         | change get combined with a stale raw ADC code before the settling window    |
 |         | was even armed (§5.8.4).** Distinct from v0.79: that fix covered            |
