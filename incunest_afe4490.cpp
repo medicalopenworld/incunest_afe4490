@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.84c — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.85 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -429,11 +429,35 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
 #endif
 
 // ── Configuration setters ─────────────────────────────────────────────────────
+// Acceptance policy for sample rates — the ONLY place it lives. setSampleRate(uint16_t) defers
+// here, so widening the catalogue into a range (e.g. once a FractionalDecimator removes the
+// integer-decimation-factor requirement) is a change to this predicate and to the table, not to
+// any public signature.
+bool INCUNEST_AFE4490::isValidSampleRateHz(uint16_t hz, AFE4490SampleRate* out) {
+    for (uint8_t i = 0; i < kAFE_SAMPLE_RATE_COUNT; i++) {
+        if (kAFE_SAMPLE_RATE_HZ[i] == hz) {
+            if (out) *out = (AFE4490SampleRate)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Numeric form: rejects anything outside the validated catalogue. Previously this accepted
+// 63-5000 Hz while checking only the numeric bounds, which let a legal call write inverted
+// timer-compare pairs into the chip above ~2487 Hz (see spec §7.4).
 void INCUNEST_AFE4490::setSampleRate(uint16_t hz) {
-    if (hz < 63 || hz > 5000) {
-        ESP_LOGE(TAG, "setSampleRate: %u Hz out of range [63, 5000]", hz);
+    AFE4490SampleRate rate;
+    if (!isValidSampleRateHz(hz, &rate)) {
+        ESP_LOGE(TAG, "setSampleRate: %u Hz is not a validated rate; supported: "
+                      "500, 800, 1000, 1250, 1600 Hz (rate unchanged)", hz);
         return;
     }
+    setSampleRate(rate);
+}
+
+void INCUNEST_AFE4490::setSampleRate(AFE4490SampleRate rate) {
+    const uint16_t hz = sampleRateHz(rate);
 
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);

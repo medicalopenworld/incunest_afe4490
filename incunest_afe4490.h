@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.84c — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.85 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.84c"
+#define INCUNEST_AFE4490_VERSION "0.85"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -193,6 +193,48 @@ enum class AFE4490RG {
     RG_300K,  // 9.5 dB — ×3   — RG=300 kΩ
     RG_400K    // 12 dB  — ×4   — RG=400 kΩ
 };
+
+// ── Sample rate (PRF) — validated, closed catalogue ──────────────────────────
+// The AFE's pulse repetition frequency. A CLOSED SET by design, not a range: see spec §7.4 for
+// the three arithmetic conditions that select these five values and reject the rest.
+//
+// WHY A CATALOGUE AND NOT A RANGE:
+//   * Certifiability. A finite, enumerable set can be validated exhaustively — every supported
+//     rate is a test case (see test_sample_rate_catalogue), and a validation report can list
+//     them. A continuous range cannot be validated that way, only argued about.
+//   * `setSampleRate()` used to accept 63–5000 Hz while validating only the numeric bounds:
+//     above ~2487 Hz it wrote INVERTED timer-compare pairs (ALEDxSTC > ALEDxENDC) into the
+//     chip, silently, from a legal API call. Below 500 Hz the anti-alias margin collapses
+//     (§7.3). The catalogue closes both ends.
+//   * Each entry guarantees an exact `q` (so the real PRF equals the requested one), an integer
+//     decimation factor for the analysis chains (§5.3.1) and sampling windows within TI's
+//     50 µs minimum.
+//
+// IF THIS EVER BECOMES A RANGE: the acceptance policy lives in ONE place —
+// isValidSampleRateHz() — and setSampleRate(uint16_t) defers to it. A FractionalDecimator
+// (interpolate + filter + decimate) would remove the "integer decimation factor" condition, so
+// widening the catalogue means adding entries here, or relaxing that one predicate. No public
+// signature changes, and no caller breaks.
+enum class AFE4490SampleRate : uint8_t {
+    HZ_500  = 0,   // default: lowest CPU cost and the largest thermal headroom under the LED duty
+    HZ_800  = 1,
+    HZ_1000 = 2,   // the reserve step if bench measurement ever finds folded interference
+    HZ_1250 = 3,
+    HZ_1600 = 4    // ceiling: above ~1660 Hz the ambient window falls under TI's 50 µs minimum
+};
+
+// AFE4490SampleRate → PRF [Hz]. Single source of truth; index by the enum cast to int.
+constexpr uint16_t kAFE_SAMPLE_RATE_HZ[5] = {
+     500,   // HZ_500
+     800,   // HZ_800
+    1000,   // HZ_1000
+    1250,   // HZ_1250
+    1600    // HZ_1600
+};
+constexpr uint8_t kAFE_SAMPLE_RATE_COUNT = 5;
+
+// Default, and the rate every accuracy claim is declared against.
+constexpr AFE4490SampleRate kAFE_SAMPLE_RATE_DEFAULT = AFE4490SampleRate::HZ_500;
 
 // ── Physical parameter tables (indexed by enum cast to int) ──────────────────
 // Single source of truth for AFE4490 physical values.
@@ -653,7 +695,25 @@ public:
 #endif
 
     // Chip configuration setters (callable before or after begin())
-    void setSampleRate(uint16_t hz);        // 63–5000 Hz; recalculates NUMAV_max
+    // Sample rate (PRF). Primary form: takes a validated catalogue entry, so an unsupported
+    // rate is not expressible. Recalculates NUMAV_max, the timing registers and every
+    // rate-dependent algorithm parameter.
+    void setSampleRate(AFE4490SampleRate rate);
+
+    // Numeric form, kept for the bench and for the $SET sr command. Accepts ONLY catalogue
+    // values (isValidSampleRateHz); anything else is rejected with logE and leaves the rate
+    // untouched. This is the single place where the acceptance policy lives — if the catalogue
+    // ever widens into a range, only this predicate changes.
+    void setSampleRate(uint16_t hz);
+
+    // Catalogue introspection. Static: usable before begin(), by the host application and by a
+    // validation report that has to enumerate every supported rate.
+    static constexpr uint8_t  sampleRateCount() { return kAFE_SAMPLE_RATE_COUNT; }
+    static constexpr uint16_t sampleRateHz(AFE4490SampleRate r) {
+        return kAFE_SAMPLE_RATE_HZ[(uint8_t)r];
+    }
+    // true if hz is a catalogue value; when out != nullptr it receives the matching entry.
+    static bool isValidSampleRateHz(uint16_t hz, AFE4490SampleRate* out = nullptr);
     void setAdcAverages(uint8_t num);       // 1=no averaging; clamped to floor(5000/PRF)
     void setLED1Current(float mA);
     void setLED2Current(float mA);

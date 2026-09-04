@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.84c
+# incunest_afe4490 — Specification v0.85
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1896,10 +1896,10 @@ phototherapy lamp and under a PWM-driven heater, sweeping the interferer near 50
 confirm the pulse band stays clean. This is the only claim here that rests on theory rather than
 measurement.
 
-### 7.4 Choosing the PRF — the validated grid
+### 7.4 The PRF catalogue — a closed set, enforced by the type system
 
-Analysis 2026-09-04, calculation only (no bench measurement). **No code change:** PRF = 500 Hz stays
-the default. This section records why, and which other values are admissible.
+PRF = 500 Hz is the default and the rate every accuracy claim is declared against. Since **v0.85**
+the supported rates are a **closed catalogue** (`AFE4490SampleRate`), not a range.
 
 **Three arithmetic conditions close the candidate set:**
 
@@ -1912,7 +1912,46 @@ the default. This section records why, and which other values are admissible.
 3. **Both sample windows must stay ≥ 50 µs** (datasheet §8.3.1.1). The binding one is the *ambient*
    window, giving a ceiling of **≈ 1660 Hz** (`q ≥ 602`).
 
-**Admissible grid: 500, 800, 1000, 1250, 1600 Hz.**
+**Catalogue: 500, 800, 1000, 1250, 1600 Hz** — `AFE4490SampleRate::HZ_500 … HZ_1600`, with
+`kAFE_SAMPLE_RATE_HZ[]` as the single source of truth.
+
+#### API and why a catalogue rather than a range
+
+```cpp
+void setSampleRate(AFE4490SampleRate rate);   // primary form: an unsupported rate is inexpressible
+void setSampleRate(uint16_t hz);              // bench / $SET sr: accepts ONLY catalogue values
+static constexpr uint8_t  sampleRateCount();
+static constexpr uint16_t sampleRateHz(AFE4490SampleRate r);
+static bool isValidSampleRateHz(uint16_t hz, AFE4490SampleRate* out = nullptr);
+```
+
+1. **Certifiability.** A finite, enumerable set can be validated *exhaustively*: every supported
+   rate is a test case. `test_sample_rate` walks the whole catalogue asserting the four invariants
+   below, which are exactly what a validation report has to state. A continuous range cannot be
+   covered that way, only argued about. This is the concrete present-day benefit; the rest follows
+   from it.
+2. **It closes a live defect.** `setSampleRate()` used to accept 63–5000 Hz while checking only the
+   numeric bounds. Above ~2487 Hz it wrote **inverted timer-compare pairs** (`ALEDxSTC` >
+   `ALEDxENDC`) into the chip — from a perfectly legal API call, with no error — and below 500 Hz
+   the anti-alias margin collapses (§7.3). Both ends are now closed.
+3. **The acceptance policy lives in exactly one place**, `isValidSampleRateHz()`, and the numeric
+   form defers to it.
+
+**Per-entry guarantees** (asserted for every catalogue value by `test_sample_rate`):
+
+| Invariant | Why it matters |
+|---|---|
+| `q = (afeclk/hz)/4` exact | the real PRF equals the requested one, so every τ and α derived from the nominal rate is correct |
+| `hz % 50 == 0` | both analysis chains get an **integer** decimation factor and hold 50 Hz (§5.3.1) |
+| both sampling windows ≥ 50 µs | TI's minimum (datasheet §8.3.1.1); the ambient window is binding and sets the ~1660 Hz ceiling |
+| `NUMAV_max ≥ 1` | at least one ADC conversion fits in the window |
+
+**If this ever becomes a range.** A `FractionalDecimator` (interpolate → filter → decimate) would
+remove the `hz % 50` condition, which is the only one that excludes an otherwise valid rate: **625
+Hz** is the single PRF with an exact `q`, 100 % ADC utilisation and valid windows that the
+catalogue rejects today. Widening then means adding entries to `kAFE_SAMPLE_RATE_HZ[]`, or relaxing
+that one predicate in `isValidSampleRateHz()`. **No public signature changes and no caller breaks** —
+which is why the numeric overload was kept rather than deleted.
 
 | PRF | q | win LED | win AMB | num | conv/s | anti-alias margin | atten. at f = PRF | samples/s |
 |---|---|---|---|---|---|---|---|---|
@@ -2576,6 +2615,31 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.85   | **`AFE4490SampleRate`: the supported PRFs become a closed catalogue        |
+|         | {500, 800, 1000, 1250, 1600 Hz} enforced by the type system (§7.4).**      |
+|         | `setSampleRate()` previously accepted 63–5000 Hz while checking only the   |
+|         | numeric bounds: above ~2487 Hz a legal call wrote INVERTED timer-compare   |
+|         | pairs (`ALEDxSTC` > `ALEDxENDC`) into the chip, silently, and below        |
+|         | 500 Hz the anti-alias margin collapses (§7.3). Both ends are now closed.   |
+|         | Primary form takes the enum, so an unvalidated rate is inexpressible; the  |
+|         | numeric overload is kept for the bench and `$SET sr` and accepts only      |
+|         | catalogue values. The acceptance policy lives in ONE predicate,            |
+|         | `isValidSampleRateHz()`. Introspection (`sampleRateCount()`,               |
+|         | `sampleRateHz()`) is static, so a host application or a validation report  |
+|         | can enumerate every supported rate before `begin()`.                      |
+|         | **Present-day benefit: certifiability.** A finite set can be validated     |
+|         | exhaustively — new `test_sample_rate` walks the whole catalogue asserting  |
+|         | exact `q`, integer decimation factor, both sampling windows ≥ TI's 50 µs,  |
+|         | non-inverted ambient timer pair and NUMAV_max ≥ 1, plus that rejected      |
+|         | rates leave the configuration untouched and that both analysis chains hold |
+|         | 50 Hz at every entry. A continuous range cannot be covered that way.       |
+|         | **Designed to widen:** a FractionalDecimator would drop the `hz % 50`      |
+|         | condition — the only one excluding an otherwise valid rate (625 Hz) — so   |
+|         | widening means adding table entries or relaxing that predicate. No public  |
+|         | signature changes, which is why the numeric overload was kept.             |
+|         | `test_hr2`'s off-grid case (700 Hz) was retired: it is no longer reachable |
+|         | through the API, by design. The rounding branch in `Decimator::configure()` |
+|         | stays as defensive code and as the hook for that future decimator.        |
 | v0.84c  | **`_hr2_seg` → `_hr2_snapshot`, `_hr2_linearize()` →                       |
 |         | `_hr2_take_snapshot()`, `_hr3_linearize()` → `_hr3_prepare_fft_input()`.** |
 |         | No functional change. `seg` said nothing, and `linearize` named the         |
