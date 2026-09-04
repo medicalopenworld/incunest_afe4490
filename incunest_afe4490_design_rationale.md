@@ -1,13 +1,22 @@
-# incunest_afe4490 — Design Rationale (PRELIMINARY)
+# incunest_afe4490 — Design Rationale
 
-> **Status: PRELIMINARY / work-in-progress snapshot (2026-08-04).**
-> This document captures the **WHY** — the analysis, debates, and decisions behind the library.
-> The normative **WHAT** lives in [`incunest_afe4490_spec.md`](incunest_afe4490_spec.md), which is
-> the distilled *result* of this rationale.
+> **Status: work in progress, not consolidated (last reviewed 2026-09-04).**
+> Sections vary in polish and the document is still growing. It will be consolidated and edited at
+> the **HGAC v1 freeze** milestone, which has not been reached: `hgac_enable` is still `false` by
+> default, phase 1 is done and phases 2-7 are pending.
 >
-> This is an initial dump to preserve design context; it will be consolidated and edited at the
-> **HGAC v1 freeze** milestone. Sections vary in polish. The HGAC section (developed most recently)
-> is the most complete; the rest are summaries with pointers to the spec.
+> Maturity per section, so a reader knows what to trust:
+>
+> | Section | State |
+> |---|---|
+> | §2 HGAC | most complete; developed alongside the implementation |
+> | §3 Analog reconstruction & RSQM | summary only, with pointers to the spec |
+> | §4 Clinical & hardware basis | the most critical to preserve; sourced |
+> | §5 HR1 filter & detector | complete, every claim sourced (2026-09-04) |
+>
+> ("PRELIMINARY" used to be in the title. It was moved here in favour of a status that says what is
+> actually unfinished: a title that reads like a throwaway draft discourages the very thing this
+> document needs, which is to be used and kept current.)
 
 ---
 
@@ -16,8 +25,24 @@
 - **`incunest_afe4490_design_rationale.md` (this file)** = process / rationale / trade-offs / discarded options.
 - **`incunest_afe4490_spec.md`** = normative result (register maps, formulas, algorithm as built).
 
-The design doc is the *delta* over the spec: it explains decisions the spec states without justifying.
 For a medical device the rationale (and clinical basis) is worth keeping traceable and versioned.
+
+**Where the boundary actually falls.** The split is not "all rationale here": the spec carries
+**short justification inline, next to the constant it explains** — the reason a threshold is 0.6 or
+a rate is 50 Hz belongs beside the number, because the spec has to be able to regenerate the code
+*with judgement*, and stripping the reasons out would leave orphan magic numbers. What lives here
+instead is what does not fit that: **long analyses, the alternatives that were rejected and why,
+the clinical basis, and the history of decisions that were later reversed**.
+
+So both documents contain "why", at different lengths and for different purposes. Examples of the
+line in practice: spec §5.3.1 justifies the 50 Hz decimated rate where it is defined, while §5 of
+this document holds the ten-strategy detector catalogue with sources — a comparison of options,
+most of them not implemented, which has no place in a normative document.
+
+*(This paragraph was added on 2026-09-04, after noticing that §7.3, §7.4 and §5.3.1 of the spec had
+accumulated exactly the kind of reasoning §1 claimed belonged only here. The rule was rewritten to
+match what the documents actually do, rather than moving the text and leaving unexplained numbers
+behind.)*
 
 ---
 
