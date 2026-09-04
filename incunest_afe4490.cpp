@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.85 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.86 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -456,11 +456,24 @@ void INCUNEST_AFE4490::setSampleRate(uint16_t hz) {
     setSampleRate(rate);
 }
 
+// Changing the PRF is not just a constant recalculation: it invalidates every piece of state
+// that was accumulated at the previous rate, and it rewrites all four sampling windows in the
+// chip. Hence the full teardown below. See spec §7.4 "Changing the rate at runtime".
+//
+// LOCK ORDER: _spi_mutex, then _state_mutex. This is the only place in the library that holds
+// both at once (getConfig() and _task_body() take them sequentially, never nested), so this
+// establishes the order — do not invert it anywhere. Holding _state_mutex across the whole
+// mutation is what makes the sequence atomic against _process_sample(), which in turn is why
+// settling can be armed AFTER _reset_algorithms() here instead of before the mutation as the
+// other setters must do (§5.8.4): with no reader able to observe an intermediate state, the
+// cross-thread race the arm-before-mutate contract guards against cannot occur.
 void INCUNEST_AFE4490::setSampleRate(AFE4490SampleRate rate) {
     const uint16_t hz = sampleRateHz(rate);
+    if (hz == _afe_sample_rate_hz) return;   // no-op: never pay a teardown for a no-change call
 
 #ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
 #endif
 
     _afe_sample_rate_hz = hz;
@@ -480,10 +493,30 @@ void INCUNEST_AFE4490::setSampleRate(AFE4490SampleRate rate) {
 
     _recalc_rate_params();
 
+    // Everything accumulated at the old rate is now wrong, and recalculating coefficients does
+    // not fix it:
+    //   * the biquads get new coefficients on top of _v1/_v2 from the old rate — init_bp() and
+    //     init_lp() explicitly leave state untouched;
+    //   * EmaChannel::init() recomputes α but keeps the mean/var accumulated with the old one;
+    //   * _hr2_buf / _hr3_buf hold samples decimated at the old rate, so the 8 s / 10.24 s
+    //     analysis windows would mix two rates until they refill;
+    //   * the decimation phase counters are mid-cycle for a factor that just changed.
+    // _reset_algorithms() clears all of it (it is the same teardown begin() performs). It also
+    // recomputes the Hann window, which does not depend on the rate — a few hundred µs of
+    // redundant work, paid once per configuration change and cheaper than maintaining a
+    // partial-reset variant that could drift out of step with this list.
+    _reset_algorithms();
+
+    // AFTER the reset, which ends by clearing the countdown. Changing the PRF rewrites all four
+    // sampling windows via _apply_timing_regs(), a signal-chain change in the sense of the
+    // datasheet's §7.7 t5 — the same reason RF, CF, ILED, AMBDAC, RG and Stage2En arm it.
+    _arm_switched_rc_settling();
+
 #ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_timing_regs();
         _apply_control_regs();
+        xSemaphoreGive(_state_mutex);
         xSemaphoreGive(_spi_mutex);
     }
 #endif

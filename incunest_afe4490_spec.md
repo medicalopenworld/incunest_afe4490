@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.85
+# incunest_afe4490 — Specification v0.86
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1946,6 +1946,40 @@ static bool isValidSampleRateHz(uint16_t hz, AFE4490SampleRate* out = nullptr);
 | both sampling windows ≥ 50 µs | TI's minimum (datasheet §8.3.1.1); the ambient window is binding and sets the ~1660 Hz ceiling |
 | `NUMAV_max ≥ 1` | at least one ADC conversion fits in the window |
 
+#### Changing the rate at runtime (v0.86)
+
+A PRF change is a mutation of the signal chain, not a constant recalculation. `setSampleRate()`
+therefore performs a full teardown, because recalculating coefficients does **not** fix state
+accumulated at the previous rate:
+
+| What | Why recalculation is not enough |
+|---|---|
+| Biquad state (`_ppgdisp_bpf`, `_hr2_bpf`, `_hr3_bpf`) | `init_bp()` / `init_lp()` explicitly leave `_v1`/`_v2` untouched — new coefficients would run on old state |
+| EMA state (2 SpO2 + 6 HGAC) | `EmaChannel::init()` recomputes α but keeps the mean/var accumulated with the old α |
+| `_hr2_buf` / `_hr3_buf` | hold samples decimated at the old rate: the 8 s / 10.24 s windows would mix two rates until they refill |
+| Decimation phase | mid-cycle for a factor that just changed |
+| Switched-RC settling | all four sampling windows are rewritten by `_apply_timing_regs()` — a signal-chain change in the sense of datasheet §7.7 t5 |
+
+Implementation notes:
+
+* **No-op on a no-change call.** Setting the rate it already has returns immediately; otherwise a
+  redundant call would drop a full analysis window and re-arm settling for nothing.
+* **Lock order `_spi_mutex` → `_state_mutex`.** This is the only place in the library holding both
+  at once (`getConfig()` and `_task_body()` take them sequentially, never nested), so it defines
+  the order. Do not invert it.
+* **Settling is armed AFTER `_reset_algorithms()`**, which ends by clearing the countdown. That is
+  safe *here* — and only here — because `_state_mutex` is held across the whole mutation, so
+  `_process_sample()` cannot observe an intermediate state; the arm-before-mutate contract of
+  §5.8.4 exists for the setters that do **not** hold it.
+* Pinned by `test_rate_change_tears_down_old_state` and `test_same_rate_is_a_no_op`.
+
+**Known limitation — HR1's moving average saturates above 640 Hz.** `hr1_ma_max_len` is 64 taps, so
+`_hr1_ma_len = round(fs / (2·hr1_ma_cutoff_hz))` clamps for four of the five catalogue entries: at
+800 Hz the effective cutoff becomes 6.2 Hz, at 1000 Hz 7.8 Hz, at 1250 Hz 9.8 Hz and at 1600 Hz
+12.5 Hz, instead of the configured 5 Hz. **Not resolved:** either `hr1_ma_max_len` rises to 160
+(+384 B in `_hr1_ma_buf`) or those entries are removed from the catalogue until HR1 supports them.
+Only 500 Hz, the default and the declared operating point, is unaffected.
+
 **If this ever becomes a range.** A `FractionalDecimator` (interpolate → filter → decimate) would
 remove the `hz % 50` condition, which is the only one that excludes an otherwise valid rate: **625
 Hz** is the single PRF with an exact `q`, 100 % ADC utilisation and valid windows that the
@@ -2615,6 +2649,27 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.86   | **A PRF change now tears down state accumulated at the previous rate       |
+|         | (§7.4 "Changing the rate at runtime").** `setSampleRate()` recalculated    |
+|         | coefficients but left four things belonging to the old rate in play: the   |
+|         | biquad state (`init_bp`/`init_lp` deliberately do not reset it), the EMA   |
+|         | state (`init()` recomputes α but keeps mean/var), the decimated HR2/HR3    |
+|         | buffers (an 8 s window mixing two rates until it refilled) and the         |
+|         | decimation phase. It also did not arm switched-RC settling, even though a  |
+|         | rate change rewrites all four sampling windows — a signal-chain change in  |
+|         | the sense of datasheet §7.7 t5, and the same reason RF, CF, ILED, AMBDAC,  |
+|         | RG and Stage2En arm it. Now: no-op when the rate is unchanged, otherwise   |
+|         | `_reset_algorithms()` plus an arm, under both mutexes.                     |
+|         | **Lock order defined: `_spi_mutex` → `_state_mutex`** — the only place     |
+|         | holding both at once, hence the order for the whole library. Holding       |
+|         | `_state_mutex` across the mutation is also why settling can be armed AFTER |
+|         | the reset here (which clears the countdown) rather than before the         |
+|         | mutation as §5.8.4 requires of setters that do not hold it.                |
+|         | Pinned by `test_rate_change_tears_down_old_state` (verified to fail with   |
+|         | the fix reverted: buffer count 400 instead of 0) and                       |
+|         | `test_same_rate_is_a_no_op`. **Recorded, NOT fixed:** HR1's moving average |
+|         | saturates at 64 taps above 640 Hz, so four catalogue entries run with an   |
+|         | effective cutoff of 6.2–12.5 Hz instead of 5 Hz.                           |
 | v0.85   | **`AFE4490SampleRate`: the supported PRFs become a closed catalogue        |
 |         | {500, 800, 1000, 1250, 1600 Hz} enforced by the type system (§7.4).**      |
 |         | `setSampleRate()` previously accepted 63–5000 Hz while checking only the   |

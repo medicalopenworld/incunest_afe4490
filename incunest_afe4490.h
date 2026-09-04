@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.85 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.86 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.85"
+#define INCUNEST_AFE4490_VERSION "0.86"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -1533,6 +1533,13 @@ public:
     uint32_t test_diag_code() const { return _current_data.diag_code; }
     // Settle-window sample count (datasheet t5) at the current sample rate — see spec §5.8.4.
     uint32_t test_compute_switched_rc_settling_samples() const { return _compute_switched_rc_settling_samples(); }
+    // Rate-change teardown observables (see setSampleRate): the settling countdown must be
+    // armed and every analysis buffer emptied, or a rate change would leave state accumulated
+    // at the previous rate in play.
+    uint32_t test_settling_countdown() const { return _switched_rc_settling_countdown; }
+    uint32_t test_hr2_buf_count() const      { return _hr2_buf_count; }
+    uint32_t test_hr3_buf_count() const      { return _hr3_buf_count; }
+    uint32_t test_hr2_decim_phase() const    { return _hr2_decim.phase; }
     // Whether _task_body() would freeze its input this cycle (§5.6.3/§5.8.4) — see v0.72.
     bool test_should_freeze_input() const { return _should_freeze_input(); }
     // OT_LED1 as of the most recently processed sample — equals the `as.ot_led1` just fed to
