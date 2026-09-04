@@ -1180,7 +1180,7 @@ rate of 60 BPM, the MA reads 75.5 BPM against the biquad's 66.1. Those same figu
 **detector** is the weaker link — a +10 % error is still a failing monitor. The full analysis, the
 strategy catalogue (TERMA, SSF, derivative variants, template matching, envelope, plus waveform
 validation, adaptive refractory and cross-checking against HR2) and the recommendation live in
-[`incunest_afe4490_design.md`](incunest_afe4490_design.md) §5, each claim with its source.
+[`incunest_afe4490_design_rationale.md`](incunest_afe4490_design_rationale.md) §5, each claim with its source.
 
 ---
 

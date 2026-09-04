@@ -13,7 +13,7 @@
 
 ## 1. Scope & relationship to the spec
 
-- **`incunest_afe4490_design.md` (this file)** = process / rationale / trade-offs / discarded options.
+- **`incunest_afe4490_design_rationale.md` (this file)** = process / rationale / trade-offs / discarded options.
 - **`incunest_afe4490_spec.md`** = normative result (register maps, formulas, algorithm as built).
 
 The design doc is the *delta* over the spec: it explains decisions the spec states without justifying.
