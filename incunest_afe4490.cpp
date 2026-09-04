@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.83 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.84 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -305,7 +305,6 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _ppgdisp_bpf(),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_dc_alpha(0.0f),
-      _decim_factor(10u), _decim_sample_rate_hz(0.0f),
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
@@ -315,9 +314,9 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
       _hr1_interval_count(0),
       _hr2_bpf(),
-      _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_decim_counter(0), _hr2_update_counter(0),
+      _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_update_counter(0),
       _hr3_bpf(),
-      _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_decim_counter(0), _hr3_update_counter(0),
+      _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_update_counter(0),
       _spo2_warmup_s(spo2_warmup_s),
       _spo2_ema_mean_tau_s(spo2_ema_mean_tau_s),
       _spo2_ema_var_tau_s(spo2_ema_var_tau_s),
@@ -1144,11 +1143,11 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _ppgdisp_bpf.reset();
     _hr2_bpf.reset();
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
-    _hr2_decim_counter = 0; _hr2_update_counter = 0;
+    _pulse_band_decim.reset(); _hr2_update_counter = 0;
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
     _hr3_bpf.reset();
     _hr3_buf_idx = 0; _hr3_buf_count = 0;
-    _hr3_decim_counter = 0; _hr3_update_counter = 0;
+    _harmonic_band_decim.reset(); _hr3_update_counter = 0;
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_result_sqi = 0.0f;
@@ -1661,15 +1660,13 @@ void INCUNEST_AFE4490::_apply_control_regs() {
 
 void INCUNEST_AFE4490::_recalc_rate_params() {
     float sample_rate_hz              = (float)_afe_sample_rate_hz;
-    // Decimated stage feeding the window-based estimators (HR2, HR3). The TARGET RATE is
-    // what is held invariant (see decim_target_rate_hz); the factor follows from it, so
-    // hr2_buf_len, hr3_buf_len, the update intervals and hr2_acorr_lag_cap keep meaning the
-    // same number of SECONDS whatever the AFE rate. _decim_sample_rate_hz is then the rate
-    // actually achieved — equal to the target for every PRF in the validated grid, and the
-    // value the algorithms must use if a rate outside it ever forces a non-integer factor.
-    uint32_t decim = (uint32_t)lroundf(sample_rate_hz / decim_target_rate_hz);
-    _decim_factor         = (uint16_t)(decim < 1u ? 1u : decim);
-    _decim_sample_rate_hz = sample_rate_hz / (float)_decim_factor;
+    // One decimation chain per filtered path. Each derives its factor from its own target
+    // rate, so the constants calibrated against a chain's rate (hr2_buf_len = 8 s,
+    // hr3_buf_len = 10.24 s, the update intervals, hr2_acorr_lag_cap) keep meaning the same
+    // number of SECONDS whatever the AFE rate. Consumers read chain.rate_hz — the rate really
+    // achieved — never the nominal target.
+    _pulse_band_decim.configure(sample_rate_hz, pulse_band_target_rate_hz);
+    _harmonic_band_decim.configure(sample_rate_hz, harmonic_band_target_rate_hz);
     _spo2_warmup_samples         = (uint32_t)(_spo2_warmup_s         * sample_rate_hz);
     _hr1_refractory_samples      = (uint32_t)(hr1_refractory_s       * sample_rate_hz);
     _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * sample_rate_hz);
@@ -2308,7 +2305,7 @@ bool INCUNEST_AFE4490::_hr2_update_sample(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         _hr2_bpf.reset();
         _hr2_buf_idx = 0; _hr2_buf_count = 0;
-        _hr2_decim_counter = 0; _hr2_update_counter = 0;
+        _pulse_band_decim.reset(); _hr2_update_counter = 0;
         memset(_hr2_buf, 0, sizeof(_hr2_buf));
         _current_data.hr2     = NAN;
         _current_data.hr2_sqi = 0.0f;
@@ -2317,9 +2314,7 @@ bool INCUNEST_AFE4490::_hr2_update_sample(float ir, ProbeState probe_state) {
 
     float filtered = -_hr2_bpf.process(ir);
 
-    _hr2_decim_counter++;
-    if (_hr2_decim_counter < (uint32_t)_decim_factor) return false;
-    _hr2_decim_counter = 0;
+    if (!_pulse_band_decim.step()) return false;
 
     _hr2_buf[_hr2_buf_idx] = filtered;
     _hr2_buf_idx = (_hr2_buf_idx + 1) % hr2_buf_len;
@@ -2346,7 +2341,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
     if (acorr0 < hr2_ot_energy_eps) { _hr2_result_sqi = 0.0f; return; }
 
-    int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * _decim_sample_rate_hz);
+    int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * _pulse_band_decim.rate_hz);
     if (min_lag < 1) min_lag = 1;
 
     // Upper bound of the lag sweep = slowest accepted heart rate, converted to lag at the
@@ -2355,12 +2350,12 @@ void INCUNEST_AFE4490::_hr2_compute() {
     // sample rate instead of assuming 50 Hz.
     //
     // Previously a hardcoded 137 samples ("22 BPM at 50 Hz"). Being fixed in *samples* while
-    // _decim_sample_rate_hz is not, it silently raised the lowest detectable HR
+    // the pulse chain rate is not, it silently raised the lowest detectable HR
     // whenever the sample rate left 500 Hz: 43.8 BPM at 1000 Hz, 87.6 BPM at 2000 Hz — both
     // above the 40 BPM default _hr_min_bpm, so real bradycardia would have been reported as
     // "no periodicity" (sqi = 0) instead of as a low HR.
     float lag_min_bpm = fmaxf(_hr_min_bpm - 3.0f, 1.0f);   // guard: setHrRange() could reach ≤3
-    int   max_lag     = (int)(60.0f / lag_min_bpm * _decim_sample_rate_hz);
+    int   max_lag     = (int)(60.0f / lag_min_bpm * _pulse_band_decim.rate_hz);
     if (max_lag > hr2_acorr_lag_cap)   max_lag = hr2_acorr_lag_cap;    // scratch-array capacity
     if (max_lag > hr2_buf_len / 2 - 1) max_lag = hr2_buf_len / 2 - 1;  // unbiased-ACF noise limit
 
@@ -2400,7 +2395,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
 
     float denom      = y_prev - 2.0f * y_peak + y_next;
     float delta      = (denom < 0.0f) ? 0.5f * (y_prev - y_next) / denom : 0.0f;
-    float peak_lag_s = (float)(min_lag + peak_idx + delta) / _decim_sample_rate_hz;
+    float peak_lag_s = (float)(min_lag + peak_idx + delta) / _pulse_band_decim.rate_hz;
 
     if (peak_lag_s <= 0.0f) { _hr2_result_sqi = 0.0f; return; }
 
@@ -2433,7 +2428,7 @@ bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         _hr3_bpf.reset();
         _hr3_buf_idx = 0; _hr3_buf_count = 0;
-        _hr3_decim_counter = 0; _hr3_update_counter = 0;
+        _harmonic_band_decim.reset(); _hr3_update_counter = 0;
         memset(_hr3_buf, 0, sizeof(_hr3_buf));
         _current_data.hr3     = NAN;
         _current_data.hr3_sqi = 0.0f;
@@ -2442,9 +2437,7 @@ bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
 
     float filtered = -_hr3_bpf.process(ir);  // negate: peaks up
 
-    _hr3_decim_counter++;
-    if (_hr3_decim_counter < (uint32_t)_decim_factor) return false;
-    _hr3_decim_counter = 0;
+    if (!_harmonic_band_decim.step()) return false;
 
     _hr3_buf[_hr3_buf_idx] = filtered;
     _hr3_buf_idx = (_hr3_buf_idx + 1) % hr3_buf_len;
@@ -2479,7 +2472,7 @@ void INCUNEST_AFE4490::_hr3_compute() {
     _fft_r2(_hr3_fft, hr3_buf_len);
 
     // ── Find HPS peak in guard-band search range ──
-    float bin_res  = _decim_sample_rate_hz / (float)hr3_buf_len;
+    float bin_res  = _harmonic_band_decim.rate_hz / (float)hr3_buf_len;
 
     int search_min = (int)ceilf((_hr_min_bpm - 3.0f) / 60.0f / bin_res);
     int search_max = (int)floorf((_hr_max_bpm + 3.0f) / 60.0f / bin_res);

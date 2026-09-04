@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.83 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.84 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.83"
+#define INCUNEST_AFE4490_VERSION "0.84"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -849,6 +849,35 @@ private:
         bool  _needs_precharge = true;
     };
 
+    // One decimation chain: keeps its own phase, its own factor and the output rate it
+    // actually produces. There is one instance per filtered signal path (see
+    // _pulse_band_decim / _harmonic_band_decim), because the paths share nothing — not the
+    // anti-alias filter, not the buffer, not the phase — so nothing forces them to run at the
+    // same rate. Each derives its factor from ITS OWN target rate: the rate is the contract,
+    // the factor follows (see spec §5.3.1).
+    struct Decimator {
+        uint16_t factor  = 1;      // input samples consumed per output sample
+        float    rate_hz = 0.0f;   // output rate ACTUALLY achieved (input_rate / factor)
+        uint32_t phase   = 0;      // input samples since the last output
+
+        // Derives the factor from the target. rate_hz is what is really achieved, which equals
+        // the target only when the input rate is an exact multiple of it — true for every PRF
+        // in the validated grid (§7.4). Consumers must use rate_hz, never the nominal target.
+        void configure(float in_rate_hz, float target_rate_hz) {
+            long f  = (target_rate_hz > 0.0f) ? lroundf(in_rate_hz / target_rate_hz) : 1;
+            factor  = (uint16_t)(f < 1 ? 1 : f);
+            rate_hz = in_rate_hz / (float)factor;
+            if (phase >= factor) phase = 0;   // a shrinking factor must not leave phase stranded
+        }
+        void reset() { phase = 0; }
+        // true when an output sample is due on this call.
+        bool step() {
+            if (++phase < factor) return false;
+            phase = 0;
+            return true;
+        }
+    };
+
     // EMA (Exponential Moving Average) estimator for one signal channel (mean + variance).
     // EMA low-pass: y += α·(x − y)  ≡  y = (1−α)·y + α·x   (α small = slow, α→1 = fast)
     // Configured by time constants τ (seconds): α = 1 − exp(−1/(τ·fs))
@@ -1185,17 +1214,15 @@ private:
     float    _hr1_ma_sum;
 
     // ── Rate-dependent algorithm parameters (derived from _afe_sample_rate_hz) ──
-    // The pair reads as before/after decimation:
-    //   _afe_sample_rate_hz    500 Hz — what the AFE delivers, and what HR1/SpO2/RSQM/HGAC use
-    //   _decim_sample_rate_hz   50 Hz — the decimated PPG stage feeding the window-based
-    //                                   estimators (HR2, HR3). See decim_target_rate_hz.
-    // _decim_factor is DERIVED from the target rate, not the other way round, so the decimated
-    // rate stays put when the AFE rate changes. _decim_sample_rate_hz is the rate ACTUALLY
-    // achieved: it equals the target exactly for every PRF in the validated grid (integer
-    // factor), and would differ only if a non-multiple-of-50 rate were ever forced through —
-    // in which case the algorithms must use this value, not the nominal 50.
-    uint16_t          _decim_factor;
-    float             _decim_sample_rate_hz;
+    //   _afe_sample_rate_hz    500 Hz — what the AFE delivers: HR1, SpO2, RSQM and HGAC use it
+    //   the two Decimators     50 Hz  — each filtered path's own decimated rate (see below)
+    // In both cases the RATE is the contract and the factor is derived, so the window lengths,
+    // lag bounds and bin resolutions calibrated against a decimated rate keep meaning the same
+    // number of seconds whatever the AFE rate does.
+    // One per filtered path. They share nothing, so nothing forces a common rate — see
+    // spec §5.3.1 for why both currently target 50 Hz and what would justify separating them.
+    Decimator         _pulse_band_decim;      // BP 0.5-5 Hz  → HR2_ACF (+ future MPM/YIN)
+    Decimator         _harmonic_band_decim;   // LP 15 Hz     → HR3
     uint32_t          _spo2_warmup_samples;
     uint32_t          _hr1_refractory_samples;
     float             _hr1_dc_alpha;
@@ -1261,26 +1288,31 @@ private:
     // thin. Harmless for HR (there is almost no PPG content above 25 Hz) but the folded noise
     // raises the spectral floor, which is paid in hr3_sqi. The lever if it ever matters is a
     // 4th-order low-pass before decimating, NOT a different rate. See spec §5.3/§5.4.
-    static constexpr float decim_target_rate_hz = 50.0f;
+    // One target per chain. Both are 50 Hz today, and that is a coincidence of requirements,
+    // not a constraint: the harmonic chain NEEDS ~50 Hz (its 15 Hz low-pass would stop
+    // protecting the decimation below that), while the pulse chain has 5x of spare margin (its
+    // bandpass cuts at 5 Hz, so 25 Hz would still leave Nyquist at 12.5 Hz). Lowering the pulse
+    // chain to 25 Hz would cut the O(N·lags) autocorrelation cost by ~3.9x — tripled once MPM
+    // and YIN share the buffer — at the price of lag resolution, which is exactly what those
+    // two estimators depend on. Decide it with the offline experiment, not by guessing.
+    static constexpr float pulse_band_target_rate_hz    = 50.0f;
+    static constexpr float harmonic_band_target_rate_hz = 50.0f;
 
     // ── HR2 — autocorrelation-based HR algorithm ──────────────────────────────
-    // Bandpass-filters led1_sub (0.5–5 Hz), decimates by _decim_factor,
+    // Bandpass-filters led1_sub (0.5–5 Hz), decimates via _pulse_band_decim,
     // accumulates a circular buffer of hr2_buf_len samples, then periodically
     // computes normalised autocorrelation to find the fundamental RR period.
-    static constexpr int hr2_buf_len         = 400;  // 8 s at _decim_sample_rate_hz = 50 Hz
+    static constexpr int hr2_buf_len         = 400;  // 8 s at the pulse-chain rate (50 Hz)
 
     // Capacity of the lag-sweep scratch array — a storage bound, NOT the search policy.
     // The lag range actually swept is derived at runtime in _hr2_compute() from
     // _hr_min_bpm/_hr_max_bpm and the current decimated rate; this constant only says how
     // large a sweep fits.
     //
-    // At the operating rate (500 Hz → _decim_sample_rate_hz = 50 Hz) the default 40 BPM lower
-    // bound needs lag ≤ 81, so the cap is inactive with ~70 % headroom. It only becomes
-    // binding above ~845 Hz sample rate, where reaching 40 BPM would need more than 137 lags.
-    // Raising the cap would not help much: hr2_buf_len is fixed at 400 samples, so above
-    // ~1200 Hz the 400/_decim_sample_rate_hz window is itself too short to resolve 40 BPM.
-    // Since v0.83 _decim_factor is derived from decim_target_rate_hz, so the decimated rate no
-    // longer moves with the AFE rate and this cap can never become binding.
+    // At the pulse-chain rate of 50 Hz the default 40 BPM lower bound needs lag ≤ 81, so the
+    // cap is inactive with ~70 % headroom. Since v0.83 the chain's factor derives from its
+    // target rate, so that rate no longer moves with the AFE rate and this cap cannot become
+    // binding — but it WOULD bind if the pulse chain's target were ever raised above ~85 Hz.
     static constexpr int hr2_acorr_lag_cap   = 137;
 
     // The unbiased normaliser N/(N−τ) grows without bound as τ → N. Capping the lag below
@@ -1293,11 +1325,10 @@ private:
     float    _hr2_seg[hr2_buf_len];          // linearized copy for autocorrelation (avoids stack pressure)
     int      _hr2_buf_idx;                   // next write position in _hr2_buf
     uint32_t _hr2_buf_count;                 // samples written (capped at hr2_buf_len)
-    uint32_t _hr2_decim_counter;             // decimation phase counter
     uint32_t _hr2_update_counter;            // decimated samples since last autocorr computation
 
     // ── HR3 — FFT + Harmonic Product Spectrum HR algorithm ───────────────────
-    // Low-pass-filters led1_sub (15 Hz anti-aliasing, see _hr3_bpf default), decimates by _decim_factor,
+    // Low-pass-filters led1_sub (15 Hz anti-aliasing, see _hr3_bpf default), decimates via _harmonic_band_decim,
     // accumulates 512 samples, then every hr3_update_interval decimated samples applies
     // a Hann window, computes the real FFT, and finds the dominant peak via the
     // Harmonic Product Spectrum (fundamental × 2nd harmonic × 3rd harmonic).
@@ -1309,7 +1340,6 @@ private:
     float    _hr3_fft[hr3_buf_len * 2];        // complex FFT buffer (interleaved re/im), also scratch for windowed input
     int      _hr3_buf_idx;                     // next write position in _hr3_buf
     uint32_t _hr3_buf_count;                   // samples written (capped at hr3_buf_len)
-    uint32_t _hr3_decim_counter;               // decimation phase counter
     uint32_t _hr3_update_counter;              // decimated samples since last FFT computation
 
     // ── Algorithm tuning parameters (runtime-configurable) ──────────────────
@@ -1388,6 +1418,12 @@ public:
 
     // HR2
     void  test_feed_hr2(float ot_ir, ProbeState probe_state) { _hr2_update_for_test(ot_ir, probe_state); }
+    // Decimation chains: factor and achieved rate, per chain. Exposed so a test can assert
+    // that the two are derived independently from their own targets (see spec §5.3.1).
+    uint16_t test_pulse_decim_factor()      { return _pulse_band_decim.factor; }
+    uint16_t test_harmonic_decim_factor()   { return _harmonic_band_decim.factor; }
+    float    test_pulse_decim_rate_hz()     { return _pulse_band_decim.rate_hz; }
+    float    test_harmonic_decim_rate_hz()  { return _harmonic_band_decim.rate_hz; }
     float test_hr2()                        { return _current_data.hr2; }
     float test_hr2_sqi()                    { return _current_data.hr2_sqi; }
 
