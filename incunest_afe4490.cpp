@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.80 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.83 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -86,7 +86,6 @@ namespace {
     constexpr float    hr2_ot_energy_eps  = 1e-16f;
 
     // ── HR3 ───────────────────────────────────────────────────────────────────
-    constexpr int      hr3_decim_factor    = 10;       // 500 Hz → 50 Hz effective sample rate
     // SQI window half-width W [bins] on each side of {b1, b2}.
     // Window = [b1-W .. b2+W], total width = 2W+2 bins (~±0.49 Hz at 50 Hz/512).
     // Wider W → SQI sensitive to broader spectral context; narrower W → more local.
@@ -106,7 +105,7 @@ namespace {
     // (0–10 µA, 1 µA/step), and 0.2 V/step = 2 × Ri × 1 µA = 2 × 100 kΩ × 1 µA.
     // adc::SCALE = adc::FSR / 2^21 (bipolar twos-complement LSB; see namespace adc in .h).
     // When STAGE2EN = 0 (Stage 2 bypassed): v_tia_volt = adc_value * adc::SCALE.
-    // Physical thresholds (fs = TIA full-scale differential 1.0 V, empirical lin 1.8 V) live in
+    // Physical thresholds (TIA full-scale differential 1.0 V, empirical lin 1.8 V) live in
     // tia_axis (FS_V / LIN_V), the single source of truth, since v0.35 — physics belongs to
     // the reconstruction layer; only HGAC actuation POLICY stays here.
     // hgac_v_tia_high2 is now a runtime-tunable AFE4490Config field (promoted
@@ -306,6 +305,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _ppgdisp_bpf(),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_dc_alpha(0.0f),
+      _decim_factor(10u), _decim_sample_rate_hz(0.0f),
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
@@ -348,7 +348,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     _current_data = AFE4490Data{};
     _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
-    _hr3_bpf.f_low     = 0.4f;  _hr3_bpf.f_high     = 15.0f;
+    _hr3_bpf.f_high    = 15.0f;   // low-pass only — f_low stays 0 (unused for LP)
     _recalc_rate_params();
     _reset_algorithms();
 }
@@ -492,9 +492,9 @@ void INCUNEST_AFE4490::setAdcAverages(uint8_t num) {
 }
 
 float INCUNEST_AFE4490::_quantize_led_mA(float mA) const {
-    float fs = (float)_afe_led_range_mA;
-    uint8_t code = (uint8_t)constrain(roundf((mA / fs) * 256.0f), 0.0f, 255.0f);
-    return (code / 256.0f) * fs;
+    float full_scale_mA = (float)_afe_led_range_mA;
+    uint8_t code = (uint8_t)constrain(roundf((mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
+    return (code / 256.0f) * full_scale_mA;
 }
 
 void INCUNEST_AFE4490::setLED1Current(float mA) {
@@ -781,7 +781,7 @@ void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHR3Filter(float f_low_hz, float f_high_hz) {
+void INCUNEST_AFE4490::setHR3Filter(float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _hr3_bpf.init_lp(f_high_hz, (float)_afe_sample_rate_hz);
     _hr3_bpf.reset();
@@ -987,7 +987,6 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
-    cfg.hr3_f_low_hz     = _hr3_bpf.f_low;
     cfg.hr3_f_high_hz    = _hr3_bpf.f_high;
     cfg.spo2_a           = _spo2_a;
     cfg.spo2_b           = _spo2_b;
@@ -1643,9 +1642,9 @@ void INCUNEST_AFE4490::_apply_analog_regs() {
 
     // LEDCNTRL: LED_RANGE | (code_led1 << 8) | code_led2
     // I (mA) = (code / 256) * full_scale_mA
-    float fs = (float)_afe_led_range_mA;
-    uint8_t code1 = (uint8_t)constrain(roundf((_afe_led1_current_mA / fs) * 256.0f), 0.0f, 255.0f);
-    uint8_t code2 = (uint8_t)constrain(roundf((_afe_led2_current_mA / fs) * 256.0f), 0.0f, 255.0f);
+    float full_scale_mA = (float)_afe_led_range_mA;
+    uint8_t code1 = (uint8_t)constrain(roundf((_afe_led1_current_mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
+    uint8_t code2 = (uint8_t)constrain(roundf((_afe_led2_current_mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
     uint32_t range_bit = (_afe_led_range_mA == 75) ? 0x010000UL : 0x000000UL;
     _write_reg(REG_LEDCNTRL, range_bit | ((uint32_t)code1 << 8) | code2);
 
@@ -1661,28 +1660,37 @@ void INCUNEST_AFE4490::_apply_control_regs() {
 #endif  // !INCUNEST_OFFLINE
 
 void INCUNEST_AFE4490::_recalc_rate_params() {
-    float fs              = (float)_afe_sample_rate_hz;
-    _spo2_warmup_samples         = (uint32_t)(_spo2_warmup_s         * fs);
-    _hr1_refractory_samples      = (uint32_t)(hr1_refractory_s       * fs);
-    _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * fs);
+    float sample_rate_hz              = (float)_afe_sample_rate_hz;
+    // Decimated stage feeding the window-based estimators (HR2, HR3). The TARGET RATE is
+    // what is held invariant (see decim_target_rate_hz); the factor follows from it, so
+    // hr2_buf_len, hr3_buf_len, the update intervals and hr2_acorr_lag_cap keep meaning the
+    // same number of SECONDS whatever the AFE rate. _decim_sample_rate_hz is then the rate
+    // actually achieved — equal to the target for every PRF in the validated grid, and the
+    // value the algorithms must use if a rate outside it ever forces a non-integer factor.
+    uint32_t decim = (uint32_t)lroundf(sample_rate_hz / decim_target_rate_hz);
+    _decim_factor         = (uint16_t)(decim < 1u ? 1u : decim);
+    _decim_sample_rate_hz = sample_rate_hz / (float)_decim_factor;
+    _spo2_warmup_samples         = (uint32_t)(_spo2_warmup_s         * sample_rate_hz);
+    _hr1_refractory_samples      = (uint32_t)(hr1_refractory_s       * sample_rate_hz);
+    _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * sample_rate_hz);
     if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
-    _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
-    _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, fs);
+    _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, sample_rate_hz);
+    _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, sample_rate_hz);
     // HGAC EMAs: var unused (only mean is read), so var_tau = mean_tau; warmup = 3·τ (fail-safe
     // via valid() → NaN-free: _hgac_track() skips checks until the EMA has matured after a reset).
-    _hgac_ema_fast_led1.init(hgac_ema_fast_tau_s, hgac_ema_fast_tau_s, fs, 3.0f * hgac_ema_fast_tau_s);
-    _hgac_ema_fast_led2.init(hgac_ema_fast_tau_s, hgac_ema_fast_tau_s, fs, 3.0f * hgac_ema_fast_tau_s);
-    _hgac_ema_slow_led1.init(hgac_ema_slow_tau_s, hgac_ema_slow_tau_s, fs, 3.0f * hgac_ema_slow_tau_s);
-    _hgac_ema_slow_led2.init(hgac_ema_slow_tau_s, hgac_ema_slow_tau_s, fs, 3.0f * hgac_ema_slow_tau_s);
-    _hgac_ema_ambient_led1.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, fs, 3.0f * hgac_ema_ambient_tau_s);
-    _hgac_ema_ambient_led2.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, fs, 3.0f * hgac_ema_ambient_tau_s);
-    _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * fs));
-    _hr1_ma_len             = (uint32_t)roundf(fs / (2.0f * _hr1_ma_cutoff_hz));
+    _hgac_ema_fast_led1.init(hgac_ema_fast_tau_s, hgac_ema_fast_tau_s, sample_rate_hz, 3.0f * hgac_ema_fast_tau_s);
+    _hgac_ema_fast_led2.init(hgac_ema_fast_tau_s, hgac_ema_fast_tau_s, sample_rate_hz, 3.0f * hgac_ema_fast_tau_s);
+    _hgac_ema_slow_led1.init(hgac_ema_slow_tau_s, hgac_ema_slow_tau_s, sample_rate_hz, 3.0f * hgac_ema_slow_tau_s);
+    _hgac_ema_slow_led2.init(hgac_ema_slow_tau_s, hgac_ema_slow_tau_s, sample_rate_hz, 3.0f * hgac_ema_slow_tau_s);
+    _hgac_ema_ambient_led1.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, sample_rate_hz, 3.0f * hgac_ema_ambient_tau_s);
+    _hgac_ema_ambient_led2.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, sample_rate_hz, 3.0f * hgac_ema_ambient_tau_s);
+    _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * sample_rate_hz));
+    _hr1_ma_len             = (uint32_t)roundf(sample_rate_hz / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
     if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) _hr1_ma_len = (uint32_t)hr1_ma_max_len;
-    _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, fs);
-    _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, fs);
-    _hr3_bpf.init_lp(_hr3_bpf.f_high, fs);
+    _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
+    _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, sample_rate_hz);
+    _hr3_bpf.init_lp(_hr3_bpf.f_high, sample_rate_hz);
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
 }
@@ -1779,15 +1787,15 @@ void INCUNEST_AFE4490::_recalc_afe_tia_cf_led2() {
 
 // ── BiquadFilter methods ──────────────────────────────────────────────────────
 
-void INCUNEST_AFE4490::BiquadFilter::init_bp(float f_low_hz, float f_high_hz, float fs) {
+void INCUNEST_AFE4490::BiquadFilter::init_bp(float f_low_hz, float f_high_hz, float sample_rate_hz) {
     // 2nd-order Butterworth bandpass via bilinear transform.
     // Analog prototype: H(s) = BW·s / (s² + BW·s + Ω₀²)
     // State unchanged — call reset() if needed.
     f_low  = f_low_hz;
     f_high = f_high_hz;
-    float k     = 2.0f * fs;
-    float o_low = k * tanf(3.14159265358979f * f_low_hz  / fs);
-    float o_hi  = k * tanf(3.14159265358979f * f_high_hz / fs);
+    float k     = 2.0f * sample_rate_hz;
+    float o_low = k * tanf(3.14159265358979f * f_low_hz  / sample_rate_hz);
+    float o_hi  = k * tanf(3.14159265358979f * f_high_hz / sample_rate_hz);
     float o0sq  = o_low * o_hi;
     float bw    = o_hi - o_low;
     float d     = k*k + bw*k + o0sq;
@@ -1798,11 +1806,11 @@ void INCUNEST_AFE4490::BiquadFilter::init_bp(float f_low_hz, float f_high_hz, fl
     _a2 =  (k*k - bw*k + o0sq) / d;
 }
 
-void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float fs) {
+void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float sample_rate_hz) {
     // 2nd-order Butterworth low-pass via bilinear transform.
     // Uses f_high_hz as the -3 dB cutoff. State unchanged — call reset() if needed.
     f_high = f_high_hz;
-    float Ohm  = tanf(3.14159265358979f * f_high_hz / fs);
+    float Ohm  = tanf(3.14159265358979f * f_high_hz / sample_rate_hz);
     float Ohm2 = Ohm * Ohm;
     float sqrt2 = 1.41421356f;
     float d    = 1.0f + sqrt2 * Ohm + Ohm2;
@@ -2310,7 +2318,7 @@ bool INCUNEST_AFE4490::_hr2_update_sample(float ir, ProbeState probe_state) {
     float filtered = -_hr2_bpf.process(ir);
 
     _hr2_decim_counter++;
-    if (_hr2_decim_counter < (uint32_t)hr2_decim_factor) return false;
+    if (_hr2_decim_counter < (uint32_t)_decim_factor) return false;
     _hr2_decim_counter = 0;
 
     _hr2_buf[_hr2_buf_idx] = filtered;
@@ -2338,8 +2346,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
     if (acorr0 < hr2_ot_energy_eps) { _hr2_result_sqi = 0.0f; return; }
 
-    float fs2     = (float)_afe_sample_rate_hz / (float)hr2_decim_factor;
-    int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * fs2);
+    int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * _decim_sample_rate_hz);
     if (min_lag < 1) min_lag = 1;
 
     // Upper bound of the lag sweep = slowest accepted heart rate, converted to lag at the
@@ -2348,12 +2355,12 @@ void INCUNEST_AFE4490::_hr2_compute() {
     // sample rate instead of assuming 50 Hz.
     //
     // Previously a hardcoded 137 samples ("22 BPM at 50 Hz"). Being fixed in *samples* while
-    // fs2 = sample_rate/hr2_decim_factor is not, it silently raised the lowest detectable HR
+    // _decim_sample_rate_hz is not, it silently raised the lowest detectable HR
     // whenever the sample rate left 500 Hz: 43.8 BPM at 1000 Hz, 87.6 BPM at 2000 Hz — both
     // above the 40 BPM default _hr_min_bpm, so real bradycardia would have been reported as
     // "no periodicity" (sqi = 0) instead of as a low HR.
     float lag_min_bpm = fmaxf(_hr_min_bpm - 3.0f, 1.0f);   // guard: setHrRange() could reach ≤3
-    int   max_lag     = (int)(60.0f / lag_min_bpm * fs2);
+    int   max_lag     = (int)(60.0f / lag_min_bpm * _decim_sample_rate_hz);
     if (max_lag > hr2_acorr_lag_cap)   max_lag = hr2_acorr_lag_cap;    // scratch-array capacity
     if (max_lag > hr2_buf_len / 2 - 1) max_lag = hr2_buf_len / 2 - 1;  // unbiased-ACF noise limit
 
@@ -2393,7 +2400,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
 
     float denom      = y_prev - 2.0f * y_peak + y_next;
     float delta      = (denom < 0.0f) ? 0.5f * (y_prev - y_next) / denom : 0.0f;
-    float peak_lag_s = (float)(min_lag + peak_idx + delta) / fs2;
+    float peak_lag_s = (float)(min_lag + peak_idx + delta) / _decim_sample_rate_hz;
 
     if (peak_lag_s <= 0.0f) { _hr2_result_sqi = 0.0f; return; }
 
@@ -2436,7 +2443,7 @@ bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
     float filtered = -_hr3_bpf.process(ir);  // negate: peaks up
 
     _hr3_decim_counter++;
-    if (_hr3_decim_counter < (uint32_t)hr3_decim_factor) return false;
+    if (_hr3_decim_counter < (uint32_t)_decim_factor) return false;
     _hr3_decim_counter = 0;
 
     _hr3_buf[_hr3_buf_idx] = filtered;
@@ -2472,8 +2479,7 @@ void INCUNEST_AFE4490::_hr3_compute() {
     _fft_r2(_hr3_fft, hr3_buf_len);
 
     // ── Find HPS peak in guard-band search range ──
-    float fs_dec   = (float)_afe_sample_rate_hz / (float)hr3_decim_factor;
-    float bin_res  = fs_dec / (float)hr3_buf_len;
+    float bin_res  = _decim_sample_rate_hz / (float)hr3_buf_len;
 
     int search_min = (int)ceilf((_hr_min_bpm - 3.0f) / 60.0f / bin_res);
     int search_max = (int)floorf((_hr_max_bpm + 3.0f) / 60.0f / bin_res);

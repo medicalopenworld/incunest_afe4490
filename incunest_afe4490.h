@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.82 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.83 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.82"
+#define INCUNEST_AFE4490_VERSION "0.83"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -598,7 +598,6 @@ struct AFE4490Config {
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
-    float             hr3_f_low_hz;      // HR3 bandpass lower cutoff [Hz]
     float             hr3_f_high_hz;     // HR3 bandpass upper cutoff [Hz]
     float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
     float             spo2_b;
@@ -690,7 +689,10 @@ public:
     void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 
     // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
-    void setHR3Filter(float f_low_hz = 0.4f, float f_high_hz = 15.0f);
+    // HR3 uses a PURE LOW-PASS by design (see spec §5.4): the FFT needs the harmonics
+    // preserved in phase, and the DC is removed by mean subtraction in _hr3_linearize(),
+    // not by a high-pass corner. Takes the cutoff only — there is no lower corner.
+    void setHR3Filter(float f_high_hz = 15.0f);
 
     // SpO2 algorithm setters (callable before or after begin())
     void setSpO2WarmupS(float s);                              // warmup period before reporting SpO2
@@ -817,10 +819,10 @@ private:
         float f_high = 0.0f;   // upper cutoff / LP cutoff [Hz]
 
         // Design a 2nd-order Butterworth bandpass. Recalculates coefficients; does not reset state.
-        void init_bp(float f_low_hz, float f_high_hz, float fs);
+        void init_bp(float f_low_hz, float f_high_hz, float sample_rate_hz);
 
         // Design a 2nd-order Butterworth lowpass. Recalculates coefficients; does not reset state.
-        void init_lp(float f_high_hz, float fs);
+        void init_lp(float f_high_hz, float sample_rate_hz);
 
         // Clear state and schedule precharge on next process() call.
         void reset() { _v1 = 0.0f; _v2 = 0.0f; _needs_precharge = true; }
@@ -859,10 +861,10 @@ private:
         // Must be called before the first update(). Safe to call again to reconfigure.
         // warmup_s (optional): samples until valid() turns true after construction/reset.
         // Default 0 → always valid (SpO2 manages its own warmup externally). HGAC passes 3·τ.
-        void init(float mean_tau_s, float var_tau_s, float fs, float warmup_s = 0.0f) {
-            _mean_alpha   = 1.0f - expf(-1.0f / (mean_tau_s * fs));
-            _var_alpha    = 1.0f - expf(-1.0f / (var_tau_s  * fs));
-            _warmup_count = (uint32_t)roundf(warmup_s * fs);
+        void init(float mean_tau_s, float var_tau_s, float sample_rate_hz, float warmup_s = 0.0f) {
+            _mean_alpha   = 1.0f - expf(-1.0f / (mean_tau_s * sample_rate_hz));
+            _var_alpha    = 1.0f - expf(-1.0f / (var_tau_s  * sample_rate_hz));
+            _warmup_count = (uint32_t)roundf(warmup_s * sample_rate_hz);
         }
 
         // Zero mean, var and count; keeps α and warmup unchanged. count=0 re-arms valid().
@@ -1183,6 +1185,17 @@ private:
     float    _hr1_ma_sum;
 
     // ── Rate-dependent algorithm parameters (derived from _afe_sample_rate_hz) ──
+    // The pair reads as before/after decimation:
+    //   _afe_sample_rate_hz    500 Hz — what the AFE delivers, and what HR1/SpO2/RSQM/HGAC use
+    //   _decim_sample_rate_hz   50 Hz — the decimated PPG stage feeding the window-based
+    //                                   estimators (HR2, HR3). See decim_target_rate_hz.
+    // _decim_factor is DERIVED from the target rate, not the other way round, so the decimated
+    // rate stays put when the AFE rate changes. _decim_sample_rate_hz is the rate ACTUALLY
+    // achieved: it equals the target exactly for every PRF in the validated grid (integer
+    // factor), and would differ only if a non-multiple-of-50 rate were ever forced through —
+    // in which case the algorithms must use this value, not the nominal 50.
+    uint16_t          _decim_factor;
+    float             _decim_sample_rate_hz;
     uint32_t          _spo2_warmup_samples;
     uint32_t          _hr1_refractory_samples;
     float             _hr1_dc_alpha;
@@ -1218,25 +1231,56 @@ private:
     int32_t  _hr1_intervals[5];
     uint8_t  _hr1_interval_count;
 
+    // ── Decimated analysis rate — the invariant, not the factor ───────────────
+    // HR1 works on the full AFE rate, sample by sample. HR2 and HR3 (and any future
+    // lag-domain estimator sharing their buffer) work on a decimated copy of the signal.
+    // Named after the signal stage rather than after any algorithm, so it stays correct as
+    // estimators are added or removed.
+    //
+    // WHAT IS HELD FIXED: the decimated RATE, not the decimation factor. Four constants are
+    // calibrated against it — hr2_buf_len (400 = 8 s), hr3_buf_len (512 = 10.24 s, 0.098 Hz
+    // per bin), the hrX_update_interval defaults (25 = 0.5 s) and hr2_acorr_lag_cap (137 =
+    // 22 BPM) — so if the factor were fixed instead, changing the AFE rate would silently
+    // move all four at once. Deriving the factor from the target keeps them true.
+    //
+    // WHY 50 Hz (recorded 2026-09-04; it had never been justified, only inherited from
+    // "divide 500 by a round 10"). It is the only viable value, for four reasons:
+    //   1. It is the GCD of the validated PRF grid {500, 800, 1000, 1250, 1600} — the
+    //      highest decimated rate that yields an INTEGER factor at every admissible PRF
+    //      (factors 10, 16, 20, 25, 32). The only other candidates are its own divisors.
+    //   2. Below it the anti-aliasing collapses: HR3 low-passes at 15 Hz (2nd order), so at
+    //      25 Hz the Nyquist limit (12.5 Hz) falls BELOW the filter's own corner — it would
+    //      attenuate 1.7 dB, i.e. not protect the decimation at all.
+    //   3. Below it the windows also grow to 16-20 s, where they collide with physiological
+    //      non-stationarity: a transient neonatal bradycardia lasts seconds, and an HR that
+    //      changes inside the window smears the peak instead of sharpening it.
+    //   4. Above it the fixed-length buffers grow too short in TIME: at 125 Hz the 400-sample
+    //      HR2 window is 3.2 s, only 2.1 cycles at the slowest accepted rate (40 BPM), and
+    //      HR3's bin resolution degrades to 0.24 Hz (14.6 BPM per bin).
+    // Known weak point: -9.4 dB of anti-alias attenuation at Nyquist for a x10 decimation is
+    // thin. Harmless for HR (there is almost no PPG content above 25 Hz) but the folded noise
+    // raises the spectral floor, which is paid in hr3_sqi. The lever if it ever matters is a
+    // 4th-order low-pass before decimating, NOT a different rate. See spec §5.3/§5.4.
+    static constexpr float decim_target_rate_hz = 50.0f;
+
     // ── HR2 — autocorrelation-based HR algorithm ──────────────────────────────
-    // Bandpass-filters led1_sub (0.5–5 Hz), decimates by hr2_decim_factor,
+    // Bandpass-filters led1_sub (0.5–5 Hz), decimates by _decim_factor,
     // accumulates a circular buffer of hr2_buf_len samples, then periodically
     // computes normalised autocorrelation to find the fundamental RR period.
-    static constexpr int hr2_buf_len         = 400;  // 8 s at 50 Hz (fs/hr2_decim_factor)
-    static constexpr int hr2_decim_factor    = 10;   // 500 Hz → 50 Hz
+    static constexpr int hr2_buf_len         = 400;  // 8 s at _decim_sample_rate_hz = 50 Hz
 
     // Capacity of the lag-sweep scratch array — a storage bound, NOT the search policy.
     // The lag range actually swept is derived at runtime in _hr2_compute() from
     // _hr_min_bpm/_hr_max_bpm and the current decimated rate; this constant only says how
     // large a sweep fits.
     //
-    // At the operating rate (500 Hz → fs2 = 50 Hz) the default 40 BPM lower bound needs
-    // lag ≤ 81, so the cap is inactive with ~70 % headroom. It only becomes binding above
-    // ~845 Hz sample rate, where reaching 40 BPM would need more than 137 lags. Raising the
-    // cap would not help much: hr2_buf_len is fixed at 400 samples, so above ~1200 Hz the
-    // 400/fs2 window is itself too short to resolve 40 BPM. The real fix for high sample
-    // rates is an adaptive hr2_decim_factor holding fs2 ≈ 50 Hz — deliberately out of scope
-    // while 500 Hz is the only rate in use.
+    // At the operating rate (500 Hz → _decim_sample_rate_hz = 50 Hz) the default 40 BPM lower
+    // bound needs lag ≤ 81, so the cap is inactive with ~70 % headroom. It only becomes
+    // binding above ~845 Hz sample rate, where reaching 40 BPM would need more than 137 lags.
+    // Raising the cap would not help much: hr2_buf_len is fixed at 400 samples, so above
+    // ~1200 Hz the 400/_decim_sample_rate_hz window is itself too short to resolve 40 BPM.
+    // Since v0.83 _decim_factor is derived from decim_target_rate_hz, so the decimated rate no
+    // longer moves with the AFE rate and this cap can never become binding.
     static constexpr int hr2_acorr_lag_cap   = 137;
 
     // The unbiased normaliser N/(N−τ) grows without bound as τ → N. Capping the lag below
@@ -1253,12 +1297,11 @@ private:
     uint32_t _hr2_update_counter;            // decimated samples since last autocorr computation
 
     // ── HR3 — FFT + Harmonic Product Spectrum HR algorithm ───────────────────
-    // Low-pass-filters led1_sub (10 Hz anti-aliasing), decimates by hr3_decim_factor,
+    // Low-pass-filters led1_sub (15 Hz anti-aliasing, see _hr3_bpf default), decimates by _decim_factor,
     // accumulates 512 samples, then every hr3_update_interval decimated samples applies
     // a Hann window, computes the real FFT, and finds the dominant peak via the
     // Harmonic Product Spectrum (fundamental × 2nd harmonic × 3rd harmonic).
     static constexpr int hr3_buf_len         = 512;  // 10.24 s at 50 Hz → freq resolution 0.098 Hz ≈ 5.9 BPM/bin
-    static constexpr int hr3_decim_factor    = 10;   // 500 Hz → 50 Hz
 
     BiquadFilter _hr3_bpf;                     // bandpass filter (default 0.4–15 Hz)
     float    _hr3_buf[hr3_buf_len];            // circular buffer of decimated LP-filtered samples
