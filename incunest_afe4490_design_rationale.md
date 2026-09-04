@@ -13,6 +13,7 @@
 > | §3 Analog reconstruction & RSQM | summary only, with pointers to the spec |
 > | §4 Clinical & hardware basis | the most critical to preserve; sourced |
 > | §5 HR1 filter & detector | complete, every claim sourced (2026-09-04) |
+> | §6 Sample-rate dependency audit | complete; the tests that replace it are in place |
 >
 > ("PRELIMINARY" used to be in the title. It was moved here in favour of a status that says what is
 > actually unfinished: a title that reads like a throwaway draft discourages the very thing this
@@ -298,7 +299,52 @@ the recorded captures, and ideally neonatal captures — same approach as §5.2.
 
 ---
 
-## 6. Nomenclature & conventions (pointer)
+## 6. Sample-rate dependency audit (2026-09-04)
+
+Alex's concern after v0.86b: *"me preocupa encontrar más dependencias del sampling rate del AFE sin
+resolver"*. A parameter whose meaning is a **duration** but whose value is stored in **samples** —
+or as a **per-sample factor** — silently changes meaning when the rate changes. Four fronts were
+swept: parameters in samples, per-sample coefficients, the defaults namespace, and everything
+touching `_afe_sample_rate_hz`.
+
+| Item | Verdict | Source |
+|---|---|---|
+| `_hr1_running_max *= 0.9999f` | ⚠️ **live defect** — per-sample literal, tau 10 000 samples = 20 s at 500 Hz but **6.25 s at 1600 Hz**; relaxed HR1's detection threshold 3.2× faster at the top of the catalogue. Fixed in v0.87 (`hr1_max_decay_tau_s`) | own audit |
+| `ts_emit_interval = 2500` samples | ⚠️ live defect (telemetry only) — its own comment admitted *"5 s at 500 Hz"*, i.e. 1.56 s at 1600 Hz. Fixed in v0.87 (`ts_emit_period_s`) | own audit |
+| `hr2/hr3_update_interval` (decimated samples) | ⚠️ latent — immune to the AFE rate only because the decimated rate is the invariant (§5.3.1); lowering a chain's target would have changed the period silently. Fixed in v0.87 (seconds) | own audit |
+| `_diag_holdoff_samples` | ✅ derived from ms × fs | own audit |
+| `_spo2_warmup_samples`, `_hr1_refractory_samples`, `_rsqm_probe_state_min_samples`, `_hr1_dc_alpha`, `_hr1_ma_len`, the 8 EMAs, the 3 biquads | ✅ derived in `_recalc_rate_params()` | own audit |
+| `_compute_switched_rc_settling_samples()` | ✅ derived from the datasheet's t₅ and the phase windows | own audit |
+| `hr2_buf_len`, `hr3_buf_len`, `hr2_acorr_lag_cap` | ✅ in decimated samples, immune by the 50 Hz invariant — documented as such | own audit |
+| `hr1_sqi_cv_max`, `hr2_min_corr`, `hr3_snr_local_w`, `hr_min/max_bpm`, PI thresholds | ✅ dimensionless or in BPM/Hz — no rate dependency | own audit |
+
+**The lasting outcome is not the two fixes, it is the net.** A hand audit finds what it finds; a
+third instance would need another hand audit. `test_time_parameters_hold_across_catalogue` and
+`test_hr1_running_max_decay_is_time_based` sweep the whole PRF catalogue asserting that each
+duration is preserved **in seconds**.
+
+**Two rules those tests had to learn the hard way** — the first version passed with both defects
+deliberately reintroduced, which is worth recording because both mistakes are easy to repeat:
+
+1. **Observe the effect, not the coefficient.** Reading the derived `alpha` could not tell a derived
+   parameter from a hardcoded literal used *instead* of it: the coefficient stayed correct and
+   simply went unused. The decay is therefore measured on `_hr1_running_max` itself — charge it,
+   wait a fixed number of *seconds*, and check the surviving fraction is `exp(-t/tau)` at every rate.
+2. **Exercise the setter with a non-default value.** Checking only defaults cannot distinguish a
+   derived parameter from a constant equal to that default: hardcoding `_hr2_update_interval = 25`
+   passes "25 samples / 50 Hz == 0.5 s" because 25 *is* the default. The test now asks for 1.0 s.
+
+A detail worth remembering: the decay regression fails at **800 Hz and above, never at 500 Hz** —
+the `0.9999` literal is exactly right at the default rate, which is why it survived so long.
+
+**Not covered by the native tests:** `_emit_tasks()` and the rest of the `$TIMING` telemetry live
+behind `INCUNEST_TIMING_STATS` *and* outside `INCUNEST_OFFLINE`, so `pio test -e native` never
+compiles them — the `ts_emit_interval` rename broke the firmware build while all tests passed.
+Any change touching that block needs `pio run -e incunest_V16` to be verified.
+
+---
+
+## 7. Nomenclature & conventions (pointer)
 
 Naming rules, domain prefixes, ADC `adc_code`/`LSB` conventions, and the code↔ISO 80601-2-61↔AFE4490
 term mapping (led1/led2 vs ir/red, etc.) are captured in the project's nomenclature notes; to be

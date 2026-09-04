@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.86b — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.87 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -70,7 +70,10 @@ namespace {
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
     constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
-    constexpr float    hr1_ma_cutoff_hz    = 5.0f;     // Hz — low-pass cutoff for peak detection MA
+    constexpr float    hr1_lp_cutoff_hz    = 5.0f;     // Hz — low-pass cutoff before peak detection
+    // s — running-max decay. 20 s reproduces the historical 0.9999 per-sample factor at 500 Hz
+    // exactly (exp(-1/(20*500)) = 0.9999), so behaviour at the default rate is unchanged.
+    constexpr float    hr1_max_decay_tau_s = 20.0f;
     // SQI: CV = std/mean of the 5 most recent RR intervals.
     // CV=0 (perfectly regular) → SQI=1. CV ≥ hr1_sqi_cv_max → SQI=0.
     constexpr float    hr1_sqi_cv_max      = 0.15f;    // dimensionless — 15% CV threshold
@@ -325,11 +328,12 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
       _hr1_dc_tau_s(hr1_dc_tau_s),
-      _hr1_ma_cutoff_hz(hr1_ma_cutoff_hz),
+      _hr1_lp_cutoff_hz(hr1_lp_cutoff_hz), _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
+      _hr1_max_decay_alpha(0.0f),
       _hr1_sqi_cv_max(hr1_sqi_cv_max),
       _hr2_min_corr(hr2_min_corr),
-      _hr2_update_interval(25u),
-      _hr3_update_interval(25u),
+      _hr2_update_interval_s(0.5f), _hr2_update_interval(25u),
+      _hr3_update_interval_s(0.5f), _hr3_update_interval(25u),
       _hr_min_bpm(hr_min_bpm),
       _hr_max_bpm(hr_max_bpm),
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
@@ -893,9 +897,9 @@ void INCUNEST_AFE4490::setHR1DcTauS(float tau_s) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHR1MaCutoffHz(float hz) {
+void INCUNEST_AFE4490::setHR1LpCutoffHz(float hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr1_ma_cutoff_hz = hz;
+    _hr1_lp_cutoff_hz = hz;
     _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
@@ -912,15 +916,24 @@ void INCUNEST_AFE4490::setHR2MinCorr(float corr) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHR2UpdateInterval(uint32_t decimated_samples) {
+void INCUNEST_AFE4490::setHR2UpdateIntervalS(float s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr2_update_interval = decimated_samples;
+    _hr2_update_interval_s = s;
+    _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHR3UpdateInterval(uint32_t decimated_samples) {
+void INCUNEST_AFE4490::setHR1MaxDecayTauS(float tau_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr3_update_interval = decimated_samples;
+    _hr1_max_decay_tau_s = tau_s;
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setHR3UpdateIntervalS(float s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr3_update_interval_s = s;
+    _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1054,11 +1067,12 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
     cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
     cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
-    cfg.hr1_ma_cutoff_hz      = _hr1_ma_cutoff_hz;
+    cfg.hr1_lp_cutoff_hz      = _hr1_lp_cutoff_hz;
+    cfg.hr1_max_decay_tau_s   = _hr1_max_decay_tau_s;
     cfg.hr1_sqi_cv_max        = _hr1_sqi_cv_max;
     cfg.hr2_min_corr          = _hr2_min_corr;
-    cfg.hr2_update_interval   = _hr2_update_interval;
-    cfg.hr3_update_interval   = _hr3_update_interval;
+    cfg.hr2_update_interval_s = _hr2_update_interval_s;
+    cfg.hr3_update_interval_s = _hr3_update_interval_s;
     cfg.hr_min_bpm            = _hr_min_bpm;
     cfg.hr_max_bpm            = _hr_max_bpm;
     cfg.rsqm_ot_thr              = rsqm_ot_thr;
@@ -1739,7 +1753,18 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _hgac_ema_ambient_led1.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, sample_rate_hz, 3.0f * hgac_ema_ambient_tau_s);
     _hgac_ema_ambient_led2.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, sample_rate_hz, 3.0f * hgac_ema_ambient_tau_s);
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * sample_rate_hz));
-    _hr1_ma_len             = (uint32_t)roundf(sample_rate_hz / (2.0f * _hr1_ma_cutoff_hz));
+    _hr1_max_decay_alpha    = expf(-1.0f / (_hr1_max_decay_tau_s * sample_rate_hz));
+    // Recompute periods: configured in seconds, applied in DECIMATED samples, so each uses its
+    // own chain's achieved rate (§5.3.1) rather than the AFE rate.
+    _hr2_update_interval = (uint32_t)roundf(_hr2_update_interval_s * _hr2_decim.rate_hz);
+    if (_hr2_update_interval < 1u) _hr2_update_interval = 1u;
+    _hr3_update_interval = (uint32_t)roundf(_hr3_update_interval_s * _hr3_decim.rate_hz);
+    if (_hr3_update_interval < 1u) _hr3_update_interval = 1u;
+#if INCUNEST_TIMING_STATS
+    _ts_emit_interval = (uint32_t)roundf(ts_emit_period_s * sample_rate_hz);
+    if (_ts_emit_interval < 1u) _ts_emit_interval = 1u;
+#endif
+    _hr1_ma_len             = (uint32_t)roundf(sample_rate_hz / (2.0f * _hr1_lp_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
     if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) {
         // Clamped: the filter no longer cuts where it was configured to, which lets the dicrotic
@@ -1748,7 +1773,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
         // rates. See hr1_ma_max_len for why no fixed capacity can cover every cutoff.
         ESP_LOGE(TAG, "HR1 moving average clamped: %u samples needed at %.0f Hz / %.1f Hz cutoff, "
                       "%d available -> effective cutoff %.1f Hz",
-                 (unsigned)_hr1_ma_len, sample_rate_hz, _hr1_ma_cutoff_hz,
+                 (unsigned)_hr1_ma_len, sample_rate_hz, _hr1_lp_cutoff_hz,
                  hr1_ma_max_len, sample_rate_hz / (2.0f * (float)hr1_ma_max_len));
         _hr1_ma_len = (uint32_t)hr1_ma_max_len;
     }
@@ -1969,7 +1994,7 @@ void INCUNEST_AFE4490::_task_body() {
         xSemaphoreGive(_state_mutex);
 #if INCUNEST_TIMING_STATS
         _ts_cycle.update(esp_timer_get_time() - _t_cycle);
-        if (++_ts_emit_counter >= ts_emit_interval) {
+        if (++_ts_emit_counter >= _ts_emit_interval) {
             _ts_emit_counter = 0;
             _emit_timing();
         }
@@ -2100,7 +2125,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 
 // ── Timing report ─────────────────────────────────────────────────────────────
 // Emits a $TIMING serial frame with per-algorithm mean/max execution times (µs)
-// and remaining task stack (words). Called every ts_emit_interval samples.
+// and remaining task stack (words). Called every _ts_emit_interval samples (ts_emit_period_s).
 // Frame: $TIMING,hr1_mean,hr1_max,hr2fp_mean,hr2fp_max,hr3fp_mean,hr3fp_max,
 //                spo2_mean,spo2_max,cycle_mean,cycle_max,
 //                hr2cmp_mean,hr2cmp_max,hr3cmp_mean,hr3cmp_max,stack_free*XX
@@ -2131,12 +2156,12 @@ void INCUNEST_AFE4490::_emit_timing() {
 
 // Emits one $TASK frame per library task + $TASKS_END.
 // CPU% is computed from sum_us over the emit window (current interval, not cumulative).
-// Window = ts_emit_interval samples / sample_rate_hz.
+// Window = _ts_emit_interval samples / sample_rate_hz = ts_emit_period_s.
 // stack_words = uxTaskGetStackHighWaterMark() for each task handle.
 // Does NOT use uxTaskGetSystemState() — avoids requiring configUSE_TRACE_FACILITY=1
 // in the precompiled Arduino ESP32 FreeRTOS library.
 void INCUNEST_AFE4490::_emit_tasks() {
-    uint64_t window_us = (uint64_t)ts_emit_interval * 1000000u / _afe_sample_rate_hz;
+    uint64_t window_us = (uint64_t)_ts_emit_interval * 1000000u / _afe_sample_rate_hz;
 
     struct LibTask { const char* name; uint64_t sum_us; TaskHandle_t handle; };
     LibTask lib_tasks[] = {
@@ -2308,7 +2333,7 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
     float ppg_filtered = _hr1_ma_sum / (float)_hr1_ma_len;
 
     // Running max: slow exponential decay keeps it tracking signal amplitude
-    _hr1_running_max = fmaxf(_hr1_running_max * 0.9999f, ppg_filtered);
+    _hr1_running_max = fmaxf(_hr1_running_max * _hr1_max_decay_alpha, ppg_filtered);
 
     float threshold = 0.6f * _hr1_running_max;
 

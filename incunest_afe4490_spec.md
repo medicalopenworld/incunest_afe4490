@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.86b
+# incunest_afe4490 — Specification v0.87
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -2669,6 +2669,29 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.87   | **Every time-valued parameter is expressed in seconds and derived from the |
+|         | rate (rationale §6).** Audit prompted by the question "are there more       |
+|         | unresolved sample-rate dependencies?" — there were two live and one latent. |
+|         | **`_hr1_running_max *= 0.9999f`** was a per-sample literal: tau 10 000      |
+|         | samples, i.e. 20 s at 500 Hz but **6.25 s at 1600 Hz**, relaxing HR1's      |
+|         | detection threshold 3.2× faster at the top of the catalogue and inviting    |
+|         | false positives. Now `hr1_max_decay_tau_s` (20 s, which reproduces 0.9999   |
+|         | exactly at 500 Hz, so default behaviour is unchanged) with a setter.        |
+|         | **`ts_emit_interval`** was 2500 samples — its own comment admitted "5 s at  |
+|         | 500 Hz", so 1.56 s at 1600 — now derived from `ts_emit_period_s`.          |
+|         | **`setHR2UpdateInterval`/`setHR3UpdateInterval` → `…IntervalS(float s)`**:  |
+|         | they were the only two time-valued setters in the API taking samples, and   |
+|         | immune to the AFE rate only because the decimated rate is the invariant.    |
+|         | **`hr1_ma_cutoff_hz` → `hr1_lp_cutoff_hz`** (and `setHR1MaCutoffHz` →      |
+|         | `setHR1LpCutoffHz`): "ma" stops being literal once the filter type is under |
+|         | review, and "lp" is true of both. All breaking, all with zero external      |
+|         | callers (checked in src/, tests and the lab script).                        |
+|         | **The lasting part is the net, not the fixes:** two catalogue-sweeping      |
+|         | tests assert every duration is preserved in seconds. Both had to be         |
+|         | rewritten after passing with the defects reintroduced — a test must observe |
+|         | the EFFECT (not the derived coefficient, which stays correct while unused)  |
+|         | and must exercise the setter with a NON-DEFAULT value (a constant equal to  |
+|         | the default is indistinguishable otherwise).                                |
 | v0.86b  | **HR1 moving-average length 64 → 160 samples, clamp no longer silent      |
 |         | (§7.4).** 64 samples covered only up to 640 Hz, so four of the five        |
 |         | catalogue rates ran with an effective cutoff of 6.2–12.5 Hz instead of the |

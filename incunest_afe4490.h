@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.86b — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.87 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.86b"
+#define INCUNEST_AFE4490_VERSION "0.87"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -653,13 +653,14 @@ struct AFE4490Config {
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
-    float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
+    float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
+    float             hr1_max_decay_tau_s;       // running-max decay time constant [s]
     float             hr1_sqi_cv_max;            // CV above this → SQI=0 [dimensionless]
     // HR2 algorithm parameters
     float             hr2_min_corr;              // min normalised autocorrelation for SQI=1
-    uint32_t          hr2_update_interval;       // autocorrelation recompute period [decimated samples]
+    float             hr2_update_interval_s;     // autocorrelation recompute period [s]
     // HR3 algorithm parameters
-    uint32_t          hr3_update_interval;       // FFT+HPS recompute period [decimated samples]
+    float             hr3_update_interval_s;     // FFT+HPS recompute period [s]
     // HR valid range (HR1 + HR2 + HR3)
     float             hr_min_bpm;                // valid output lower bound [bpm]
     float             hr_max_bpm;                // valid output upper bound [bpm]
@@ -763,15 +764,16 @@ public:
 
     // HR1 algorithm setters
     void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant; triggers recalc
-    void setHR1MaCutoffHz(float hz);                           // peak detection LP MA cutoff; triggers recalc
+    void setHR1LpCutoffHz(float hz);                           // peak-detection low-pass cutoff; triggers recalc
+    void setHR1MaxDecayTauS(float tau_s);                      // running-max decay time constant [s]; triggers recalc
     void setHR1SqiCvMax(float cv);                             // SQI CV threshold [dimensionless]
 
     // HR2 algorithm setters
     void setHR2MinCorr(float corr);                            // min autocorrelation for SQI=1
-    void setHR2UpdateInterval(uint32_t decimated_samples);     // autocorrelation recompute period
+    void setHR2UpdateIntervalS(float s);                       // autocorrelation recompute period [s]
 
     // HR3 algorithm setters
-    void setHR3UpdateInterval(uint32_t decimated_samples);     // FFT+HPS recompute period
+    void setHR3UpdateIntervalS(float s);                       // FFT+HPS recompute period [s]
 
     // HR valid range setter (applies to HR1 + HR2 + HR3)
     void setHRValidRange(float min_bpm, float max_bpm);
@@ -1235,7 +1237,11 @@ private:
     TimingStat _ts_hr2_compute, _ts_hr3_compute;                 // Task B/C slow-path timings
     // Note: uxTaskGetStackHighWaterMark() returns bytes on ESP32 (portSTACK_TYPE = uint8_t)
     uint32_t   _ts_emit_counter = 0;
-    static constexpr uint32_t ts_emit_interval = 2500;  // emit every 5 s at 500 Hz
+    // Emission period in SECONDS, converted per rate in _recalc_rate_params(). Was a fixed
+    // 2500 samples until v0.87 — its own comment admitted the dependency ("5 s at 500 Hz"),
+    // which meant 1.56 s at 1600 Hz.
+    static constexpr float ts_emit_period_s = 5.0f;
+    uint32_t   _ts_emit_interval = 2500;                // derived: round(period_s × fs)
     void _emit_timing();
     void _emit_tasks();   // emits $TASK frame per FreeRTOS task + $TASKS_END
 #endif
@@ -1272,7 +1278,7 @@ private:
     // only up to 640 Hz — so four of the five catalogue rates ran clamped, with an effective
     // cutoff of 6.2–12.5 Hz instead of 5 Hz, and silently.
     //
-    // The cap cannot cover every configuration: setHR1MaCutoffHz() is public and unvalidated, so
+    // The cap cannot cover every configuration: setHR1LpCutoffHz() is public and unvalidated, so
     // a 2 Hz cutoff at 1600 Hz would ask for 400 samples. That is what the logE in
     // _recalc_rate_params() is for — a clamped filter is now diagnosable instead of mute.
     //
@@ -1438,11 +1444,24 @@ private:
     float    _spo2_pi_sqi_lo;
     float    _spo2_pi_sqi_hi;
     float    _hr1_dc_tau_s;
-    float    _hr1_ma_cutoff_hz;
+    float    _hr1_lp_cutoff_hz;
+    // Decay of the running max that sets HR1's detection threshold. Was a bare 0.9999f literal
+    // inside _hr1_update() until v0.87 — a PER-SAMPLE factor, so tau was 10 000 samples: 20 s at
+    // 500 Hz but 6.25 s at 1600 Hz. That silently relaxed the threshold 3.2x faster at the top of
+    // the catalogue, inviting false positives. Now a time constant, converted per rate.
+    float    _hr1_max_decay_tau_s;
+    float    _hr1_max_decay_alpha;           // derived: exp(-1/(tau × fs))
     float    _hr1_sqi_cv_max;
     float    _hr2_min_corr;
-    uint32_t _hr2_update_interval;
-    uint32_t _hr3_update_interval;
+    // Configured in SECONDS (the source of truth) and converted to decimated samples in
+    // _recalc_rate_params(), like every other time-valued parameter. Before v0.87 the setter
+    // took decimated samples: immune to the AFE rate only because the decimated rate is the
+    // invariant (§5.3.1), so lowering a chain's target rate would have silently changed the
+    // period. See the rate-dependency audit in the design rationale.
+    float    _hr2_update_interval_s;
+    uint32_t _hr2_update_interval;           // derived: round(_hr2_update_interval_s × chain rate)
+    float    _hr3_update_interval_s;
+    uint32_t _hr3_update_interval;           // derived: round(_hr3_update_interval_s × chain rate)
     float    _hr_min_bpm;
     float    _hr_max_bpm;
 
@@ -1551,6 +1570,18 @@ public:
     uint32_t test_settling_countdown() const { return _switched_rc_settling_countdown; }
     uint32_t test_hr2_buf_count() const      { return _hr2_buf_count; }
     uint32_t test_hr1_ma_len() const         { return _hr1_ma_len; }
+    // Every time-valued derived parameter, so a test can assert its value in SECONDS is held
+    // across the whole PRF catalogue (see test_time_parameters_hold_across_catalogue).
+    uint32_t test_spo2_warmup_samples() const      { return _spo2_warmup_samples; }
+    uint32_t test_hr1_refractory_samples() const   { return _hr1_refractory_samples; }
+    uint32_t test_rsqm_probe_min_samples() const   { return _rsqm_probe_state_min_samples; }
+    float    test_hr1_dc_alpha() const             { return _hr1_dc_alpha; }
+    float    test_hr1_max_decay_alpha() const      { return _hr1_max_decay_alpha; }
+    uint32_t test_hr2_update_interval() const      { return _hr2_update_interval; }
+    uint32_t test_hr3_update_interval() const      { return _hr3_update_interval; }
+    // The running max itself, not the coefficient: a test that reads the derived alpha cannot
+    // tell a derived parameter from a hardcoded literal that the code uses instead of it.
+    float    test_hr1_running_max() const          { return _hr1_running_max; }
     uint32_t test_hr3_buf_count() const      { return _hr3_buf_count; }
     uint32_t test_hr2_decim_phase() const    { return _hr2_decim.phase; }
     // Whether _task_body() would freeze its input this cycle (§5.6.3/§5.8.4) — see v0.72.
