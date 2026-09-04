@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.84b
+# incunest_afe4490 — Specification v0.84c
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1053,7 +1053,7 @@ still leave Nyquist at 12.5 Hz — 2.5× of margin, the same HR3's chain has tod
 15 Hz. Lowering it to 25 Hz (factor 20 at 500 Hz, integer across the whole grid since 25 divides
 50) would give, keeping the window at 8 s: 200 samples instead of 400, ~36 lags instead of 71,
 `O(N·lags)` down from 28 400 to 7 200 — a **3.9× cut**, *tripled* once MPM and YIN sweep the same
-buffer — and half the RAM in `_hr2_buf` + `_hr2_seg`.
+buffer — and half the RAM in `_hr2_buf` + `_hr2_snapshot`.
 
 **What holds that back, and how to settle it.** Decimating further costs lag resolution: at 25 Hz
 a 120 BPM beat lands on lag 12.5, so ±0.5 sample is 4.8 BPM before interpolation versus 2.4 BPM at
@@ -1096,7 +1096,7 @@ Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_ale
 needs the periodicity; HR3 feeds an FFT, which needs the harmonics preserved in amplitude and
 phase — the HPS multiplies the fundamental by its 2nd and 3rd harmonics, so a high-pass corner
 near the fundamental would distort exactly what the HPS relies on. The DC that a high-pass would
-have removed is removed instead by **subtracting the window mean** in `_hr3_linearize()`, which is
+have removed is removed instead by **subtracting the window mean** in `_hr3_prepare_fft_input()`, which is
 both exact for the window analysed and free of phase distortion.
 
 Until v0.83 `setHR3Filter()` took an `f_low_hz` argument and `AFE4490Config` exposed
@@ -2302,7 +2302,7 @@ See §5.4 for algorithm description.
 
 | Parameter | Constant | Value | Effect |
 |---|---|---|---|
-| LP filter cutoff | `hr3_f_high_hz` | 15 Hz | Anti-aliasing before decimation; passes up to the 3rd harmonic of 260 BPM (13 Hz). **Does not remove DC** — that is done by mean subtraction in `_hr3_linearize()` |
+| LP filter cutoff | `hr3_f_high_hz` | 15 Hz | Anti-aliasing before decimation; passes up to the 3rd harmonic of 260 BPM (13 Hz). **Does not remove DC** — that is done by mean subtraction in `_hr3_prepare_fft_input()` |
 | Decimation factor | `_hr3_decim.factor` | 10 at 500 Hz | Own chain, independent of HR2's — **derived**, see §5.3.1 |
 | FFT / buffer length | `hr3_buf_len` | 512 samples (10.24 s) | Frequency resolution = 50/512 ≈ 0.098 Hz ≈ 0.35 BPM at 1 Hz |
 | Update interval | `hr3_update_interval` | 25 decimated samples (0.5 s) | HR3 output refresh rate |
@@ -2576,6 +2576,17 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.84c  | **`_hr2_seg` → `_hr2_snapshot`, `_hr2_linearize()` →                       |
+|         | `_hr2_take_snapshot()`, `_hr3_linearize()` → `_hr3_prepare_fft_input()`.** |
+|         | No functional change. `seg` said nothing, and `linearize` named the         |
+|         | mechanism (walking a circular buffer) rather than the purpose: the copy    |
+|         | exists so Task B sees a COHERENT window while Task A keeps writing         |
+|         | `_hr2_buf` — the isolation that `_hr2_computing` guards. The comments       |
+|         | already called it a "snapshot"; now the identifier does too, and a future  |
+|         | memcpy-based implementation would still be a snapshot while no longer      |
+|         | being a "linearize". The twin names also implied the two functions did the |
+|         | same thing: HR2's only copies, HR3's copies AND subtracts the mean AND     |
+|         | applies the Hann window, which `_hr3_prepare_fft_input()` now states.      |
 | v0.84b  | **Decimation chains renamed `_pulse_band_decim` / `_harmonic_band_decim` → |
 |         | `_hr2_decim` / `_hr3_decim`** (with their target-rate constants and test    |
 |         | accessors). No functional change. The band-based names described a split    |
@@ -2640,7 +2651,7 @@ Key references for each algorithm implemented in this library.
 |         | so a caller passing another value got 0.4 back and could believe a         |
 |         | bandpass was in effect. HR3 is a pure low-pass BY DESIGN (§5.4): the FFT   |
 |         | needs the harmonics preserved in phase for the HPS, and the DC is removed  |
-|         | by mean subtraction in `_hr3_linearize()`. Neither field crossed the wire  |
+|         | by mean subtraction in `_hr3_prepare_fft_input()`. Neither field crossed the wire  |
 |         | (no $CFG/$LCFG frame carried it), so no protocol or script change.        |
 |         | Spec §5.4 also corrected: the low-pass corner is 15 Hz, documented as      |
 |         | 10 Hz, and the parameter table claimed the filter "removes DC/baseline     |
@@ -3271,7 +3282,7 @@ Key references for each algorithm implemented in this library.
 |         | and by the HR2/HR3 task methods (`_hr2_task_body`). 15 renames: `_update_rsqm`|
 |         | → `_rsqm_update`; `_update_hgac` → `_hgac_update`; `_update_spo2` →         |
 |         | `_spo2_update`; `_update_hr1` → `_hr1_update`; `_update_hr2_sample` →       |
-|         | `_hr2_update_sample`; `_linearize_hr2` → `_hr2_linearize`; `_compute_hr2`   |
+|         | `_hr2_update_sample`; `_linearize_hr2` → `_hr2_take_snapshot`; `_compute_hr2`   |
 |         | → `_hr2_compute`; `_update_hr2` (test-only sync wrapper) →                 |
 |         | `_hr2_update_for_test` (name now signals it is never called from           |
 |         | production — see §5.3); `_hr2_calc_sem` → `_hr2_compute_sem` (names the    |

@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.84b — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.84c — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.84b"
+#define INCUNEST_AFE4490_VERSION "0.84c"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -690,7 +690,7 @@ public:
 
     // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
     // HR3 uses a PURE LOW-PASS by design (see spec §5.4): the FFT needs the harmonics
-    // preserved in phase, and the DC is removed by mean subtraction in _hr3_linearize(),
+    // preserved in phase, and the DC is removed by mean subtraction in _hr3_prepare_fft_input(),
     // not by a high-pass corner. Takes the cutoff only — there is no lower corner.
     void setHR3Filter(float f_high_hz = 15.0f);
 
@@ -1094,12 +1094,12 @@ private:
     // the fast path (shared by both the production call site and the sync test wrapper above):
     // while not applied, resets fast-path state and never triggers the slow path (Task B).
     bool _hr2_update_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
-    void _hr2_linearize();                        // copy _hr2_buf → _hr2_seg (call under _state_mutex)
-    void _hr2_compute();                          // autocorr on _hr2_seg → _hr2_result/_hr2_result_sqi
+    void _hr2_take_snapshot();                    // freeze _hr2_buf → _hr2_snapshot (call under _state_mutex)
+    void _hr2_compute();                          // autocorr on _hr2_snapshot → _hr2_result/_hr2_result_sqi
 
     // HR3 async split (same probe_state gate placement as HR2 above)
     bool _hr3_update_sample(float ir, ProbeState probe_state); // filter+decimate+buffer; returns true when interval fires
-    void _hr3_linearize();                        // DC+Hann into _hr3_fft (call under _state_mutex)
+    void _hr3_prepare_fft_input();                // snapshot + DC removal + Hann → _hr3_fft (under _state_mutex)
     void _hr3_compute();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
 
     // HR2/HR3 async FreeRTOS tasks
@@ -1154,7 +1154,7 @@ private:
     TaskHandle_t      _hr2_task_handle;
     TaskHandle_t      _hr3_task_handle;
     TaskHandle_t      _diag_task_handle;
-    volatile bool     _hr2_computing;   // true while Task B holds _hr2_seg; prevents Task A from overwriting
+    volatile bool     _hr2_computing;   // true while Task B holds _hr2_snapshot; prevents Task A from overwriting
     volatile bool     _hr3_computing;   // true while Task C uses _hr3_fft; prevents Task A from overwriting
     float             _hr2_result;      // written by Task B, copied to _current_data under _state_mutex
     float             _hr2_result_sqi;
@@ -1329,7 +1329,15 @@ private:
 
     BiquadFilter _hr2_bpf;                   // bandpass filter (default 0.5–5 Hz)
     float    _hr2_buf[hr2_buf_len];          // circular buffer of decimated filtered samples
-    float    _hr2_seg[hr2_buf_len];          // linearized copy for autocorrelation (avoids stack pressure)
+    // Frozen copy of _hr2_buf handed to Task B. Two jobs, in order of importance:
+    //   1. ISOLATION: Task A keeps filling _hr2_buf while Task B reads this snapshot, so the
+    //      autocorrelation sees a coherent window instead of one being overwritten underneath
+    //      it. _hr2_computing guards the handover (see its declaration).
+    //   2. It also linearises the circular buffer (oldest → newest) and keeps a 400-float
+    //      array off Task B's stack.
+    // Named for what it IS rather than for how it is built: a memcpy-based implementation
+    // would still be a snapshot, but would no longer be a "linearize".
+    float    _hr2_snapshot[hr2_buf_len];
     int      _hr2_buf_idx;                   // next write position in _hr2_buf
     uint32_t _hr2_buf_count;                 // samples written (capped at hr2_buf_len)
     uint32_t _hr2_update_counter;            // decimated samples since last autocorr computation

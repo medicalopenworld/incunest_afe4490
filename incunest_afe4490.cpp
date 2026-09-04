@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.84b — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.84c — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1982,7 +1982,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // HR2 fast path: filter + decimate + buffer; trigger Task B when interval fires
     if (_hr2_update_sample(as.ot_led1, _rsqm_probe_state)) {
         if (!_hr2_computing) {
-            _hr2_linearize();
+            _hr2_take_snapshot();
             _hr2_computing = true;
             xSemaphoreGive(_hr2_compute_sem);
         }
@@ -1996,7 +1996,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // HR3 fast path: LP filter + decimate + buffer; trigger Task C when interval fires
     if (_hr3_update_sample(as.ot_led1, _rsqm_probe_state)) {
         if (!_hr3_computing) {
-            _hr3_linearize();
+            _hr3_prepare_fft_input();
             _hr3_computing = true;
             xSemaphoreGive(_hr3_compute_sem);
         }
@@ -2327,18 +2327,19 @@ bool INCUNEST_AFE4490::_hr2_update_sample(float ir, ProbeState probe_state) {
     return _hr2_buf_count >= (uint32_t)hr2_buf_len;
 }
 
-// Linearize circular buffer (oldest → newest) into _hr2_seg.
+// Freeze the circular buffer into _hr2_snapshot, linearised oldest → newest, so Task B can
+// work on a coherent window while Task A keeps writing _hr2_buf.
 // Called under _state_mutex by Task A immediately before signalling Task B.
-void INCUNEST_AFE4490::_hr2_linearize() {
+void INCUNEST_AFE4490::_hr2_take_snapshot() {
     for (int i = 0; i < hr2_buf_len; i++)
-        _hr2_seg[i] = _hr2_buf[(_hr2_buf_idx + i) % hr2_buf_len];
+        _hr2_snapshot[i] = _hr2_buf[(_hr2_buf_idx + i) % hr2_buf_len];
 }
 
-// Slow path: autocorrelation on _hr2_seg → _hr2_result / _hr2_result_sqi.
-// Called by Task B. Reads only _hr2_seg (no other shared state written).
+// Slow path: autocorrelation on _hr2_snapshot → _hr2_result / _hr2_result_sqi.
+// Called by Task B. Reads only _hr2_snapshot (no other shared state written).
 void INCUNEST_AFE4490::_hr2_compute() {
     float acorr0 = 0.0f;
-    for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_seg[i] * _hr2_seg[i];
+    for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_snapshot[i] * _hr2_snapshot[i];
     if (acorr0 < hr2_ot_energy_eps) { _hr2_result_sqi = 0.0f; return; }
 
     int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * _hr2_decim.rate_hz);
@@ -2373,7 +2374,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     for (int lag = min_lag; lag <= max_lag; lag++) {
         float sum   = 0.0f;
         int   n     = hr2_buf_len - lag;
-        for (int i = 0; i < n; i++) sum += _hr2_seg[i] * _hr2_seg[i + lag];
+        for (int i = 0; i < n; i++) sum += _hr2_snapshot[i] * _hr2_snapshot[i + lag];
         acorr_buf[lag - min_lag] = (n > 0) ? sum * (float)hr2_buf_len / (acorr0 * (float)n) : 0.0f;
     }
 
@@ -2411,7 +2412,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
 // Synchronous wrapper kept for unit-test compatibility.
 void INCUNEST_AFE4490::_hr2_update_for_test(float ir, ProbeState probe_state) {
     if (!_hr2_update_sample(ir, probe_state)) return;
-    _hr2_linearize();
+    _hr2_take_snapshot();
     _hr2_compute();
     _current_data.hr2     = (_hr2_result_sqi > 0.0f) ? _hr2_result : NAN;
     _current_data.hr2_sqi = _hr2_result_sqi;
@@ -2450,9 +2451,11 @@ bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
     return _hr3_buf_count >= (uint32_t)hr3_buf_len;
 }
 
-// Linearize circular buffer + DC removal + Hann window → complex FFT input in _hr3_fft.
+// Build Task C's FFT input in _hr3_fft: snapshot the circular buffer (linearised oldest →
+// newest), subtract the window mean (this is what removes DC — the 15 Hz low-pass does not,
+// see spec §5.4) and apply the precomputed Hann window.
 // Called under _state_mutex by Task A immediately before signalling Task C.
-void INCUNEST_AFE4490::_hr3_linearize() {
+void INCUNEST_AFE4490::_hr3_prepare_fft_input() {
     float mean = 0.0f;
     for (int i = 0; i < hr3_buf_len; i++)
         mean += _hr3_buf[(_hr3_buf_idx + i) % hr3_buf_len];
@@ -2574,7 +2577,7 @@ void INCUNEST_AFE4490::_hr3_compute() {
 // Synchronous wrapper kept for unit-test compatibility.
 void INCUNEST_AFE4490::_hr3_update_for_test(float ir, ProbeState probe_state) {
     if (!_hr3_update_sample(ir, probe_state)) return;
-    _hr3_linearize();
+    _hr3_prepare_fft_input();
     _hr3_compute();
     _current_data.hr3     = (_hr3_result_sqi > 0.0f) ? _hr3_result : NAN;
     _current_data.hr3_sqi = _hr3_result_sqi;
@@ -2588,7 +2591,7 @@ void INCUNEST_AFE4490::_hr2_task_trampoline(void* pv) {
 }
 
 // Blocks on _hr2_compute_sem. When signalled by Task A:
-//   1. Runs autocorrelation on the already-linearized _hr2_seg snapshot.
+//   1. Runs autocorrelation on the _hr2_snapshot taken by Task A.
 //   2. Takes _state_mutex to write results into _current_data.
 //   3. Clears _hr2_computing so Task A knows the slot is free.
 void INCUNEST_AFE4490::_hr2_task_body() {
@@ -2598,7 +2601,7 @@ void INCUNEST_AFE4490::_hr2_task_body() {
 #if INCUNEST_TIMING_STATS
         { uint64_t _t = esp_timer_get_time(); _hr2_compute(); _ts_hr2_compute.update(esp_timer_get_time() - _t); }
 #else
-        _hr2_compute();  // reads _hr2_seg only — no shared-state write
+        _hr2_compute();  // reads _hr2_snapshot only — no shared-state write
 #endif
 
         xSemaphoreTake(_state_mutex, portMAX_DELAY);
