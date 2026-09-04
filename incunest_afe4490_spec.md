@@ -1973,7 +1973,7 @@ Implementation notes:
   §5.8.4 exists for the setters that do **not** hold it.
 * Pinned by `test_rate_change_tears_down_old_state` and `test_same_rate_is_a_no_op`.
 
-**HR1's moving-average capacity (resolved in v0.86b).** `hr1_ma_max_len` was 64 taps, enough only
+**HR1's moving-average capacity (resolved in v0.86b).** `hr1_ma_max_len` was 64 samples long, enough only
 up to 640 Hz, so `_hr1_ma_len = round(fs / (2·hr1_ma_cutoff_hz))` clamped at four of the five
 catalogue entries — effective cutoff 6.2 Hz at 800 Hz, 7.8 at 1000, 9.8 at 1250 and 12.5 at
 1600 Hz instead of the configured 5 Hz — **and clamped silently**. A too-wide filter lets the
@@ -1987,8 +1987,8 @@ Now `hr1_ma_max_len` is **160**, the worst case of the catalogue at the default 
 1/(4·cutoff) ≈ 50 ms at any PRF since N scales with the rate.
 
 No fixed capacity can cover every configuration: `setHR1MaCutoffHz()` is public and unvalidated,
-so a 2 Hz cutoff at 1600 Hz would need 400 taps. That case now emits **`logE`** naming the taps
-needed, those available and the resulting effective cutoff — a clamped filter is diagnosable
+so a 2 Hz cutoff at 1600 Hz would need 400 samples. That case now emits **`logE`** naming the length
+needed, the length available and the resulting effective cutoff — a clamped filter is diagnosable
 instead of mute. Pinned by `test_hr1_ma_not_clamped_across_catalogue`.
 
 **If this ever becomes a range.** A `FractionalDecimator` (interpolate → filter → decimate) would
@@ -2660,8 +2660,8 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
-| v0.86b  | **HR1 moving-average capacity 64 → 160 taps, and the clamp is no longer   |
-|         | silent (§7.4).** 64 taps covered only up to 640 Hz, so four of the five    |
+| v0.86b  | **HR1 moving-average length 64 → 160 samples, clamp no longer silent      |
+|         | (§7.4).** 64 samples covered only up to 640 Hz, so four of the five        |
 |         | catalogue rates ran with an effective cutoff of 6.2–12.5 Hz instead of the |
 |         | configured 5 Hz — and said nothing. That filter exists to keep the dicrotic |
 |         | notch away from HR1's threshold detector; too wide, the notch is           |
@@ -2672,10 +2672,10 @@ Key references for each algorithm implemented in this library.
 |         | Cost is RAM only (+384 B measured: 60 444 → 60 828 B): the average is       |
 |         | incremental so CPU is O(1) in N, and group delay stays ≈ 50 ms at any PRF.  |
 |         | Since `setHR1MaCutoffHz()` is public and unvalidated no fixed capacity can  |
-|         | cover every case (2 Hz at 1600 Hz would need 400 taps), so the clamp now    |
-|         | emits `logE` with taps needed, taps available and effective cutoff. Pinned  |
+|         | cover every case (2 Hz at 1600 Hz would need 400 samples), so the clamp now    |
+|         | emits `logE` with the length needed, the length available and the effective |
 |         | by `test_hr1_ma_not_clamped_across_catalogue` (verified to fail with the    |
-|         | cap back at 64: 64 taps instead of 80 at 800 Hz).                          |
+|         | cap back at 64: 64 samples instead of 80 at 800 Hz).                       |
 | v0.86   | **A PRF change now tears down state accumulated at the previous rate       |
 |         | (§7.4 "Changing the rate at runtime").** `setSampleRate()` recalculated    |
 |         | coefficients but left four things belonging to the old rate in play: the   |
@@ -2695,7 +2695,7 @@ Key references for each algorithm implemented in this library.
 |         | Pinned by `test_rate_change_tears_down_old_state` (verified to fail with   |
 |         | the fix reverted: buffer count 400 instead of 0) and                       |
 |         | `test_same_rate_is_a_no_op`. **Recorded, NOT fixed:** HR1's moving average |
-|         | saturates at 64 taps above 640 Hz, so four catalogue entries run with an   |
+|         | saturates at 64 samples above 640 Hz, so four entries run with an          |
 |         | effective cutoff of 6.2–12.5 Hz instead of 5 Hz.                           |
 | v0.85   | **`AFE4490SampleRate`: the supported PRFs become a closed catalogue        |
 |         | {500, 800, 1000, 1250, 1600 Hz} enforced by the type system (§7.4).**      |

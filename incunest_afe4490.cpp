@@ -1746,7 +1746,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
         // notch through to HR1's threshold detector and risks double-counting (a doubled HR).
         // Never silent — before v0.86b this clamp was mute and hit four of the five catalogue
         // rates. See hr1_ma_max_len for why no fixed capacity can cover every cutoff.
-        ESP_LOGE(TAG, "HR1 moving average clamped: %u taps needed at %.0f Hz / %.1f Hz cutoff, "
+        ESP_LOGE(TAG, "HR1 moving average clamped: %u samples needed at %.0f Hz / %.1f Hz cutoff, "
                       "%d available -> effective cutoff %.1f Hz",
                  (unsigned)_hr1_ma_len, sample_rate_hz, _hr1_ma_cutoff_hz,
                  hr1_ma_max_len, sample_rate_hz / (2.0f * (float)hr1_ma_max_len));

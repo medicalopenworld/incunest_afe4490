@@ -1268,12 +1268,12 @@ private:
 
     // ── HR1 moving average state (independent of PPG display filter) ──
     // Capacity of the moving-average buffer. Sized for the WORST CASE OF THE CATALOGUE at the
-    // default cutoff: 1600 Hz / (2 × 5 Hz) = 160 taps (§7.4). Was 64 until v0.86b, which covered
+    // default cutoff: 1600 Hz / (2 × 5 Hz) = 160 samples (§7.4). Was 64 until v0.86b, which covered
     // only up to 640 Hz — so four of the five catalogue rates ran clamped, with an effective
     // cutoff of 6.2–12.5 Hz instead of 5 Hz, and silently.
     //
     // The cap cannot cover every configuration: setHR1MaCutoffHz() is public and unvalidated, so
-    // a 2 Hz cutoff at 1600 Hz would ask for 400 taps. That is what the logE in
+    // a 2 Hz cutoff at 1600 Hz would ask for 400 samples. That is what the logE in
     // _recalc_rate_params() is for — a clamped filter is now diagnosable instead of mute.
     //
     // Cost of the capacity is RAM only: the average is incremental (subtract the outgoing sample,
