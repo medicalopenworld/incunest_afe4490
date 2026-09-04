@@ -2341,7 +2341,25 @@ void INCUNEST_AFE4490::_hr2_compute() {
     float fs2     = (float)_afe_sample_rate_hz / (float)hr2_decim_factor;
     int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * fs2);
     if (min_lag < 1) min_lag = 1;
-    int   max_lag = hr2_acorr_max_lag;
+
+    // Upper bound of the lag sweep = slowest accepted heart rate, converted to lag at the
+    // *current* decimated rate. Symmetric with min_lag above: both derive from the configured
+    // HR range plus the same 3 BPM guard band, so the sweep follows setHrRange() and the
+    // sample rate instead of assuming 50 Hz.
+    //
+    // Previously a hardcoded 137 samples ("22 BPM at 50 Hz"). Being fixed in *samples* while
+    // fs2 = sample_rate/hr2_decim_factor is not, it silently raised the lowest detectable HR
+    // whenever the sample rate left 500 Hz: 43.8 BPM at 1000 Hz, 87.6 BPM at 2000 Hz — both
+    // above the 40 BPM default _hr_min_bpm, so real bradycardia would have been reported as
+    // "no periodicity" (sqi = 0) instead of as a low HR.
+    float lag_min_bpm = fmaxf(_hr_min_bpm - 3.0f, 1.0f);   // guard: setHrRange() could reach ≤3
+    int   max_lag     = (int)(60.0f / lag_min_bpm * fs2);
+    if (max_lag > hr2_acorr_lag_cap)   max_lag = hr2_acorr_lag_cap;    // scratch-array capacity
+    if (max_lag > hr2_buf_len / 2 - 1) max_lag = hr2_buf_len / 2 - 1;  // unbiased-ACF noise limit
+
+    // The peak search below inspects interior lags only, so it needs at least 3 of them.
+    if (max_lag < min_lag + 2) { _hr2_result_sqi = 0.0f; return; }
+
     int   n_lags  = max_lag - min_lag + 1;
 
     // Unbiased normalised autocorrelation: divide by (acorr0 * (N-lag)/N) instead of acorr0.
@@ -2349,7 +2367,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     // sums only (N-lag) terms while the denominator reflects N terms. For a perfectly
     // periodic signal this yields SQI = (N-lag)/N < 1 — e.g. ~0.875 at 60 BPM (lag=50,
     // N=400). The unbiased correction restores SQI ≈ 1.0 for a clean periodic signal.
-    float acorr_buf[hr2_acorr_max_lag + 1];
+    float acorr_buf[hr2_acorr_lag_cap + 1];
     for (int lag = min_lag; lag <= max_lag; lag++) {
         float sum   = 0.0f;
         int   n     = hr2_buf_len - lag;

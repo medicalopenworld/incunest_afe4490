@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.81 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.82 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.81"
+#define INCUNEST_AFE4490_VERSION "0.82"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -1193,10 +1193,12 @@ private:
     // invariant by construction, instead of the raw ambient-corrected adc_code (led1_sub/led2_sub)
     // used before this experiment. See incunest_afe4490_spec.md §5.1/§5.8.
     //   mean  = DC component (slow IIR low-pass of x)
-    //           α_mean = 1 − exp(−1/(τ_mean·fs)),  τ_mean = spo2_ema_mean_tau_s (default 1.6 s)
+    //           α_mean = 1 − exp(−1/(τ_mean·fs)),  τ_mean = spo2_ema_mean_tau_s (default 2.0 s)
     //           NOTE: future alternative — bandpass filter for DC tracking
     //   var   = AC power estimate = E[(x − mean)²] = EMA of AC²
-    //           α_var  = 1 − exp(−1/(τ_var·fs)),   τ_var  = spo2_ema_var_tau_s  (default 1.0 s)
+    //           α_var  = 1 − exp(−1/(τ_var·fs)),   τ_var  = spo2_ema_var_tau_s  (default 6.0 s)
+    //           6.0 s is not a free choice: ISO 80601-2-61:2026 Annex JJ.2 d) mandates >= 6 s
+    //           averaging for the SpO2 transfer standard reference.
     //           NOTE: future alternative — bandpass-filtered AC² instead of DC-subtraction AC²
     //   count = sample count used directly for warmup (ir_ema/red_ema always updated
     //           together, so either's count works — no separate _spo2_sample_count needed).
@@ -1221,8 +1223,26 @@ private:
     // accumulates a circular buffer of hr2_buf_len samples, then periodically
     // computes normalised autocorrelation to find the fundamental RR period.
     static constexpr int hr2_buf_len         = 400;  // 8 s at 50 Hz (fs/hr2_decim_factor)
-    static constexpr int hr2_acorr_max_lag   = 137;  // guard band lower bound 22 BPM at 50 Hz: 50*60/22 = 137 samples
     static constexpr int hr2_decim_factor    = 10;   // 500 Hz → 50 Hz
+
+    // Capacity of the lag-sweep scratch array — a storage bound, NOT the search policy.
+    // The lag range actually swept is derived at runtime in _hr2_compute() from
+    // _hr_min_bpm/_hr_max_bpm and the current decimated rate; this constant only says how
+    // large a sweep fits.
+    //
+    // At the operating rate (500 Hz → fs2 = 50 Hz) the default 40 BPM lower bound needs
+    // lag ≤ 81, so the cap is inactive with ~70 % headroom. It only becomes binding above
+    // ~845 Hz sample rate, where reaching 40 BPM would need more than 137 lags. Raising the
+    // cap would not help much: hr2_buf_len is fixed at 400 samples, so above ~1200 Hz the
+    // 400/fs2 window is itself too short to resolve 40 BPM. The real fix for high sample
+    // rates is an adaptive hr2_decim_factor holding fs2 ≈ 50 Hz — deliberately out of scope
+    // while 500 Hz is the only rate in use.
+    static constexpr int hr2_acorr_lag_cap   = 137;
+
+    // The unbiased normaliser N/(N−τ) grows without bound as τ → N. Capping the lag below
+    // N/2 keeps that factor under 2, beyond which the estimate is too noisy to be useful.
+    static_assert(hr2_acorr_lag_cap * 2 < hr2_buf_len,
+                  "hr2_acorr_lag_cap must stay below hr2_buf_len/2 (unbiased ACF noise blow-up)");
 
     BiquadFilter _hr2_bpf;                   // bandpass filter (default 0.5–5 Hz)
     float    _hr2_buf[hr2_buf_len];          // circular buffer of decimated filtered samples

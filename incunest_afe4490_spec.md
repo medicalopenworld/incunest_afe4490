@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.81
+# incunest_afe4490 — Specification v0.82
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -943,11 +943,35 @@ is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fres
 | Constant | Value | Meaning |
 |---|---|---|
 | `hr2_buf_len` | 400 | Buffer length (8 s at 50 Hz) |
-| `hr2_acorr_max_lag` | 137 | Max lag searched (guard band 22 BPM at 50 Hz: 50×60/22=137) |
+| `hr2_acorr_lag_cap` | 137 | **Storage cap** of the lag scratch array, not the search policy. The swept range is derived at runtime from `hr_min_bpm`/`hr_max_bpm` — see below |
 | `hr2_decim_factor` | 10 | 500 Hz → 50 Hz |
 | `hr2_update_interval` | 25 | Recompute every 0.5 s |
 | `hr2_min_lag_s` | 0.22 s | Min RR lag (~272 BPM max) |
 | `hr2_min_corr` | 0.5 | Normalised correlation threshold for valid peak |
+
+**Lag sweep bounds (derived, not hardcoded):** both ends of the autocorrelation search come
+from the configured HR range plus a ±3 BPM guard band, converted to lag at the *current*
+decimated rate `fs2 = afe_sample_rate_hz / hr2_decim_factor`:
+
+```
+min_lag = 60 / (hr_max_bpm + 3) * fs2
+max_lag = 60 / (hr_min_bpm - 3) * fs2      capped at hr2_acorr_lag_cap and at hr2_buf_len/2 - 1
+```
+
+At the operating point (500 Hz → fs2 = 50 Hz, HR range [40, 260] BPM) this gives
+`min_lag = 11`, `max_lag = 81`. Neither cap is active: 81 is well under both 137 and 199.
+
+The `hr2_buf_len/2 - 1` cap exists because the unbiased normaliser `N/(N−τ)` grows without
+bound as τ → N; beyond τ = N/2 the factor exceeds 2 and the estimate is too noisy to trust.
+A `static_assert` keeps `hr2_acorr_lag_cap` below that bound at compile time.
+
+**Known limitation at non-default sample rates.** `hr2_decim_factor` is a fixed 10 and
+`hr2_buf_len` a fixed 400 samples, so raising the sample rate shortens the analysis window
+(`400 / fs2` seconds) and pushes the lag needed for a given BPM upward. Above ~845 Hz the
+`hr2_acorr_lag_cap` starts binding for 40 BPM, and above ~1200 Hz the window itself is too
+short to resolve 40 BPM regardless of the cap. The fix would be an adaptive `hr2_decim_factor`
+holding `fs2` ≈ 50 Hz at any sample rate; deliberately out of scope while 500 Hz is the only
+rate in use. See also the ~2000 Hz ceiling imposed by the ambient sampling window (§8.3).
 
 `hr2_sqi` is a continuous [0–1] quality metric equal to the **unbiased** normalised autocorrelation value at the dominant lag:
 
@@ -1597,7 +1621,7 @@ Bench measurements at RF_100K / 500 Hz, sweeping CF across its **full range (5 p
 
 Write path verified by a control: changing RF 100K → 50K halved V_TIA as expected, and RF lives in the same two registers (TIAGAIN / TIA_AMB_GAIN) in adjacent bit fields — so the CF bits are reaching the chip and the null result is physical.
 
-**Why:** the AFE's internal low-pass filter (`FLTRCNRSEL` = 500 Hz) sits between Stage 2 and the sampler and dominates the noise bandwidth. The TIA pole ranges from 318 kHz (5 pF) to 6.4 kHz (250 pF) — always far above the 500 Hz corner — and because that filter precedes the sample-and-hold, there is no out-of-band noise left to alias either.
+**Why:** the AFE's internal low-pass filter (`FLTRCNRSEL` = 500 Hz) sits between Stage 2 and the sampler and dominates the noise bandwidth. The TIA pole ranges from 318 kHz (5 pF) to 6.4 kHz (250 pF) — always far above the 500 Hz corner — so CF cannot narrow a bandwidth that the internal filter has already set. (An earlier version of this paragraph added "and because that filter precedes the sample-and-hold, there is no out-of-band noise left to alias either". That coda was wrong: a first-order pole leaves out-of-band noise to fold. The residual aliasing is small but not zero, and it is quantified in §7.3 — which does not change this CF conclusion.)
 
 **Consequences:**
 - The claim that a larger CF buys meaningful noise filtering **is not supported by measurement** in this configuration. v0.62's value is that it fixes an incomplete register grid, not that it improves SNR.
@@ -1696,6 +1720,152 @@ magnitude (0.15 s fixed vs. ~16 ms computed at 500 Hz): the old value was conser
 coincidence, not by design.
 
 **Decision: keep the conservative criterion.** Relaxing it would buy nothing measurable while spending settling margin, and the margin is free. Revisit only if a configuration is found where CF demonstrably affects noise — e.g. with `FLTRCNRSEL` raised to 1000 Hz, a much higher RF, or a probe/cable whose capacitance makes TIA loop stability the limiting factor (the one CF-related risk these measurements did *not* probe, since no ringing was observed even at 5 pF).
+
+### 7.3 Anti-aliasing — the effective Rx bandwidth is the duty-cycled corner, not 500 Hz
+
+Analysis 2026-09-04, from the datasheet only (no bench measurement yet). **No code change:**
+`kAFE_FLTRCNRSEL = 0` (500 Hz corner) is confirmed correct at PRF = 500 Hz.
+
+**The chain.** TIA → ambient-cancellation DAC + Stage 2 → low-pass filter (500 Hz or 1 kHz, set by
+`FLTRCNRSEL`) → sample-and-hold onto CLEDx → 22-bit SAR ADC (datasheet §8.3.1.1 and §8.3.1.3:
+*"the gained-up pleth signal is then low-pass filtered (500-Hz bandwidth) and buffered before
+driving a 22-bit ADC"*). That filter does precede the sampler and is the **only** anti-aliasing
+filter in the chain — there is nothing else between Stage 2 and the S/H.
+
+**But 500 Hz is not the corner that acts.** Each phase tracks the filter output only during its own
+Rx sample window and holds for the rest of the PRP. Duty-cycling a single-pole RC stretches its
+effective time constant by 1/D, so the corner of the *sampled* channel is
+`f_c,eff ≈ f_c,nominal × D`. The datasheet documents this behaviour in two places:
+
+- **Figure 54, "Filter Response vs Duty Cycle" (p.26)** — −3 dB at ≈ **80 Hz** for 25 % duty and
+  ≈ **16 Hz** for 5 % duty. The 5:1 ratio matches the 5:1 duty ratio exactly, confirming
+  `f_c,eff ∝ D`; the absolute value is ~0.65× the naive `500 × 0.25 = 125 Hz`. Roll-off is first
+  order (−20 dB/dec).
+- **§7.5 Electrical Characteristics, low-pass filter pass-band attenuation (2–10 Hz):** 0.004 dB at
+  25 % duty vs 0.041 dB at 10 % duty — the same duty dependence, and proof that the PPG band itself
+  is untouched.
+
+**Margin at the operating point.** At PRF = 500 Hz the library's LED sample window is 449.5 µs of
+the 2000 µs PRP (D = 22.5 %) and the ambient window is 399.5 µs (D = 20 %) — see §11.1. Hence:
+
+| Quantity | Value |
+|---|---|
+| `f_c,eff`, LED phases (D = 22.5 %) | ≈ 70–110 Hz |
+| `f_c,eff`, ambient phases (D = 20 %) | ≈ 65–100 Hz |
+| Nyquist (`fs` = PRF = 500 Hz) | 250 Hz |
+| Anti-aliasing margin | **≈ 2.3–3.6×** |
+
+(The range spans the Figure-54 reading and the naive `f_c × D`; the two bracket the true value.)
+
+**Consequences:**
+
+1. **Signal aliasing: none.** PPG content lives below ~20 Hz, where attenuation is < 0.1 dB in both
+   phases. The small LED-vs-ambient bandwidth difference (22.5 % vs 20 % duty) is irrelevant there,
+   so the digital `LEDx − ALEDx` subtraction is not distorted by it.
+2. **Broadband noise aliasing: present but negligible.** A first-order pole at ~100 Hz leaves ~24 %
+   of the total noise power above Nyquist, which folds back white across 0–250 Hz. After the
+   downstream 0.5–5 Hz digital band-pass, that adds ≈ 15 % to the in-band noise density
+   (≈ +0.6 dB in power, ≈ +7 % in RMS). Not worth acting on.
+3. **Deterministic out-of-band interference: the real residual risk.** Optical or electrical
+   interference near `k × 500 Hz` folds into the pulse band attenuated only by a first-order pole
+   (≈ −14 dB at 500 Hz, ≈ −20 dB at 1 kHz). **Ambient subtraction does not cancel it:** the LED and
+   ambient phases are sampled a quarter period apart (500 µs = 90° at 500 Hz), so a tone at that
+   frequency arrives with different phase in each. Relevant in an incubator — LED phototherapy PWM
+   drivers and switched heaters are exactly this kind of source. Not yet measured.
+4. **Do not raise `FLTRCNRSEL` to 1 kHz.** It would double `f_c,eff` to ~140–220 Hz, i.e. essentially
+   Nyquist at PRF 500 Hz, converting a 2.3–3.6× margin into ~1×. Its only benefit is a shorter
+   post-diagnostics settling (16 ms vs 28 ms, §7.5) — see `kAFE_DIAG_HOLDOFF_MS`.
+5. **This constrains the sample-rate choice.** `f_c,eff` depends on the corner and the duty, both
+   fixed — it does **not** scale with PRF. So the anti-aliasing margin is `PRF / (2 · f_c,eff)` and
+   grows linearly with PRF: 250 Hz → no margin (Nyquist sits on `f_c,eff`); 500 Hz → ~2.3–3.6×;
+   1000 Hz → ~4.5–7×. **500 Hz is the floor**, and lowering PRF to buy ADC averaging (§7.1, ×1.26 at
+   best, saturating at ≤ 312 Hz on the NUMAV ≤ 15 hardware limit) trades a real margin for a
+   marginal SNR gain. Bad trade.
+6. **NUMAV averaging cannot help with aliasing.** The ADC converts the voltage already held on
+   CLEDx (§8.3.1.3), so averaging reduces ADC and quantisation noise, not aliased input noise.
+
+**Open (bench, not blocking):** measure the actual folded interference with the probe under an LED
+phototherapy lamp and under a PWM-driven heater, sweeping the interferer near 500 Hz and 1 kHz, and
+confirm the pulse band stays clean. This is the only claim here that rests on theory rather than
+measurement.
+
+### 7.4 Choosing the PRF — the validated grid
+
+Analysis 2026-09-04, calculation only (no bench measurement). **No code change:** PRF = 500 Hz stays
+the default. This section records why, and which other values are admissible.
+
+**Three arithmetic conditions close the candidate set:**
+
+1. **`q` must be an integer.** `q = (afeclk / PRF) / 4` in integer arithmetic, so unless PRF divides
+   10⁶ the real PRF is not the requested one (550 → 550.1, 750 → 750.2, 1500 → 1501.5 Hz). The error
+   is < 0.1 %, but every τ and α in `_recalc_rate_params()` is computed from the *nominal* value, so
+   the bias propagates into all EMAs and biquads.
+2. **PRF must be a multiple of 50**, so `fs2 = 50 Hz` stays exact with an integer decimation factor
+   (`decim = PRF/50`) and HR2/HR3 keep their window lengths, lag resolution and bin resolution.
+3. **Both sample windows must stay ≥ 50 µs** (datasheet §8.3.1.1). The binding one is the *ambient*
+   window, giving a ceiling of **≈ 1660 Hz** (`q ≥ 602`).
+
+**Admissible grid: 500, 800, 1000, 1250, 1600 Hz.**
+
+| PRF | q | win LED | win AMB | num | conv/s | anti-alias margin | atten. at f = PRF | samples/s |
+|---|---|---|---|---|---|---|---|---|
+| 250 | 4000 | 899.5 µs | 899.5 µs | 16 | 16000 | **1.1–1.7×** | −8…−11 dB | ×0.5 |
+| **500** | 2000 | 449.5 µs | 399.5 µs | 10 | 20000 | 2.2–3.4× | −13…−17 dB | ×1.0 |
+| 800 | 1250 | 280.8 µs | 212.0 µs | 6 | 19200 | 3.6–5.5× | −17…−21 dB | ×1.6 |
+| 1000 | 1000 | 224.5 µs | 149.5 µs | 5 | 20000 | 4.5–6.9× | −19…−23 dB | ×2.0 |
+| 1250 | 800 | 179.5 µs | 99.5 µs | 4 | 20000 | 5.6–8.6× | −21…−25 dB | ×2.5 |
+| 1600 | 625 | 140.2 µs | 55.8 µs | 3 | 19200 | 7.1–11× | −23…−27 dB | ×3.2 |
+
+**Raising the PRF buys** margin against the one residual risk of §7.3 — since `f_c,eff` does *not*
+move (73–112 Hz; duty is 22.5 % across the whole table), a higher PRF pushes the critical interferer
+at `f ≈ PRF` further down the roll-off, **+6 dB per octave** — plus better rejection of dynamic
+ambient (subtraction residue `2·sin(π·f·Δt)`, Δt = ¼ PRP: −10.1 dB at 100 Hz for 500 Hz vs −18.0 dB
+for 1250 Hz).
+
+**Raising the PRF costs** CPU and transport linearly (×2 at 1000 Hz: 2 ms → 1 ms per sample, ~100 →
+200 UDP pkt/s), squeezes the ambient window towards its fixed 400-count margin (at 1250 Hz the usable
+window equals the margin), and — the strongest argument — **eats the thermal headroom**:
+
+**The PRF bounds the LED duty-cycle lever.** At a fixed duty the PRF is thermally neutral
+(`P_avg = I_F · V_F · duty`), but the floor under the duty is fixed *in time* — 12.5 µs of LED/cable
+settling plus TI's 50 µs minimum Rx window = 62.5 µs — so the minimum reachable duty scales with PRF:
+
+| PRF | PRP | min. duty | headroom below the present 25 % |
+|---|---|---|---|
+| **500** | 2000 µs | **3.1 %** | **8.0×** |
+| 800 | 1250 µs | 5.0 % | 5.0× |
+| 1000 | 1000 µs | 6.3 % | 4.0× |
+| 1250 | 800 µs | 7.8 % | 3.2× |
+| 1600 | 625 µs | 10.0 % | 2.5× |
+
+Driving `I_F` to 100 mA at equal skin temperature would need a 12.5 % duty: comfortable at 500 Hz,
+impossible at 1600 Hz. Trimming the duty is nearly free on the signal side — `f_c,eff = 500 Hz × D`
+would fall to ~36–56 Hz at 12.5 % duty, still far above the PPG band (−0.3 dB at 10 Hz) and
+*improving* the anti-aliasing margin — but **the ambient window must be trimmed alongside it** even
+though thermals do not require it, or the LED and ambient phases end up with different bandwidths and
+the digital subtraction leaves a high-frequency noise residue.
+
+**Two non-criteria, recorded so they are not re-derived:**
+
+- **`5000/PRF` being an integer is not a requirement.** It is worth 0.18 dB
+  (`sqrt(20000/19200)` = 2 % noise), and it is contingent on the conversion window staying at 25 % of
+  the PRP — it evaporates if that window is ever trimmed. 800 and 1600 Hz are *not* penalised by it.
+  What is structural is the collapse below ~312 Hz, where the `NUMAV ≤ 15` hardware cap cuts
+  averaging (250 Hz → 16000 conv/s → +0.97 dB).
+- **ADC SNR does not depend on the PRF.** Conversions per second = `4 · num · PRF ≈ 20000`, constant
+  across the useful range: what the hardware stops averaging as the PRF rises, the downstream digital
+  filtering averages instead. Lowering the PRF to "buy averaging" gains nothing above 312 Hz and
+  *loses* conversion capacity below it.
+
+**Everything below 500 Hz is ruled out:** at 250 Hz the anti-aliasing margin is 1.1–1.7× (§7.3),
+ambient subtraction drops to −4.2 dB and 20 % of the ADC capacity is wasted, with no compensating
+advantage.
+
+**Decision: keep 500 Hz.** Lowest CPU cost, largest thermal headroom, and an anti-aliasing margin
+that is adequate unless bench measurement finds real folded interference. **1000 Hz is the reserve
+step** if it does. Prerequisite before any increase: measure the real cost of `_process_sample()`
+(`INCUNEST_TIMING_STATS`, §8.4) — and make the HR2/HR3 decimation adaptive first, or raising the PRF
+silently changes their analysis windows.
 
 ---
 
@@ -2013,7 +2183,7 @@ See §5.3 for algorithm description.
 | Decimation factor | `hr2_decim_factor` | 10 | 500 Hz → 50 Hz |
 | Buffer length | `hr2_buf_len` | 400 samples (8 s) | Analysis window; longer → more stable at low HR, longer convergence time |
 | Update interval | `hr2_update_interval` | 25 decimated samples (0.5 s) | HR2 output refresh rate |
-| Max autocorrelation lag | `hr2_acorr_max_lag` | 137 samples | Corresponds to 22 BPM guard band at 50 Hz |
+| Lag scratch-array cap | `hr2_acorr_lag_cap` | 137 samples | Storage bound only. Swept range comes from `hr_min_bpm`/`hr_max_bpm` at runtime; the cap binds only above ~845 Hz sample rate |
 | Minimum lag | `hr2_min_lag_s` | 0.185 s | Corresponds to ~324 BPM; prevents false peaks at very short lags |
 | Minimum correlation threshold | `hr2_min_corr` | 0.5 | Below this normalised correlation, no HR is reported and SQI = 0 |
 
@@ -2299,6 +2469,27 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.82   | **HR2 autocorrelation lag sweep: upper bound derived from `hr_min_bpm`      |
+|         | instead of a hardcoded 137 samples (§5.3).** The constant dated from v0.11, |
+|         | when the HR range was [25, 300] BPM (guard band 22 BPM at 50 Hz); the range |
+|         | later moved to [40, 260] BPM but the lag bound was never revisited. Being   |
+|         | fixed in *samples* while `fs2` is not, it also silently encoded a 50 Hz     |
+|         | assumption. Now `max_lag = 60/(hr_min_bpm-3)*fs2`, symmetric with the       |
+|         | existing `min_lag`, capped by storage (`hr2_acorr_max_lag` renamed to       |
+|         | `hr2_acorr_lag_cap`) and by `hr2_buf_len/2-1` (unbiased-ACF noise limit),   |
+|         | plus an explicit guard when fewer than 3 lags remain. **No output change at |
+|         | 500 Hz** — peaks beyond the old bound were rejected by the `hr >=           |
+|         | hr_min_bpm` check anyway — but the sweep drops from 127 to 71 lags, ~39 %   |
+|         | less work in the O(N·lags) inner loop, and now tracks `setHrRange()`.       |
+|         | New test `test_hr2_40bpm_lower_bound` pins the bottom of the range.         |
+|         | **Documentation added in the same version (no code change):** new §7.3      |
+|         | (anti-aliasing — the effective Rx bandwidth is the duty-cycled corner,      |
+|         | `f_c,eff ≈ f_c,nominal × D` ≈ 70–110 Hz, not the nominal 500 Hz; margin     |
+|         | 2.3–3.6× over Nyquist at PRF 500 Hz; datasheet Fig. 54) and new §7.4        |
+|         | (the validated PRF grid {500, 800, 1000, 1250, 1600} Hz, the thermal        |
+|         | headroom the PRF leaves under the LED duty, and two recorded non-criteria). |
+|         | §7.2 corrected: it claimed the pre-sampler filter left "no out-of-band      |
+|         | noise to alias" — false for a first-order pole; the CF conclusion stands.   |
 | v0.81   | **Rename: `AFE4490DebugData::hgac_rf_led1/led2` → `rf_led1/led2` (§3d).**  |
 |         | Alex, reviewing the new PulseNest `HGAC_RF1/RF2` CSV columns: the name      |
 |         | implies HGAC computed the value, but it's just the live RF config          |
