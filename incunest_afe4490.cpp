@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.86 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.86b — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1741,7 +1741,17 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * sample_rate_hz));
     _hr1_ma_len             = (uint32_t)roundf(sample_rate_hz / (2.0f * _hr1_ma_cutoff_hz));
     if (_hr1_ma_len < 1) _hr1_ma_len = 1;
-    if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) _hr1_ma_len = (uint32_t)hr1_ma_max_len;
+    if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) {
+        // Clamped: the filter no longer cuts where it was configured to, which lets the dicrotic
+        // notch through to HR1's threshold detector and risks double-counting (a doubled HR).
+        // Never silent — before v0.86b this clamp was mute and hit four of the five catalogue
+        // rates. See hr1_ma_max_len for why no fixed capacity can cover every cutoff.
+        ESP_LOGE(TAG, "HR1 moving average clamped: %u taps needed at %.0f Hz / %.1f Hz cutoff, "
+                      "%d available -> effective cutoff %.1f Hz",
+                 (unsigned)_hr1_ma_len, sample_rate_hz, _hr1_ma_cutoff_hz,
+                 hr1_ma_max_len, sample_rate_hz / (2.0f * (float)hr1_ma_max_len));
+        _hr1_ma_len = (uint32_t)hr1_ma_max_len;
+    }
     _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
     _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, sample_rate_hz);
     _hr3_bpf.init_lp(_hr3_bpf.f_high, sample_rate_hz);

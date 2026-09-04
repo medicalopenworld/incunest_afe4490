@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.86 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.86b — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.86"
+#define INCUNEST_AFE4490_VERSION "0.86b"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -1267,7 +1267,19 @@ private:
     BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz
 
     // ── HR1 moving average state (independent of PPG display filter) ──
-    static constexpr int hr1_ma_max_len = 64;  // supports up to 640 Hz @ 5 Hz cutoff
+    // Capacity of the moving-average buffer. Sized for the WORST CASE OF THE CATALOGUE at the
+    // default cutoff: 1600 Hz / (2 × 5 Hz) = 160 taps (§7.4). Was 64 until v0.86b, which covered
+    // only up to 640 Hz — so four of the five catalogue rates ran clamped, with an effective
+    // cutoff of 6.2–12.5 Hz instead of 5 Hz, and silently.
+    //
+    // The cap cannot cover every configuration: setHR1MaCutoffHz() is public and unvalidated, so
+    // a 2 Hz cutoff at 1600 Hz would ask for 400 taps. That is what the logE in
+    // _recalc_rate_params() is for — a clamped filter is now diagnosable instead of mute.
+    //
+    // Cost of the capacity is RAM only: the average is incremental (subtract the outgoing sample,
+    // add the incoming one), so CPU is O(1) in N. Group delay does not grow either — (N−1)/2
+    // samples, and N scales with the rate, so the delay stays ≈ 1/(4·cutoff) ≈ 50 ms at any PRF.
+    static constexpr int hr1_ma_max_len = 160;
     float    _hr1_ma_buf[hr1_ma_max_len];
     uint32_t _hr1_ma_len;   // computed from sample_rate in _recalc_rate_params()
     int      _hr1_ma_idx;
@@ -1538,6 +1550,7 @@ public:
     // at the previous rate in play.
     uint32_t test_settling_countdown() const { return _switched_rc_settling_countdown; }
     uint32_t test_hr2_buf_count() const      { return _hr2_buf_count; }
+    uint32_t test_hr1_ma_len() const         { return _hr1_ma_len; }
     uint32_t test_hr3_buf_count() const      { return _hr3_buf_count; }
     uint32_t test_hr2_decim_phase() const    { return _hr2_decim.phase; }
     // Whether _task_body() would freeze its input this cycle (§5.6.3/§5.8.4) — see v0.72.

@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.86
+# incunest_afe4490 — Specification v0.86b
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1973,12 +1973,23 @@ Implementation notes:
   §5.8.4 exists for the setters that do **not** hold it.
 * Pinned by `test_rate_change_tears_down_old_state` and `test_same_rate_is_a_no_op`.
 
-**Known limitation — HR1's moving average saturates above 640 Hz.** `hr1_ma_max_len` is 64 taps, so
-`_hr1_ma_len = round(fs / (2·hr1_ma_cutoff_hz))` clamps for four of the five catalogue entries: at
-800 Hz the effective cutoff becomes 6.2 Hz, at 1000 Hz 7.8 Hz, at 1250 Hz 9.8 Hz and at 1600 Hz
-12.5 Hz, instead of the configured 5 Hz. **Not resolved:** either `hr1_ma_max_len` rises to 160
-(+384 B in `_hr1_ma_buf`) or those entries are removed from the catalogue until HR1 supports them.
-Only 500 Hz, the default and the declared operating point, is unaffected.
+**HR1's moving-average capacity (resolved in v0.86b).** `hr1_ma_max_len` was 64 taps, enough only
+up to 640 Hz, so `_hr1_ma_len = round(fs / (2·hr1_ma_cutoff_hz))` clamped at four of the five
+catalogue entries — effective cutoff 6.2 Hz at 800 Hz, 7.8 at 1000, 9.8 at 1250 and 12.5 at
+1600 Hz instead of the configured 5 Hz — **and clamped silently**. A too-wide filter lets the
+dicrotic notch reach HR1's threshold detector, which double-counts it and reports a doubled HR;
+the 0.185 s refractory mitigates that unevenly and least of all in bradycardia, where the notch
+arrives later and falls outside it.
+
+Now `hr1_ma_max_len` is **160**, the worst case of the catalogue at the default cutoff
+(1600 / (2·5)). The cost is RAM only — **+384 B**, measured: firmware RAM 60 444 → 60 828 B of
+327 680 — because the average is incremental, so CPU is O(1) in N, and group delay stays ≈
+1/(4·cutoff) ≈ 50 ms at any PRF since N scales with the rate.
+
+No fixed capacity can cover every configuration: `setHR1MaCutoffHz()` is public and unvalidated,
+so a 2 Hz cutoff at 1600 Hz would need 400 taps. That case now emits **`logE`** naming the taps
+needed, those available and the resulting effective cutoff — a clamped filter is diagnosable
+instead of mute. Pinned by `test_hr1_ma_not_clamped_across_catalogue`.
 
 **If this ever becomes a range.** A `FractionalDecimator` (interpolate → filter → decimate) would
 remove the `hz % 50` condition, which is the only one that excludes an otherwise valid rate: **625
@@ -2649,6 +2660,22 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.86b  | **HR1 moving-average capacity 64 → 160 taps, and the clamp is no longer   |
+|         | silent (§7.4).** 64 taps covered only up to 640 Hz, so four of the five    |
+|         | catalogue rates ran with an effective cutoff of 6.2–12.5 Hz instead of the |
+|         | configured 5 Hz — and said nothing. That filter exists to keep the dicrotic |
+|         | notch away from HR1's threshold detector; too wide, the notch is           |
+|         | double-counted and HR reads double. The 0.185 s refractory mitigates it     |
+|         | unevenly and least of all in bradycardia, where the notch arrives later     |
+|         | and falls outside the refractory — i.e. it fails in the clinically         |
+|         | critical case. 160 = worst case of the catalogue at the default cutoff.     |
+|         | Cost is RAM only (+384 B measured: 60 444 → 60 828 B): the average is       |
+|         | incremental so CPU is O(1) in N, and group delay stays ≈ 50 ms at any PRF.  |
+|         | Since `setHR1MaCutoffHz()` is public and unvalidated no fixed capacity can  |
+|         | cover every case (2 Hz at 1600 Hz would need 400 taps), so the clamp now    |
+|         | emits `logE` with taps needed, taps available and effective cutoff. Pinned  |
+|         | by `test_hr1_ma_not_clamped_across_catalogue` (verified to fail with the    |
+|         | cap back at 64: 64 taps instead of 80 at 800 Hz).                          |
 | v0.86   | **A PRF change now tears down state accumulated at the previous rate       |
 |         | (§7.4 "Changing the rate at runtime").** `setSampleRate()` recalculated    |
 |         | coefficients but left four things belonging to the old rate in play: the   |
