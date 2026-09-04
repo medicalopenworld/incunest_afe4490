@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.84
+# incunest_afe4490 — Specification v0.84b
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -931,7 +931,7 @@ is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fres
 
 **Processing chain:**
 1. Biquad bandpass filter 0.5–5 Hz at the AFE rate (eliminates DC, high-frequency noise, and acts as anti-aliasing)
-2. Decimate via `_pulse_band_decim` → 50 Hz (see §5.3.1)
+2. Decimate via `_hr2_decim` → 50 Hz (see §5.3.1)
 3. Accumulate in circular buffer of 400 samples (8 s at 50 Hz)
 4. Every 25 decimated samples (0.5 s), compute normalised autocorrelation over lags corresponding to 30–272 BPM
 
@@ -943,21 +943,21 @@ is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fres
 |---|---|---|
 | `hr2_buf_len` | 400 | Buffer length (8 s at 50 Hz) |
 | `hr2_acorr_lag_cap` | 137 | **Storage cap** of the lag scratch array, not the search policy. The swept range is derived at runtime from `hr_min_bpm`/`hr_max_bpm` — see below |
-| `_pulse_band_decim.factor` | 10 at 500 Hz | **Derived** from `pulse_band_target_rate_hz`, not configured — see §5.3.1 |
+| `_hr2_decim.factor` | 10 at 500 Hz | **Derived** from `hr2_decim_target_rate_hz`, not configured — see §5.3.1 |
 | `hr2_update_interval` | 25 | Recompute every 0.5 s |
 | `hr2_min_lag_s` | 0.22 s | Min RR lag (~272 BPM max) |
 | `hr2_min_corr` | 0.5 | Normalised correlation threshold for valid peak |
 
 **Lag sweep bounds (derived, not hardcoded):** both ends of the autocorrelation search come
 from the configured HR range plus a ±3 BPM guard band, converted to lag at the *current*
-pulse-chain rate `_pulse_band_decim.rate_hz`:
+decimated rate of HR2's chain, `_hr2_decim.rate_hz`:
 
 ```
-min_lag = 60 / (hr_max_bpm + 3) * pulse_band_decim.rate_hz
-max_lag = 60 / (hr_min_bpm - 3) * pulse_band_decim.rate_hz   capped at hr2_acorr_lag_cap and at hr2_buf_len/2 - 1
+min_lag = 60 / (hr_max_bpm + 3) * hr2_decim.rate_hz
+max_lag = 60 / (hr_min_bpm - 3) * hr2_decim.rate_hz   capped at hr2_acorr_lag_cap and at hr2_buf_len/2 - 1
 ```
 
-At the operating point (pulse-chain rate 50 Hz, HR range [40, 260] BPM) this gives
+At the operating point (`_hr2_decim.rate_hz` = 50 Hz, HR range [40, 260] BPM) this gives
 `min_lag = 11`, `max_lag = 81`. Neither cap is active: 81 is well under both 137 and 199.
 
 The `hr2_buf_len/2 - 1` cap exists because the unbiased normaliser `N/(N−τ)` grows without
@@ -992,8 +992,16 @@ decimation:
 
 | Chain | Anti-alias filter | Nyquist needed | Consumers | Target rate |
 |---|---|---|---|---|
-| `_pulse_band_decim` | bandpass 0.5–5 Hz | > 5 Hz | HR2_ACF, and HR2_MPM / HR2_YIN when added (§5.5) | 50 Hz |
-| `_harmonic_band_decim` | low-pass 15 Hz | > 15 Hz | HR3 | 50 Hz |
+| `_hr2_decim` | bandpass 0.5–5 Hz | > 5 Hz | HR2_ACF, and HR2_MPM / HR2_YIN when added (§5.5) — all three share this chain and its buffer | 50 Hz |
+| `_hr3_decim` | low-pass 15 Hz | > 15 Hz | HR3 | 50 Hz |
+
+**On the names (v0.84b):** the chains are named after their consumer, which is accurate for all
+three lag estimators — `HR2_ACF`, `HR2_MPM` and `HR2_YIN` share HR2's chain and its buffer. Accepted
+risk: the name goes stale the day a non-`HR2_*` estimator feeds off it, at which point the honest
+rename is after what each chain *preserves* — HR2's guarantees the fundamental across [30, 300] BPM,
+HR3's guarantees up to the 3rd harmonic of 260 BPM because its HPS multiplies it. Naming them after
+the band was tried and rejected: a "pulse band" that reaches the 5th harmonic of a 60 BPM pulse and
+a "harmonic band" that includes the fundamental describe a split that does not exist.
 
 The two chains share **nothing**: not the filter, not the circular buffer, not the phase counter.
 Nothing therefore forces a common rate, and running them at one rate buys no saving — no shared
@@ -1019,7 +1027,7 @@ honestly rather than lie.
 **Why both target 50 Hz — and why that is a coincidence of requirements, not a constraint.**
 This had never been justified; it was inherited from dividing 500 Hz by a round 10.
 
-*The harmonic chain needs it.* Four independent reasons, all pointing at ~50 Hz:
+*HR3's chain needs it.* Four independent reasons, all pointing at ~50 Hz:
 
 1. **50 Hz is the GCD of the validated PRF grid** {500, 800, 1000, 1250, 1600} — the highest
    decimated rate with an *integer* factor at every admissible PRF (10, 16, 20, 25, 32). The only
@@ -1040,8 +1048,8 @@ This had never been justified; it was inherited from dividing 500 Hz by a round 
 | **50 Hz** | 25 Hz | −9.4 dB | 0.098 Hz | 10.24 s | 8.0 s |
 | 100 Hz | 50 Hz | −21.0 dB | 0.195 Hz | 5.1 s | 4.0 s |
 
-*The pulse chain does not.* Only reason 1 applies to it. Its bandpass cuts at 5 Hz, so 25 Hz would
-still leave Nyquist at 12.5 Hz — 2.5× of margin, the same the harmonic chain has today over its
+*HR2's chain does not.* Only reason 1 applies to it. Its bandpass cuts at 5 Hz, so 25 Hz would
+still leave Nyquist at 12.5 Hz — 2.5× of margin, the same HR3's chain has today over its
 15 Hz. Lowering it to 25 Hz (factor 20 at 500 Hz, integer across the whole grid since 25 divides
 50) would give, keeping the window at 8 s: 200 samples instead of 400, ~36 lags instead of 71,
 `O(N·lags)` down from 28 400 to 7 200 — a **3.9× cut**, *tripled* once MPM and YIN sweep the same
@@ -1056,7 +1064,7 @@ comparing three lag estimators must not change the chain rate at the same time, 
 chain instead of the estimators. **Decide it from the offline experiment** (`tools/offline_runner`
 replays recorded captures at both rates — no hardware needed), not by reasoning.
 
-**Known weak point of the harmonic chain:** −9.4 dB of anti-alias attenuation at Nyquist is thin
+**Known weak point of HR3's chain:** −9.4 dB of anti-alias attenuation at Nyquist is thin
 for a ×10 decimation. Harmless for the HR estimate (there is almost no PPG content above 25 Hz),
 but the folded noise raises the spectral floor and that is paid in `hr3_sqi`, not in `hr3`. The
 lever is a 4th-order low-pass before decimating — **not** a different rate, which reasons 1–4 have
@@ -1080,7 +1088,7 @@ Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_ale
 
 **Processing chain:**
 1. 2nd-order Butterworth low-pass filter at 15 Hz (anti-aliasing before decimation — see the note below on why it is a pure low-pass)
-2. Decimate via `_harmonic_band_decim` → 50 Hz (see §5.3.1)
+2. Decimate via `_hr3_decim` → 50 Hz (see §5.3.1)
 3. Accumulate in circular buffer of 512 samples (10.24 s at 50 Hz)
 4. Every 25 decimated samples (0.5 s): mean subtraction (DC removal) → Hann window → in-place radix-2 DIT FFT → HPS → parabolic interpolation
 
@@ -1106,7 +1114,7 @@ removed; `f_low` in `BiquadFilter` stays 0 and unused for low-pass instances.
 | Constant | Value | Meaning |
 |---|---|---|
 | `hr3_buf_len` | 512 | Buffer length (10.24 s at 50 Hz) |
-| `_harmonic_band_decim.factor` | 10 at 500 Hz | Own chain, independent of HR2's — **derived**, see §5.3.1 |
+| `_hr3_decim.factor` | 10 at 500 Hz | Own chain, independent of HR2's — **derived**, see §5.3.1 |
 | `hr3_update_interval` | 25 | Recompute every 0.5 s |
 | LP cutoff | 10 Hz | Anti-aliasing before decimation |
 | HPS harmonics | 2, 3 | P[k]·P[2k]·P[3k] |
@@ -2234,7 +2242,7 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 |---|---|---|---|---|
 | DC removal time constant | `spo2_ema_mean_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 2.0 s (SpO2), 1.6 s (HR1) | SpO2, HR1 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
 | Input channel selection | `setPPGChannel()` default | LED1 | `ppg_disp` only (v0.69) | Selects ot_led1 vs ot_led2 for the display waveform; HR1/HR2/HR3/SpO2 always consume both OT channels directly, not gated by this selector |
-| Decimation factor | `_pulse_band_decim.factor`, `_harmonic_band_decim.factor` (each derived from its own target rate) | ×10 at 500 Hz | HR2 / HR3 respectively | One chain per filtered path; holds each decimated rate at 50 Hz before autocorrelation / FFT — see §5.3.1 |
+| Decimation factor | `_hr2_decim.factor`, `_hr3_decim.factor` (each derived from its own target rate) | ×10 at 500 Hz | HR2 / HR3 respectively | One chain per filtered path; holds each decimated rate at 50 Hz before autocorrelation / FFT — see §5.3.1 |
 
 ---
 
@@ -2279,7 +2287,7 @@ See §5.3 for algorithm description.
 |---|---|---|---|
 | BPF lower cutoff | `hr2_f_low_hz` | 0.5 Hz | Removes DC drift and very low-frequency baseline wander |
 | BPF upper cutoff | `hr2_f_high_hz` | 5.0 Hz | Anti-aliasing before decimation; limits harmonic content |
-| Decimation factor | `_pulse_band_decim.factor` | 10 at 500 Hz | **Derived** from `pulse_band_target_rate_hz`, not configured — see §5.3.1 |
+| Decimation factor | `_hr2_decim.factor` | 10 at 500 Hz | **Derived** from `hr2_decim_target_rate_hz`, not configured — see §5.3.1 |
 | Buffer length | `hr2_buf_len` | 400 samples (8 s) | Analysis window; longer → more stable at low HR, longer convergence time |
 | Update interval | `hr2_update_interval` | 25 decimated samples (0.5 s) | HR2 output refresh rate |
 | Lag scratch-array cap | `hr2_acorr_lag_cap` | 137 samples | Storage bound only. Swept range comes from `hr_min_bpm`/`hr_max_bpm` at runtime; the cap binds only above ~845 Hz sample rate |
@@ -2295,7 +2303,7 @@ See §5.4 for algorithm description.
 | Parameter | Constant | Value | Effect |
 |---|---|---|---|
 | LP filter cutoff | `hr3_f_high_hz` | 15 Hz | Anti-aliasing before decimation; passes up to the 3rd harmonic of 260 BPM (13 Hz). **Does not remove DC** — that is done by mean subtraction in `_hr3_linearize()` |
-| Decimation factor | `_harmonic_band_decim.factor` | 10 at 500 Hz | Own chain, independent of HR2's — **derived**, see §5.3.1 |
+| Decimation factor | `_hr3_decim.factor` | 10 at 500 Hz | Own chain, independent of HR2's — **derived**, see §5.3.1 |
 | FFT / buffer length | `hr3_buf_len` | 512 samples (10.24 s) | Frequency resolution = 50/512 ≈ 0.098 Hz ≈ 0.35 BPM at 1 Hz |
 | Update interval | `hr3_update_interval` | 25 decimated samples (0.5 s) | HR3 output refresh rate |
 | Window function | Hann | — | Reduces spectral leakage; pre-computed at `_reset_algorithms()` |
@@ -2568,14 +2576,25 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.84b  | **Decimation chains renamed `_pulse_band_decim` / `_harmonic_band_decim` → |
+|         | `_hr2_decim` / `_hr3_decim`** (with their target-rate constants and test    |
+|         | accessors). No functional change. The band-based names described a split    |
+|         | that does not exist: a "pulse band" reaching 5 Hz covers the 5th harmonic   |
+|         | of a 60 BPM pulse, and a "harmonic band" includes the fundamental. Naming   |
+|         | after the consumer is accurate for all three lag estimators, since          |
+|         | HR2_ACF / HR2_MPM / HR2_YIN share HR2's chain and buffer. Accepted risk,    |
+|         | recorded in §5.3.1: the name goes stale if a non-HR2_* estimator ever feeds |
+|         | off that chain, and the honest rename would then be after what each chain   |
+|         | PRESERVES (HR2's: the fundamental across [30, 300] BPM; HR3's: up to the    |
+|         | 3rd harmonic of 260 BPM, which its HPS multiplies).                        |
 | v0.84   | **One decimation chain per filtered path (§5.3.1).** The single             |
 |         | `_decim_factor` served both HR2 and HR3, implying a coupling that does not  |
 |         | exist: the two paths share no filter, no buffer and no phase counter, so    |
 |         | nothing forces a common rate and running them at one rate saves nothing —   |
 |         | no shared convolution, no shared buffer, not one CPU cycle. Replaced by a   |
 |         | `Decimator` struct (factor, phase, achieved rate) instantiated twice:       |
-|         | `_pulse_band_decim` (BP 0.5–5 Hz → HR2_ACF, and MPM/YIN when they land)     |
-|         | and `_harmonic_band_decim` (LP 15 Hz → HR3), each deriving its factor from  |
+|         | `_hr2_decim` (BP 0.5–5 Hz → HR2_ACF, and MPM/YIN when they land)     |
+|         | and `_hr3_decim` (LP 15 Hz → HR3), each deriving its factor from  |
 |         | its own target. Both target 50 Hz today, so **no behavioural change** — but |
 |         | §5.3.1 now records that this is a coincidence of requirements, not a        |
 |         | constraint: only the harmonic chain needs 50 Hz (its 15 Hz low-pass stops   |
