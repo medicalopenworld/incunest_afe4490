@@ -1173,6 +1173,15 @@ HR1–HR4 all operate on `led1_aled1` (IR ambient-corrected) and run in parallel
 
 > All HR algorithms developed from scratch. Protocentral code is not used as a base.
 
+**HR1's filter and detector are under review.** The moving-average low-pass is inherited from a
+constraint that disappeared in v0.6 (the biquad could not compute its own coefficients then), and
+measurement shows no argument left for keeping it: under phototherapy interference, with a true
+rate of 60 BPM, the MA reads 75.5 BPM against the biquad's 66.1. Those same figures show the
+**detector** is the weaker link — a +10 % error is still a failing monitor. The full analysis, the
+strategy catalogue (TERMA, SSF, derivative variants, template matching, envelope, plus waveform
+validation, adaptive refractory and cross-checking against HR2) and the recommendation live in
+[`incunest_afe4490_design.md`](incunest_afe4490_design.md) §5, each claim with its source.
+
 ---
 
 ### 5.6 RSQM — Raw Signal Quality Monitor

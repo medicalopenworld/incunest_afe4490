@@ -185,7 +185,95 @@ AFE4900 + external H-bridge. Protocentral rejected as a validation reference.
 
 ---
 
-## 5. Nomenclature & conventions (pointer)
+## 5. HR1 — the filter and the detector
+
+Analysis 2026-09-04. **Nothing here is implemented yet** except where stated; the spec describes
+what HR1 does today (§5.2). Each claim carries its **source**, so a reader can tell measurement
+from literature from inference.
+
+### 5.1 Why HR1 low-passes with a moving average (it is inherited, and the reason expired)
+
+| Finding | Source |
+|---|---|
+| The MA entered as *"ring buffer de 8 muestras (simple, no necesita f_low/f_high)"*, while the biquad had *"coeficientes hardcodeados (mismos que Protocentral)"* and a pending TODO for dynamic coefficients | `conversation_log.md:276-277` |
+| So the real premise was that **the biquad could not compute its own coefficients** — it only worked at 500 Hz / 0.5–20 Hz. The MA was the only filter that followed the sample rate | inference from the two lines above |
+| When HR1 got its own filter, the decision being taken was **decoupling it from the display filter** (changing `f_high` to look at the signal altered HR), not choosing a filter type. The MA was justified by *"se adapta automáticamente si cambia `_sample_rate_hz`"* | `conversation_log.md:745-755` |
+| The premise expired in **v0.6**: *"Coeficientes biquad dinámicos… `setFilter()` completamente funcional para cualquier fs/f_low/f_high"*. Nobody revisited HR1 in the ~80 versions since | `conversation_log.md:430` |
+| A later review inventoried the filters and **noted the asymmetry without acting** (HR1 with MA "sin biquad"; HR2/HR3 with Butterworth biquads) | `conversation_log.md:5644` |
+| Neither the log nor the code ever mentions linear phase or O(1) cost — the two arguments that *would* justify an MA today. They are real but accidental | search of log + code |
+
+### 5.2 Measured: MA vs biquad (own measurement, `tools/hr1_filter_experiment.py`)
+
+Method: both arms share the DC removal and the detector, so any difference is the filter's; the
+biquad uses the same algebra as `BiquadFilter::init_lp()`. Two method corrections were decisive —
+a 5 s warmup for the running max, and **pairing beats** instead of comparing each arm's RR spread
+(an SD of 25-29 ms on a resting adult finger is physiological HRV, identical in both arms, and it
+swamps the filter's contribution).
+
+| Result | Value | Source |
+|---|---|---|
+| Differential jitter, clean signal (4 captures, 3 subjects) | **SD 1.0-3.7 ms** ~ 0.2 BPM at 60 BPM | own measurement |
+| Reference scale: those subjects' own HRV | SD 25-29 ms ~ 1.5 BPM | own measurement |
+| Reference scale: ISO 80601-2-61 HR accuracy | ±3 BPM | ISO 80601-2-61 |
+| Differential group delay | −0.9…−2.4 ms, systematic, does not affect RR | own measurement |
+| Under phototherapy interference, true rate 60 BPM | MA **75.5 BPM (+26 %)**, biquad **66.1 (+10 %)** | own measurement |
+| Why: MA first sidelobe at −13 dB decaying 6 dB/octave, vs 40 dB/decade monotonic for a 2nd-order Butterworth | standard DSP result |
+| Collateral: a biquad has no rate-dependent length, so it removes the `hr1_ma_max_len` clamp (v0.86b) and returns 640 B | inference |
+| Nominal cutoff is not the real one: `N = fs/(2·fc)` puts −3 dB at `fs/2N`, but an N-sample MA is −3 dB at ≈ `0.443·fs/N` (so "5 Hz" is ~4.4 Hz) | standard DSP result |
+
+**Conclusion:** no argument survives for keeping the MA. Its only theoretical merit is real but an
+order of magnitude below what matters, and in the hard case it is the worse of the two.
+**Caveat:** the captures are adults and a simulator, **not neonates**, whose dicrotic notch is
+sharper and closer to the systolic peak — precisely the condition that decides double-counting.
+
+### 5.3 The detector is the weaker link
+
+The interference figures above are the argument: moving from +26 % to +10 % error is still a
+failing HR monitor. What fails there is the **detector** — a rising-edge crossing of 0.6 × a
+decaying running max, with a fixed refractory and no waveform validation. A better filter only
+masks it.
+
+#### Strategy catalogue
+
+| Strategy | How it works | Cost in Task A | Robustness to interference | Demands on the filter | Source |
+|---|---|---|---|---|---|
+| **Adaptive threshold** (current) | 0.6 × decaying running max + fixed refractory | ~0 | **Poor** (+26 % measured) | aggressive low-pass | as built, spec §5.2 |
+| **TERMA** | Two event-related moving averages — ~111 ms (peak) and ~667 ms (beat) — whose crossing generates blocks of interest; the peak is sought inside the block. The published design rule `2·W1 <= W2 <= 8·W1` is what separates the systolic peak from the dicrotic notch. Reported 99.89 % sensitivity / 99.84 % PPV over 5 071 beats, **on heat-stressed PPG** | two incremental MAs, O(1) | **Very good** | soft low-pass + squaring | Elgendi, PLOS One 2013 (10.1371/journal.pone.0076585); Biosensors 2016 (10.3390/bios6040055) |
+| **SSF (slope sum function)** | Slope sum over a window enhances the upslope and suppresses the rest: low-pass + SSF + decision rule | O(W), W ~ 100 ms | Good | soft low-pass | Zong et al., open-source ABP onset algorithm |
+| **First derivative / local extrema** | Zero crossing of dy with the sign of d²y; variants cube the derivative to highlight search zones | ~0 | Medium | low cutoff (the derivative amplifies HF noise) | Billauer; Li; FDPPG variants |
+| **`y × dy` delayed** | Product amplifies edges and suppresses flat regions | ~0 | Medium | low cutoff | own idea — `project_hr1_improvements_task` option A |
+| **Template matching** | Cross-correlation with an expected pulse shape | O(L), L ~ pulse length | Good at low SNR | **linear phase** (distortion misaligns the template) | own idea — option B |
+| **Hilbert / envelope (WEPD)** | Analytic envelope locates the pulse; designed to cut both false positives and negatives | High (FFT or long filter) | Good | indifferent | Hilbert-transform PPG onset literature |
+| **Waveform validation** *(complement)* | Accept a candidate only if width, area and rise/fall ratio are plausible | ~0 | Complementary | indifferent | own idea |
+| **Adaptive refractory** *(complement)* | Refractory = f(estimated HR) instead of a fixed 0.185 s | ~0 | Complementary | indifferent | own idea |
+| **Cross-check against HR2** *(complement)* | Accept an interval only if it agrees with the autocorrelation period already computed for HR2 | ~0 (already computed) | **Complementary, strong** | indifferent | own idea — specific to this library |
+
+#### Recommendation
+
+**TERMA**, with **SSF** as the simpler fallback. Reasons: O(1) cost (two incremental averages, like
+the one already there); the strongest external validation among the candidates, and obtained on
+*heat-stressed* signals — a poor-quality regime comparable to ours; and it attacks the actual cause,
+since the ~667 ms average sets the threshold from the **local beat level** instead of from a global
+decaying maximum that interference inflates.
+
+Two complements are worth adding regardless, both ~free: **cross-check against HR2** (a doubled HR1
+is exactly what disagrees with the autocorrelation period — this one is ours, not from the
+literature, because no published detector has a second estimator sitting next to it) and **adaptive
+refractory** (0.185 s covers up to 263 BPM, but in bradycardia it leaves the notch unprotected,
+which is where the measurement shows the failure).
+
+**Note on moving averages.** TERMA *reintroduces* them — as event detectors over the squared signal,
+not as pre-threshold smoothing. The MA is not wrong as a tool; it was wrong in that role. So
+replacing HR1's low-pass with a biquad stays correct under TERMA, SSF and the derivative variants;
+only template matching would prefer the MA, and it is the weakest candidate on cost and on the
+difficulty of defining a neonatal template.
+
+**Pending before implementing a detector:** an offline comparison (TERMA vs SSF vs current) over
+the recorded captures, and ideally neonatal captures — same approach as §5.2.
+
+---
+
+## 6. Nomenclature & conventions (pointer)
 
 Naming rules, domain prefixes, ADC `adc_code`/`LSB` conventions, and the code↔ISO 80601-2-61↔AFE4490
 term mapping (led1/led2 vs ir/red, etc.) are captured in the project's nomenclature notes; to be
