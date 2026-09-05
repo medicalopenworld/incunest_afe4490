@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.87
+# incunest_afe4490 — Specification v0.88
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -908,6 +908,7 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_ma_cutoff_hz` | 5 Hz | Moving average low-pass cutoff |
 | `hr1_ma_max_len` | 64 samples | Max moving average length |
 | `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit). A fixed value cannot protect bradycardia — see the rationale §5.3 |
+| `hr1_threshold_fraction` | 0.6 | Detection threshold as a fraction of the decaying running max. **The single parameter that most determines whether a beat is counted.** Lower → more sensitive, risks counting the dicrotic notch; higher → misses weak beats. A bare literal until v0.88 |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
 | `hr_min_bpm` | 40 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
 | `hr_max_bpm` | 260 BPM | Reported valid HR range maximum (neonatal tachycardia) |
@@ -2673,6 +2674,24 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.88   | **Two buried literals become named parameters.** Prompted by an inventory  |
+|         | of what actually conditions the algorithms: of ~45 configurable values     |
+|         | plus internal constants, ~15 condition a result and 7 have no documented   |
+|         | provenance — but two were not even parameters.                             |
+|         | **`0.6f` → `hr1_threshold_fraction`**, now configurable via                |
+|         | `setHR1ThresholdFraction()` and exposed in `AFE4490Config`. It is the      |
+|         | single value that most determines whether a beat is counted, and it had no |
+|         | name, no presence in the config or the spec, and could not be swept        |
+|         | without recompiling — which blocked precisely the sensitivity study it     |
+|         | most needs. The setter rejects anything outside (0, 1]: at 0 every sample  |
+|         | crosses and above 1 nothing does, so both extremes silence HR1 rather than |
+|         | degrade it.                                                                |
+|         | **`3.0f` → `hr_guard_band_bpm`**, one constant replacing the same literal  |
+|         | at four sites across HR2's lag sweep and HR3's bin sweep, where changing   |
+|         | one and forgetting another would have desynchronised the two estimators    |
+|         | silently. Kept as an internal constant: nothing suggests a caller should   |
+|         | tune it.                                                                   |
+|         | No behavioural change — both keep their previous values.                   |
 | v0.87   | **Every time-valued parameter is expressed in seconds and derived from the |
 |         | rate (rationale §6).** Audit prompted by the question "are there more       |
 |         | unresolved sample-rate dependencies?" — there were two live and one latent. |

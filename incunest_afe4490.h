@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.87 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.88 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.87"
+#define INCUNEST_AFE4490_VERSION "0.88"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -655,6 +655,7 @@ struct AFE4490Config {
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
     float             hr1_max_decay_tau_s;       // running-max decay time constant [s]
+    float             hr1_threshold_fraction;    // detection threshold, as a fraction of the running max
     float             hr1_sqi_cv_max;            // CV above this → SQI=0 [dimensionless]
     // HR2 algorithm parameters
     float             hr2_min_corr;              // min normalised autocorrelation for SQI=1
@@ -766,6 +767,7 @@ public:
     void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant; triggers recalc
     void setHR1LpCutoffHz(float hz);                           // peak-detection low-pass cutoff; triggers recalc
     void setHR1MaxDecayTauS(float tau_s);                      // running-max decay time constant [s]; triggers recalc
+    void setHR1ThresholdFraction(float frac);                  // detection threshold as a fraction of the running max, in (0, 1]
     void setHR1SqiCvMax(float cv);                             // SQI CV threshold [dimensionless]
 
     // HR2 algorithm setters
@@ -1453,6 +1455,9 @@ private:
     // 500 Hz but 6.25 s at 1600 Hz. That silently relaxed the threshold 3.2x faster at the top of
     // the catalogue, inviting false positives. Now a time constant, converted per rate.
     float    _hr1_max_decay_tau_s;
+    // Fraction of the running max at which a rising edge counts as a beat. The single parameter
+    // that most determines whether a beat is counted; a bare literal until v0.88.
+    float    _hr1_threshold_fraction;
     float    _hr1_max_decay_alpha;           // derived: exp(-1/(tau × fs))
     float    _hr1_sqi_cv_max;
     float    _hr2_min_corr;

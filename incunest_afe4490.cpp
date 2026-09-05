@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.87 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.88 — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -76,6 +76,12 @@ namespace {
     constexpr float    hr1_max_decay_tau_s = 20.0f;
     // SQI: CV = std/mean of the 5 most recent RR intervals.
     // CV=0 (perfectly regular) → SQI=1. CV ≥ hr1_sqi_cv_max → SQI=0.
+    // Detection threshold, as a FRACTION of the decaying running max. Was a bare 0.6f literal
+    // inside _hr1_update() until v0.88: the single parameter that most determines whether a beat
+    // is counted had no name, was absent from AFE4490Config and from the spec, and could not be
+    // swept without recompiling — which blocked the sensitivity study it most needs.
+    // Lower → more sensitive (risks counting the dicrotic notch); higher → misses weak beats.
+    constexpr float    hr1_threshold_fraction = 0.6f;
     constexpr float    hr1_sqi_cv_max      = 0.15f;    // dimensionless — 15% CV threshold
     // REFRACTORY PERIOD — the blind window after an accepted beat, during which any further
     // threshold crossing is ignored. Named after the cardiac refractory period (the myocardium
@@ -115,6 +121,11 @@ namespace {
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
     constexpr float    hr_min_bpm          =  40.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
     constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
+    // Widens the SEARCH range beyond the valid output range, so a rate sitting exactly at a
+    // bound is still found rather than cut off. Shared by HR2 (lag sweep) and HR3 (bin sweep);
+    // it was the same 3.0f literal repeated at four sites until v0.88, where changing one and
+    // forgetting another would have desynchronised the two estimators silently.
+    constexpr float    hr_guard_band_bpm   = 3.0f;     // bpm
 
     // ── HGAC — TIA operating range (DIFFERENTIAL domain) ─────
     // Reference: AFE4490 datasheet Fig. 135 ("AGC Loop"), §9.2.2.
@@ -346,6 +357,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
       _hr1_dc_tau_s(hr1_dc_tau_s),
       _hr1_lp_cutoff_hz(hr1_lp_cutoff_hz), _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
+      _hr1_threshold_fraction(hr1_threshold_fraction),
       _hr1_max_decay_alpha(0.0f),
       _hr1_sqi_cv_max(hr1_sqi_cv_max),
       _hr2_min_corr(hr2_min_corr),
@@ -940,6 +952,18 @@ void INCUNEST_AFE4490::setHR2UpdateIntervalS(float s) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+// Detection threshold as a fraction of the running max. Clamped to (0, 1]: at 0 every sample
+// crosses and at >1 nothing ever does, so both extremes silence HR1 rather than degrade it.
+void INCUNEST_AFE4490::setHR1ThresholdFraction(float frac) {
+    if (frac <= 0.0f || frac > 1.0f) {
+        ESP_LOGE(TAG, "setHR1ThresholdFraction: %.3f out of (0, 1] — ignored", frac);
+        return;
+    }
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _hr1_threshold_fraction = frac;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 void INCUNEST_AFE4490::setHR1MaxDecayTauS(float tau_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _hr1_max_decay_tau_s = tau_s;
@@ -1086,6 +1110,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
     cfg.hr1_lp_cutoff_hz      = _hr1_lp_cutoff_hz;
     cfg.hr1_max_decay_tau_s   = _hr1_max_decay_tau_s;
+    cfg.hr1_threshold_fraction = _hr1_threshold_fraction;
     cfg.hr1_sqi_cv_max        = _hr1_sqi_cv_max;
     cfg.hr2_min_corr          = _hr2_min_corr;
     cfg.hr2_update_interval_s = _hr2_update_interval_s;
@@ -2352,7 +2377,7 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
     // Running max: slow exponential decay keeps it tracking signal amplitude
     _hr1_running_max = fmaxf(_hr1_running_max * _hr1_max_decay_alpha, ppg_filtered);
 
-    float threshold = 0.6f * _hr1_running_max;
+    float threshold = _hr1_threshold_fraction * _hr1_running_max;
 
     // Threshold crossing (rising edge only)
     if (ppg_filtered > threshold && !_hr1_ppg_above_thresh) {
@@ -2451,7 +2476,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     for (int i = 0; i < hr2_buf_len; i++) acorr0 += _hr2_snapshot[i] * _hr2_snapshot[i];
     if (acorr0 < hr2_ot_energy_eps) { _hr2_result_sqi = 0.0f; return; }
 
-    int   min_lag = (int)(60.0f / (_hr_max_bpm + 3.0f) * _hr2_decim.rate_hz);
+    int   min_lag = (int)(60.0f / (_hr_max_bpm + hr_guard_band_bpm) * _hr2_decim.rate_hz);
     if (min_lag < 1) min_lag = 1;
 
     // Upper bound of the lag sweep = slowest accepted heart rate, converted to lag at the
@@ -2464,7 +2489,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     // whenever the sample rate left 500 Hz: 43.8 BPM at 1000 Hz, 87.6 BPM at 2000 Hz — both
     // above the 40 BPM default _hr_min_bpm, so real bradycardia would have been reported as
     // "no periodicity" (sqi = 0) instead of as a low HR.
-    float lag_min_bpm = fmaxf(_hr_min_bpm - 3.0f, 1.0f);   // guard: setHrRange() could reach ≤3
+    float lag_min_bpm = fmaxf(_hr_min_bpm - hr_guard_band_bpm, 1.0f);  // setHrRange() could reach ≤3
     int   max_lag     = (int)(60.0f / lag_min_bpm * _hr2_decim.rate_hz);
     if (max_lag > hr2_acorr_lag_cap)   max_lag = hr2_acorr_lag_cap;    // scratch-array capacity
     if (max_lag > hr2_buf_len / 2 - 1) max_lag = hr2_buf_len / 2 - 1;  // unbiased-ACF noise limit
@@ -2586,8 +2611,8 @@ void INCUNEST_AFE4490::_hr3_compute() {
     // ── Find HPS peak in guard-band search range ──
     float bin_res  = _hr3_decim.rate_hz / (float)hr3_buf_len;
 
-    int search_min = (int)ceilf((_hr_min_bpm - 3.0f) / 60.0f / bin_res);
-    int search_max = (int)floorf((_hr_max_bpm + 3.0f) / 60.0f / bin_res);
+    int search_min = (int)ceilf((_hr_min_bpm - hr_guard_band_bpm) / 60.0f / bin_res);
+    int search_max = (int)floorf((_hr_max_bpm + hr_guard_band_bpm) / 60.0f / bin_res);
     int nyquist    = hr3_buf_len / 2;
     if (search_max >= nyquist)    search_max = nyquist - 2;
     if (search_max > nyquist / 3) search_max = nyquist / 3;  // 3rd harmonic must stay inside Nyquist
