@@ -13,6 +13,7 @@
 > | §3 Analog reconstruction & RSQM | summary only, with pointers to the spec |
 > | §4 Clinical & hardware basis | the most critical to preserve; sourced |
 > | §5 HR1 filter & detector | complete, every claim sourced (2026-09-04) |
+> | §5.4 SQI gate & the two reversals | complete, measured (2026-09-06) |
 > | §6 Sample-rate dependency audit | complete; the tests that replace it are in place |
 >
 > ("PRELIMINARY" used to be in the title. It was moved here in favour of a status that says what is
@@ -247,8 +248,11 @@ swamps the filter's contribution).
 | Collateral: a biquad has no rate-dependent length, so it removes the `hr1_ma_max_len` clamp (v0.86b) and returns 640 B | inference |
 | Nominal cutoff is not the real one: `N = fs/(2·fc)` puts −3 dB at `fs/2N`, but an N-sample MA is −3 dB at ≈ `0.443·fs/N` (so "5 Hz" is ~4.4 Hz) | standard DSP result |
 
-**Conclusion:** no argument survives for keeping the MA. Its only theoretical merit is real but an
-order of magnitude below what matters, and in the hard case it is the worse of the two.
+**Conclusion (SUPERSEDED 2026-09-06 — see §5.4).** This read "no argument survives for keeping the
+MA", on the strength of the phototherapy figures above. Those were measured on the RAW detector
+output, without HR1's SQI gate. With the gate applied — which is what the firmware actually
+publishes — the difference disappears: both filters report 60.0–60.4 BPM. The comparison below
+stands as a measurement of the filter in isolation; it no longer supports a change.
 **Caveat:** the captures are adults and a simulator, **not neonates**, whose dicrotic notch is
 sharper and closer to the systolic peak — precisely the condition that decides double-counting.
 
@@ -296,6 +300,49 @@ difficulty of defining a neonatal template.
 
 **Pending before implementing a detector:** an offline comparison (TERMA vs SSF vs current) over
 the recorded captures, and ideally neonatal captures — same approach as §5.2.
+
+---
+
+### 5.4 What the SQI gate changes — and why two analyses had to be reversed
+
+Measured 2026-09-06, after the detector comparison revealed the same effect.
+
+HR1 does not publish the rate of every beat it detects. Over a sliding window of five intervals it
+computes their coefficient of variation, and while that exceeds `hr1_sqi_cv_max` = 0.15 the value
+is marked invalid. It does not repair a bad detection: it **discards the stretch containing it**,
+paying in availability.
+
+That gate absorbs errors of precisely the size that both earlier analyses were built on:
+
+| Capture (true 60 BPM) | MA raw | biquad raw | **MA gated** | **biquad gated** | kept, MA | kept, biquad |
+|---|---|---|---|---|---|---|
+| PHOTOTHERAPY_500HZ | 75.5 (**+15.5**) | 66.1 (+6.1) | **60.4** | **60.3** | 24 % | **45 %** |
+| PHOTOTHERAPY_ONOFF | 62.2 | 62.6 | **60.0** | **60.2** | **56 %** | 48 % |
+| PHOTOTHERAPY_400HZ | 59.8 | 59.9 | **60.0** | **60.0** | 70 % | 70 % |
+
+**Both reversals have the same cause.** §5.2 concluded the moving average was the worse filter, and
+§5.3 recommended replacing the detector with TERMA. Both rested on raw-output differences of 3 to
+15 BPM that the gate removes entirely. Measured over the whole chain — the way the device actually
+reports — neither change is justified:
+
+* **Filter:** with the gate, MA and biquad publish within 0.4 BPM of each other and of the truth.
+  What remains in the biquad's favour is structural, not performance: no rate-dependent length
+  (removing the class of defect that `hr1_ma_max_len` cost 384 B to fix in v0.86b), 640 B returned,
+  and consistency with HR2/HR3. Weighed against revalidating a measuring algorithm in a medical
+  device for no measurable gain, that does not carry it.
+* **Detector:** all three are accurate across the whole declared range on the MS100 series
+  (≤ 0.2 BPM, 40–250 BPM), so there is nothing to gain there either.
+
+**The methodological lesson, which is the durable part:** measuring one link in isolation produces
+false recommendations when a quality gate downstream absorbs exactly that class of error. It
+happened twice in two days, in both directions, and would have led to two changes to a medical
+device that improve nothing a patient would see.
+
+**What the numbers do expose is availability, not accuracy.** Under phototherapy only 24–70 % of
+intervals survive the gate: the monitor is right when it speaks and can stay silent for three
+intervals out of four. That is the real deficiency, it belongs to the gate's own criterion
+(`hr1_sqi_cv_max` = 0.15, one of the parameters with no documented provenance), and neither a
+different filter nor a different detector addresses it.
 
 ---
 
