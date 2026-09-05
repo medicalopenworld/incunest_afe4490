@@ -1309,6 +1309,9 @@ private:
     Decimator         _hr2_decim;   // BP 0.5-5 Hz  → HR2_ACF (+ future MPM/YIN)
     Decimator         _hr3_decim;   // LP 15 Hz     → HR3
     uint32_t          _spo2_warmup_samples;
+    // Blind window after an accepted beat, in samples: ignores further threshold crossings so
+    // the dicrotic notch is not counted as a second beat. Derived from hr1_refractory_s —
+    // see there for why 0.185 s and why a FIXED value cannot protect bradycardia.
     uint32_t          _hr1_refractory_samples;
     float             _hr1_dc_alpha;
 

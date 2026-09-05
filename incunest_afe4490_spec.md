@@ -876,7 +876,11 @@ fresh RR intervals before reporting again, same as any cold start.
 1. **DC removal:** IIR low-pass filter (τ = 1.6 s) estimates DC; subtracted from raw signal. Signal is negated for conventional PPG polarity (peaks up).
 2. **Low-pass filter:** moving average with cutoff ~5 Hz (`len = fs / (2 × 5)`; at 500 Hz → 50 samples). Capped at 64 samples max.
 3. **Running maximum:** exponential decay tracker (`× 0.9999` per sample) keeps amplitude reference current.
-4. **Threshold crossing:** rising edge detected when signal crosses `0.6 × running_max`. A refractory period (0.185 s, ~324 BPM practical limit) prevents double-detection.
+4. **Threshold crossing:** rising edge detected when signal crosses `0.6 × running_max`. A
+   **refractory period** — a blind window after each accepted beat, during which further
+   crossings are ignored, named after the cardiac refractory period — prevents double-detection,
+   i.e. counting the dicrotic notch as a second beat and reporting twice the true rate.
+   0.185 s allows up to ~324 BPM.
 5. **RR interval buffer:** last 5 consecutive intervals stored. HR1 computed as average:
 
 ```
@@ -903,7 +907,7 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_dc_tau_s` | 1.6 s | IIR DC removal time constant |
 | `hr1_ma_cutoff_hz` | 5 Hz | Moving average low-pass cutoff |
 | `hr1_ma_max_len` | 64 samples | Max moving average length |
-| `hr1_refractory_s` | 0.185 s | Refractory period between peaks (~324 BPM practical limit) |
+| `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit). A fixed value cannot protect bradycardia — see the rationale §5.3 |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
 | `hr_min_bpm` | 40 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
 | `hr_max_bpm` | 260 BPM | Reported valid HR range maximum (neonatal tachycardia) |

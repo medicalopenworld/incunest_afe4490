@@ -77,7 +77,24 @@ namespace {
     // SQI: CV = std/mean of the 5 most recent RR intervals.
     // CV=0 (perfectly regular) → SQI=1. CV ≥ hr1_sqi_cv_max → SQI=0.
     constexpr float    hr1_sqi_cv_max      = 0.15f;    // dimensionless — 15% CV threshold
-    constexpr float    hr1_refractory_s    = 0.185f;   // s  — refractory period (covers 263 BPM guard band)
+    // REFRACTORY PERIOD — the blind window after an accepted beat, during which any further
+    // threshold crossing is ignored. Named after the cardiac refractory period (the myocardium
+    // cannot be re-excited for a while after a contraction); here it is the guard that stops the
+    // DICROTIC NOTCH — the bump left by the aortic valve closing, on the pulse's way down — from
+    // being counted as a second beat and doubling the reported rate.
+    //
+    // 0.185 s allows beats up to 60/0.185 = 324 BPM. The binding constraint is the other end: at
+    // hr_max_bpm + 3 = 263 BPM beats are 228 ms apart, so a longer refractory would start
+    // rejecting legitimate ones. Hence "covers the 263 BPM guard band" — it means "does not get in
+    // the way at 263 BPM", not "protects up to 263". 43 ms of that margin are unused.
+    //
+    // KNOWN LIMITATION: the notch does not arrive at a fixed delay — roughly a third of systole,
+    // so ~150 ms at 200 BPM but 250-350 ms at 60 BPM. A fixed refractory therefore guards well in
+    // tachycardia (where double-counting is least likely anyway) and poorly in BRADYCARDIA, which
+    // is the event that most needs detecting in a neonate. No fixed value covers both ends: that
+    // needs a refractory proportional to the estimated RR interval — see the detector strategy
+    // catalogue in incunest_afe4490_design_rationale.md §5.3.
+    constexpr float    hr1_refractory_s    = 0.185f;   // s
 
     // ── HR2 ───────────────────────────────────────────────────────────────────
     constexpr float    hr2_min_corr        = 0.5f;     // normalised autocorrelation threshold for SQI=1
