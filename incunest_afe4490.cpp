@@ -1408,7 +1408,15 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     // "tissue" (OT ≈ 1e-4) from "no tissue" (OT ≈ 1) even under a lamp. Two regimes:
     //
     //  • NOT saturated → OT is a clean measurement → classify presence directly:
-    //      OT > thr → NOT_APPLIED (no tissue) ; else → APPLIED.
+    //      BOTH channels above thr → NOT_APPLIED (no tissue) ; otherwise → APPLIED.
+    //    AND, not OR (v0.89): in tissue RED (LED2, 660 nm) is absorbed far more than IR
+    //    (LED1, 940 nm), so ot_led1 > ot_led2 always and an OR was decided by the more
+    //    permissive channel alone — thin tissue (preterm foot, simulator) pushed IR over the
+    //    threshold and a correctly applied probe read as absent. In air there is no
+    //    differential absorption, so BOTH channels are high and the AND still reports
+    //    NOT_APPLIED. Cost: one channel reading persistently low (weak LED, obstructed PD)
+    //    now forces APPLIED; the LED-only-saturation branch below still catches probe-in-air
+    //    independently of OT, and DISCONNECTED still checks all four i_pd channels.
     //  • Saturated (anyPositiveSaturation: ADC at rail or v_tia > FS) → OT is clipped/unreliable,
     //    so discriminate by WHICH phase clips (v0.61 — replaces the old "saturation ⇒ SATURATING"
     //    priority, which drove RF to the floor whenever the finger was removed):
@@ -1425,7 +1433,7 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     if (disconnected) {
         requested = ProbeState::PROBE_DISCONNECTED;
     } else if (!as.anyPositiveSaturation()) {
-        requested = (as.ot_led1 > rsqm_ot_thr || as.ot_led2 > rsqm_ot_thr)
+        requested = (as.ot_led1 > rsqm_ot_thr && as.ot_led2 > rsqm_ot_thr)
                     ? ProbeState::PROBE_NOT_APPLIED
                     : ProbeState::PROBE_APPLIED;
     } else {

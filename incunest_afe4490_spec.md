@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.88
+# incunest_afe4490 — Specification v0.89
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1232,8 +1232,22 @@ Validated with afe_sweep_test.csv: DISCONNECTED → all channels negative, LED_S
 **Presence by OT (not saturated).** `OT = (I_PD_LED − I_PD_ALED) / I_LED` [A/A] is computed in
 `_compute_analog_state()` (`ot_led1`/`ot_led2`, §3c); `_rsqm_update()` consumes it. It is the full
 electro-optical system ratio (LED efficiency × tissue × PD responsivity), not tissue transmittance
-alone. Threshold: `ot_led1 > rsqm_ot_thr` OR `ot_led2 > rsqm_ot_thr` → PROBE_NOT_APPLIED; else
-PROBE_APPLIED. Default `rsqm_ot_thr = 1.0e-4`, runtime-configurable via `setRsqmOtThr()`. Single
+alone. Threshold (**v0.89**): `ot_led1 > rsqm_ot_thr` **AND** `ot_led2 > rsqm_ot_thr` →
+PROBE_NOT_APPLIED; otherwise PROBE_APPLIED.
+
+*Why AND and not OR.* In tissue, RED (LED2, 660 nm) is absorbed far more than IR (LED1, 940 nm), so
+`ot_led1 > ot_led2` always holds and an OR was decided by the **more permissive channel alone** —
+the RED channel never got a vote. Thin tissue (preterm foot, CONTEC MS100 simulator) pushes IR over
+the threshold while RED stays well under it, and a correctly applied probe reads as absent, which
+resets SpO2/HR1/HR2/HR3 on every sample. In air there is no differential absorption, so **both**
+channels are high and the AND still reports NOT_APPLIED: margin is gained on thin tissue without
+giving any back on the air case, and two independent channels must now agree.
+
+*The cost, stated plainly.* AND introduces a failure mode OR did not have: a channel reading
+persistently low — weak or failing LED, partially obstructed photodiode — now forces APPLIED
+regardless of the other. Two existing guards limit the exposure without removing it: the
+LED-only-saturation branch below detects probe-in-air independently of OT, and PROBE_DISCONNECTED
+still checks all four `i_pd` channels. A channel that is degraded but not dead is not covered. Default `rsqm_ot_thr = 1.0e-4`, runtime-configurable via `setRsqmOtThr()`. Single
 threshold (no hysteresis) — oscillation is prevented by the `rsqm_probe_state_min_s` debounce.
 
 **Saturated — discriminate by phase (v0.61).** When `anyPositiveSaturation()` (ADC positive rail or
@@ -2674,6 +2688,26 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.89   | **Presence by OT requires BOTH channels (`OR` → `AND`), §5.6.2.** In      |
+|         | tissue RED (660 nm) is absorbed far more than IR (940 nm), so             |
+|         | `ot_led1 > ot_led2` always and the OR was decided by the more permissive  |
+|         | channel alone — the RED channel never voted. Thin tissue (preterm foot,   |
+|         | MS100 simulator) put IR over `rsqm_ot_thr` while RED stayed well under,   |
+|         | and a correctly applied probe read as absent, resetting SpO2/HR1/HR2/HR3  |
+|         | every sample. In air there is no differential absorption, both channels   |
+|         | are high, and the AND still reports NOT_APPLIED: margin gained on thin    |
+|         | tissue, none given back on air.                                          |
+|         | **No threshold changed** — `rsqm_ot_thr` stays at 1.0e-4 and still lacks  |
+|         | a calibrated value.                                                       |
+|         | **New failure mode, accepted knowingly:** one channel persistently low    |
+|         | (weak LED, obstructed PD) now forces APPLIED. The LED-only-saturation     |
+|         | branch and DISCONNECTED's four-channel check limit but do not remove it.  |
+|         | Chosen over raising the threshold because raising it spends margin on the |
+|         | air side, and because the estimate that would justify a new value carries |
+|         | uncertainty wider than the decision it would settle: neonatal optical     |
+|         | path length is **not published** (the 5–10 mm figure in use is an         |
+|         | engineering estimate, never measured), and OT is the whole                |
+|         | electro-optical ratio, not tissue transmittance alone.                    |
 | v0.88   | **Two buried literals become named parameters.** Prompted by an inventory  |
 |         | of what actually conditions the algorithms: of ~45 configurable values     |
 |         | plus internal constants, ~15 condition a result and 7 have no documented   |
