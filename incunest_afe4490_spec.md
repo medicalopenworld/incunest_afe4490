@@ -1235,13 +1235,27 @@ electro-optical system ratio (LED efficiency × tissue × PD responsivity), not 
 alone. Threshold (**v0.89**): `ot_led1 > rsqm_ot_thr` **AND** `ot_led2 > rsqm_ot_thr` →
 PROBE_NOT_APPLIED; otherwise PROBE_APPLIED.
 
-*Why AND and not OR.* In tissue, RED (LED2, 660 nm) is absorbed far more than IR (LED1, 940 nm), so
-`ot_led1 > ot_led2` always holds and an OR was decided by the **more permissive channel alone** —
-the RED channel never got a vote. Thin tissue (preterm foot, CONTEC MS100 simulator) pushes IR over
-the threshold while RED stays well under it, and a correctly applied probe reads as absent, which
-resets SpO2/HR1/HR2/HR3 on every sample. In air there is no differential absorption, so **both**
-channels are high and the AND still reports NOT_APPLIED: margin is gained on thin tissue without
-giving any back on the air case, and two independent channels must now agree.
+*Why AND and not OR.* With OR, whichever channel happened to read higher decided **alone**: one
+channel drifting over the threshold declared the probe absent while the other still saw tissue. On
+thin tissue (preterm foot, CONTEC MS100 simulator) that made a correctly applied probe read as
+absent, which resets SpO2/HR1/HR2/HR3 on every sample — the failure mode with no downstream safety
+net. AND requires two independent channels to agree. In air neither channel is attenuated by tissue,
+so both are high and NOT_APPLIED still holds: margin is gained on thin tissue without giving any
+back on the air case.
+
+> **The channel ordering is not predictable from tissue spectra, and an earlier version of this
+> section claimed otherwise.** It argued that RED (660 nm) is absorbed more than IR (940 nm), so
+> `ot_led1 > ot_led2` "always". Measured on the MS100 with the probe applied (2026-09-07):
+> **`ot_led1` (IR) = 91 ppm, `ot_led2` (RED) = 112 ppm** — the opposite ordering. OT is the whole
+> electro-optical ratio (LED efficiency × tissue × PD responsivity × geometry), not tissue
+> transmittance, and the simulator's plastic reproduces the ratio R that yields a given SpO2, not
+> per-wavelength transmittance. The AND does not depend on which channel is larger, so the change
+> stands; its justification does not rest on the ordering.
+
+> **How little margin this leaves.** Both channels sit within 12 % of `rsqm_ot_thr` (100 ppm). The
+> AND holds on the MS100 only because IR happens to be 9 ppm under the threshold. This is a working
+> configuration, not a robust one, and it is direct evidence that `rsqm_ot_thr` needs the empirical
+> calibration it has never had.
 
 *The cost, stated plainly.* AND introduces a failure mode OR did not have: a channel reading
 persistently low — weak or failing LED, partially obstructed photodiode — now forces APPLIED
@@ -2688,15 +2702,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
-| v0.89   | **Presence by OT requires BOTH channels (`OR` → `AND`), §5.6.2.** In      |
-|         | tissue RED (660 nm) is absorbed far more than IR (940 nm), so             |
-|         | `ot_led1 > ot_led2` always and the OR was decided by the more permissive  |
-|         | channel alone — the RED channel never voted. Thin tissue (preterm foot,   |
-|         | MS100 simulator) put IR over `rsqm_ot_thr` while RED stayed well under,   |
-|         | and a correctly applied probe read as absent, resetting SpO2/HR1/HR2/HR3  |
-|         | every sample. In air there is no differential absorption, both channels   |
-|         | are high, and the AND still reports NOT_APPLIED: margin gained on thin    |
-|         | tissue, none given back on air.                                          |
+| v0.89   | **Presence by OT requires BOTH channels (`OR` → `AND`), §5.6.2.** With    |
+|         | OR, whichever channel read higher decided alone, so one channel drifting  |
+|         | over `rsqm_ot_thr` declared the probe absent while the other still saw    |
+|         | tissue. On thin tissue (preterm foot, MS100 simulator) a correctly        |
+|         | applied probe read as absent, resetting SpO2/HR1/HR2/HR3 every sample —   |
+|         | the failure mode with no downstream safety net. AND requires two          |
+|         | independent channels to agree; in air neither is attenuated by tissue, so |
+|         | both stay high and NOT_APPLIED holds. Margin gained on thin tissue, none  |
+|         | given back on air.                                                       |
+|         | *Corrected 2026-09-07:* this entry first justified the change by claiming |
+|         | RED is absorbed more than IR so `ot_led1 > ot_led2` always. Measured on   |
+|         | the MS100, probe applied: IR 91 ppm, RED 112 ppm — the opposite. OT is    |
+|         | the whole electro-optical ratio, not tissue transmittance. The AND does   |
+|         | not depend on the ordering, so the change stands. Both channels sit       |
+|         | within 12 % of the threshold: working, not robust.                       |
 |         | **No threshold changed** — `rsqm_ot_thr` stays at 1.0e-4 and still lacks  |
 |         | a calibrated value.                                                       |
 |         | **New failure mode, accepted knowingly:** one channel persistently low    |

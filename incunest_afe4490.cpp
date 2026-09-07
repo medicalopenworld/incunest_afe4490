@@ -1409,14 +1409,19 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     //
     //  • NOT saturated → OT is a clean measurement → classify presence directly:
     //      BOTH channels above thr → NOT_APPLIED (no tissue) ; otherwise → APPLIED.
-    //    AND, not OR (v0.89): in tissue RED (LED2, 660 nm) is absorbed far more than IR
-    //    (LED1, 940 nm), so ot_led1 > ot_led2 always and an OR was decided by the more
-    //    permissive channel alone — thin tissue (preterm foot, simulator) pushed IR over the
-    //    threshold and a correctly applied probe read as absent. In air there is no
-    //    differential absorption, so BOTH channels are high and the AND still reports
-    //    NOT_APPLIED. Cost: one channel reading persistently low (weak LED, obstructed PD)
-    //    now forces APPLIED; the LED-only-saturation branch below still catches probe-in-air
+    //    AND, not OR (v0.89): with OR, whichever channel happened to read higher decided
+    //    alone, so one channel drifting over the threshold declared the probe absent while
+    //    the other still saw tissue — and a false NOT_APPLIED resets SpO2/HR1/HR2/HR3 every
+    //    sample. AND requires two independent channels to agree. In air neither channel is
+    //    attenuated by tissue, so both are high and NOT_APPLIED still holds.
+    //    Cost: one channel reading persistently low (weak LED, obstructed PD) now forces
+    //    APPLIED; the LED-only-saturation branch below still catches probe-in-air
     //    independently of OT, and DISCONNECTED still checks all four i_pd channels.
+    //    NOTE the channel ordering is NOT predictable from tissue spectra: OT is the whole
+    //    electro-optical ratio (LED efficiency × tissue × PD responsivity × geometry), not
+    //    tissue transmittance. Measured on the CONTEC MS100, probe applied (2026-09-07):
+    //    ot_led1 (IR) = 91 ppm, ot_led2 (RED) = 112 ppm — RED higher, and both within 12 %
+    //    of rsqm_ot_thr. The AND holds here only because IR sits 9 ppm under the threshold.
     //  • Saturated (anyPositiveSaturation: ADC at rail or v_tia > FS) → OT is clipped/unreliable,
     //    so discriminate by WHICH phase clips (v0.61 — replaces the old "saturation ⇒ SATURATING"
     //    priority, which drove RF to the floor whenever the finger was removed):
