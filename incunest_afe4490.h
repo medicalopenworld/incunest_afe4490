@@ -69,19 +69,41 @@
 // ── Probe state ───────────────────────────────────────────────────────────────
 // Appended at the end (values 0-2 unchanged) to keep the $M2/$M3/$M4 wire encoding
 // ((int)probe_state) stable for existing consumers/CSVs.
+// Wire encoding ((int)probe_state in $M2/$M3/$M4 frames and CSVs) — values are explicit and
+// stable. v0.90 split PROBE_NOT_APPLIED into its two physical causes: PROBE_OT_HIGH keeps value 1
+// (it was the usual cause in historical captures, so old CSVs still read correctly) and the
+// LED-only saturation case gets 4. PROBE_SATURATING was renamed PROBE_AMB_SATURATING (value 3
+// unchanged): the old name suggested "any saturation", but LED-only saturation never came here.
+// When adding a state: classify it in isProbeAbsent() below, and update the name tables in
+// pulsenest_lab.py (OT MONITOR, SIGNAL STATS, AFE SWEEP TEST).
 enum class ProbeState {
-    PROBE_DISCONNECTED,  // cable or probe connector not plugged in
-    PROBE_NOT_APPLIED,   // probe connected, OT indicates no tissue in the optical path
-    PROBE_APPLIED,       // probe on patient, normal measurement
-    PROBE_SATURATING     // Saturation from ABOVE where the AMBIENT (ALED) phase also clips → the
-                         // saturation is driven by EXTERNAL light (lamp/phototherapy), not by the
-                         // LED's own light reaching the PD (that case — LED phase clips, ambient
-                         // clean — is finger-removed / probe-in-air → NOT_APPLIED; see v0.61
-                         // classifier, §5.6.2). Presence is still UNKNOWN (external light saturates
-                         // with or without a patient). SpO2/HR1/HR2/HR3 and RSQI treat it like any
-                         // non-APPLIED state (invalid/reset); HGAC treats it like PROBE_APPLIED
-                         // (acts to clear the saturation — the ambient alarm may then fire).
+    PROBE_DISCONNECTED        = 0,  // cable or probe connector not plugged in
+    PROBE_OT_HIGH             = 1,  // not saturated, and BOTH channels' OT > rsqm_ot_thr (v0.89 AND):
+                                    // too much light reaches the PD for tissue to be in the path.
+    PROBE_APPLIED             = 2,  // probe on patient, normal measurement
+    PROBE_AMB_SATURATING      = 3,  // positive saturation where the AMBIENT (ALED) phase also clips —
+                                    // and therefore the LED phase too (LED phase = ambient + LED
+                                    // light). The saturating light is EXTERNAL (lamp/phototherapy).
+                                    // Presence UNKNOWN. SpO2/HR1/HR2/HR3/RSQI: non-APPLIED (reset).
+                                    // HGAC: acts, like APPLIED, to clear it (§5.8.2).
+    PROBE_ONLY_LED_SATURATING = 4   // positive saturation where ONLY the LED phase clips, ambient
+                                    // clean: the LED's own light reaches the PD with nothing
+                                    // attenuating it. Read as probe-in-air (finger removed) since
+                                    // v0.61 — but thin tissue at high RF gives the same signature,
+                                    // and OT is not consulted under saturation, so that case lands
+                                    // here too (§5.6.2, open check). Treated as ABSENT everywhere
+                                    // via isProbeAbsent() — no behavioural change from v0.89.
 };
+
+// The one place that defines "no patient on the probe". Consumers that must separate the idle
+// states from APPLIED / AMB_SATURATING — the HGAC gate, the diagnostics task — call this instead
+// of listing states, so a new ProbeState is classified here, once, deliberately. A state missing
+// from this list counts as PRESENT: HGAC would act on it and diagnostics would not run.
+inline bool isProbeAbsent(ProbeState s) {
+    return s == ProbeState::PROBE_DISCONNECTED
+        || s == ProbeState::PROBE_OT_HIGH
+        || s == ProbeState::PROBE_ONLY_LED_SATURATING;
+}
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
 // Multiple bits may be set simultaneously.
@@ -150,7 +172,7 @@ struct AFE4490Data {
     // RSQM outputs
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
     uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SWITCHED_RC_SETTLING | ...
-    ProbeState probe_state;  // PROBE_DISCONNECTED, PROBE_NOT_APPLIED, PROBE_APPLIED, or PROBE_SATURATING
+    ProbeState probe_state;  // enum ProbeState (0-4); isProbeAbsent() answers "no patient"
 };
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
@@ -994,8 +1016,8 @@ private:
     float             rsqm_disconn_led_sub_thr = 5000.0f;  // |led_sub| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
     float             rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
                                                                  // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
-    float             rsqm_ot_thr           = 1.0e-4f;  // valid channel, OT > this → PROBE_NOT_APPLIED; ≤ this → PROBE_APPLIED
-                                                                 // (invalid/saturated channel → PROBE_SATURATING instead, checked first)
+    float             rsqm_ot_thr           = 1.0e-4f;  // not saturated: BOTH channels OT > this → PROBE_OT_HIGH; else → PROBE_APPLIED
+                                                                 // (under positive saturation OT is not consulted: AMB_/ONLY_LED_SATURATING by phase)
                                                                  // Widened from 8.5e-5 (2026-07-19): CONTEC MS100 simulator is highly sensitive
                                                                  // to probe placement, frequently reading OT above 8.5e-5 with probe applied.
                                                                  // Still needs empirical calibration with a real neonatal probe/patient.

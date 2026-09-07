@@ -1221,17 +1221,17 @@ void INCUNEST_AFE4490::stop() {
 // ── _diag_task_body() ─────────────────────────────────────────────────────────
 // Runs at low priority. Calls runAfeDiagnostics() every rsqm_diag_period_ms, but ONLY in
 // states with no patient confirmed in the optical path: PROBE_DISCONNECTED and
-// PROBE_NOT_APPLIED. The diagnostic's ~10 ms blackout would disrupt HR/SpO2 acquisition in
-// PROBE_APPLIED, and in PROBE_SATURATING it would also disrupt HGAC's attempt to clear the
-// saturation with a real patient possibly connected — so both are excluded.
-// Whitelist (not blacklist) on purpose: any future ProbeState defaults to NOT diagnosing,
-// so a new state can never silently interrupt acquisition; adding it here must be deliberate.
+// the other absent states (isProbeAbsent(): OT_HIGH, ONLY_LED_SATURATING). The diagnostic's
+// ~10 ms blackout would disrupt HR/SpO2 acquisition in PROBE_APPLIED, and in PROBE_AMB_SATURATING
+// it would also disrupt HGAC's attempt to clear the saturation with a real patient possibly
+// connected — so both are excluded.
+// Whitelist (not blacklist) on purpose, via isProbeAbsent(): a state not listed there counts as
+// present and defaults to NOT diagnosing, so a new state can never silently interrupt acquisition.
 void INCUNEST_AFE4490::_diag_task_body() {
     const TickType_t period = pdMS_TO_TICKS(rsqm_diag_period_ms);
     while (true) {
         vTaskDelay(period);
-        if (_rsqm_probe_state == ProbeState::PROBE_DISCONNECTED
-         || _rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED)
+        if (isProbeAbsent(_rsqm_probe_state))
             runAfeDiagnostics();
     }
 }
@@ -1278,6 +1278,14 @@ void INCUNEST_AFE4490::_reset_algorithms() {
 // ── RSQM ──────────────────────────────────────────────────────────────────────
 
 // _rsqm_request_probe_state — debounce gate for probe state transitions.
+//
+// CHECK TO PERFORM (v0.90 — recorded, not yet observed; Alex doubts it occurs): the debounce
+// counts consecutive IDENTICAL requests. Until v0.90 both "no tissue" causes voted the same
+// PROBE_NOT_APPLIED and accumulated together; PROBE_OT_HIGH and PROBE_ONLY_LED_SATURATING are now
+// distinct requests. If samples alternate between them near the saturation boundary (finger being
+// removed, RF at the edge), each alternation resets the count, neither commits, and the state stays
+// where it was — possibly APPLIED with the finger gone. If that is ever observed, debounce by class
+// (isProbeAbsent) rather than by exact state.
 // Commits the requested state to _rsqm_probe_state only after
 // _rsqm_probe_state_min_samples consecutive calls with the same value.
 // Any change in the requested state resets the counter.
@@ -1408,12 +1416,12 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     // "tissue" (OT ≈ 1e-4) from "no tissue" (OT ≈ 1) even under a lamp. Two regimes:
     //
     //  • NOT saturated → OT is a clean measurement → classify presence directly:
-    //      BOTH channels above thr → NOT_APPLIED (no tissue) ; otherwise → APPLIED.
+    //      BOTH channels above thr → PROBE_OT_HIGH (no tissue) ; otherwise → APPLIED.
     //    AND, not OR (v0.89): with OR, whichever channel happened to read higher decided
     //    alone, so one channel drifting over the threshold declared the probe absent while
-    //    the other still saw tissue — and a false NOT_APPLIED resets SpO2/HR1/HR2/HR3 every
+    //    the other still saw tissue — and a false absent verdict resets SpO2/HR1/HR2/HR3 every
     //    sample. AND requires two independent channels to agree. In air neither channel is
-    //    attenuated by tissue, so both are high and NOT_APPLIED still holds.
+    //    attenuated by tissue, so both are high and OT_HIGH still holds.
     //    Cost: one channel reading persistently low (weak LED, obstructed PD) now forces
     //    APPLIED; the LED-only-saturation branch below still catches probe-in-air
     //    independently of OT, and DISCONNECTED still checks all four i_pd channels.
@@ -1426,27 +1434,30 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     //    so discriminate by WHICH phase clips (v0.61 — replaces the old "saturation ⇒ SATURATING"
     //    priority, which drove RF to the floor whenever the finger was removed):
     //      – an AMBIENT phase (ALED1/ALED2) also clips → external light (lamp/phototherapy) is
-    //        saturating with tissue present → PROBE_SATURATING (HGAC should correct it).
+    //        saturating with tissue present → PROBE_AMB_SATURATING (HGAC should correct it).
     //      – only LED phases clip, ambient phases do NOT → the LED's own light reaches the PD
-    //        directly (no tissue in the path) → probe in air → PROBE_NOT_APPLIED, so HGAC does
-    //        NOT chase RF to the floor on finger removal.
-    //    Limitation: when ONLY the LED phase clips, the masks can't tell "probe in air" from a
-    //    rare "tissue signal so large it saturates without ambient" — we assume air (the common,
-    //    intended case: finger removal). Photocurrent is unipolar in v1 (adc_sat_neg needs AMBDAC).
+    //        directly (no tissue in the path) → probe in air → PROBE_ONLY_LED_SATURATING, which
+    //        isProbeAbsent() classifies as absent, so HGAC does NOT chase RF to the floor on
+    //        finger removal.
+    //    Limitation: when ONLY the LED phase clips, the masks can't tell "probe in air" from
+    //    "tissue so thin that it saturates without ambient" — we assume air. v0.90 gave that case
+    //    its own state so the assumption is visible in the data; the suspected consequence
+    //    (thin tissue at high RF → absent → HGAC gated off → RF never lowered → stays absent) is an
+    //    open check, see spec §5.6.2. Photocurrent is unipolar in v1 (adc_sat_neg needs AMBDAC).
     // Debounce (same for all transitions) lives in _rsqm_request_probe_state().
     ProbeState requested;
     if (disconnected) {
         requested = ProbeState::PROBE_DISCONNECTED;
     } else if (!as.anyPositiveSaturation()) {
         requested = (as.ot_led1 > rsqm_ot_thr && as.ot_led2 > rsqm_ot_thr)
-                    ? ProbeState::PROBE_NOT_APPLIED
+                    ? ProbeState::PROBE_OT_HIGH
                     : ProbeState::PROBE_APPLIED;
     } else {
         const bool ambient_sat =
             as.adcSatPos(AFE4490Ch::ALED1) || as.tiaOverFs(AFE4490Ch::ALED1) ||
             as.adcSatPos(AFE4490Ch::ALED2) || as.tiaOverFs(AFE4490Ch::ALED2);
-        requested = ambient_sat ? ProbeState::PROBE_SATURATING
-                                : ProbeState::PROBE_NOT_APPLIED;
+        requested = ambient_sat ? ProbeState::PROBE_AMB_SATURATING
+                                : ProbeState::PROBE_ONLY_LED_SATURATING;
     }
     _rsqm_request_probe_state(requested);
 
@@ -1544,17 +1555,18 @@ bool INCUNEST_AFE4490::_hgac_ambient_high(HgacColor color, const EmaChannel& amb
 void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     if (!hgac_enable) return;
 
-    // Gate G0 (axiom A6, spec §5.8): HGAC acts only while the probe is active (APPLIED or
-    // SATURATING) and the front-end is not re-settling after a gain change. Gate off in the
-    // idle states — NOT_APPLIED / DISCONNECTED — so HGAC doesn't drive RF on an unrelated
-    // optical event (e.g. a phototherapy lamp) with nobody connected. SATURATING is deliberately
-    // NOT idle: it has its own state since 2026-07-24 so a guard event can't flip to NOT_APPLIED
-    // and deadlock the step-down.
-    // NOTE: the idle states are listed explicitly (not "!(APPLIED||SATURATING)"). A future
-    // ProbeState is therefore NOT gated off here and would let HGAC act — revisit this list
-    // whenever a ProbeState is added.
-    if (_rsqm_probe_state == ProbeState::PROBE_NOT_APPLIED
-     || _rsqm_probe_state == ProbeState::PROBE_DISCONNECTED
+    // HGAC gate (spec §5.8; the design's "Gate G0", from the RSQM/HGAC separation axiom A6):
+    // HGAC acts only while the probe is active (APPLIED or
+    // AMB_SATURATING) and the front-end is not re-settling after a gain change. Gate off in the
+    // absent states — isProbeAbsent(): DISCONNECTED / OT_HIGH / ONLY_LED_SATURATING — so HGAC
+    // doesn't drive RF on an unrelated optical event (e.g. a phototherapy lamp) with nobody
+    // connected. AMB_SATURATING is deliberately NOT absent: it has its own state since 2026-07-24
+    // so a guard event can't flip to an absent state and deadlock the step-down.
+    // NOTE: the absent list lives in isProbeAbsent() (single source of truth, shared with the
+    // diagnostics task). A ProbeState missing from it is NOT gated off here and lets HGAC act.
+    // Open check (v0.90): ONLY_LED_SATURATING is absent by inheritance from NOT_APPLIED — with
+    // thin tissue at high RF that gates HGAC off exactly when it should lower RF (spec §5.6.2).
+    if (isProbeAbsent(_rsqm_probe_state)
      || (_diag_code & RSQM_DIAG_SWITCHED_RC_SETTLING)) {
         // Reset the EMAs while gated off so they re-warm cleanly when the probe is re-applied
         // (otherwise they'd carry stale probe-in-air values into the first decisions).
