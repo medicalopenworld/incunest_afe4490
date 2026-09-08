@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.88"
+#define INCUNEST_AFE4490_VERSION "0.90"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
