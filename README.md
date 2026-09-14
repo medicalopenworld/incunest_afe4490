@@ -1,6 +1,6 @@
 # incunest_afe4490
 
-AFE4490 PPG/SpO2 driver for ESP32-S3 (Arduino + FreeRTOS) — [Medical Open World](http://medicalopenworld.org)
+AFE4490 PPG/SpO2 driver for ESP32-S3 (Arduino-ESP32 or ESP-IDF, FreeRTOS) — [Medical Open World](http://medicalopenworld.org)
 
 Part of the [IncuNest](https://github.com/medicalopenworld/IncuNest) neonatal incubator project.
 
@@ -17,8 +17,9 @@ Part of the [IncuNest](https://github.com/medicalopenworld/IncuNest) neonatal in
 ## Requirements
 
 - ESP32-S3
-- Arduino framework + FreeRTOS
-- AFE4490 connected via SPI
+- **Arduino-ESP32** (PlatformIO) **or ESP-IDF ≥ 5** as a CMake component — same sources, no patches
+  (hardware abstraction layer, spec §1.4)
+- AFE4490 connected via SPI; the application owns the bus (`SPI.begin()` / `spi_bus_initialize()`)
 
 ## Usage
 
@@ -35,12 +36,42 @@ void setup() {
 }
 ```
 
-In your `platformio.ini`:
+In your `platformio.ini` (pin to a tag or commit — never `#master` — for a firmware you ship):
 
 ```ini
 lib_deps =
-    https://github.com/medicalopenworld/incunest_afe4490.git#v0.18
+    https://github.com/medicalopenworld/incunest_afe4490.git#v0.91
 ```
+
+### ESP-IDF (no Arduino)
+
+Add the repository as a component (submodule under `components/`, or point `EXTRA_COMPONENT_DIRS` at it)
+and require it from your main component:
+
+```cmake
+# project CMakeLists.txt
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/components/incunest_afe4490")
+# main/CMakeLists.txt
+idf_component_register(SRCS "main.cpp" REQUIRES incunest_afe4490 esp_driver_spi)
+```
+
+```cpp
+#include "driver/spi_master.h"
+#include "incunest_afe4490.h"
+
+static INCUNEST_AFE4490 afe;
+
+extern "C" void app_main(void) {
+    spi_bus_config_t bus = {};              // the application owns the bus, as with SPI.begin()
+    bus.mosi_io_num = MOSI; bus.miso_io_num = MISO; bus.sclk_io_num = SCK;
+    bus.quadwp_io_num = -1; bus.quadhd_io_num = -1; bus.max_transfer_sz = 64;
+    spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED);
+    afe.begin(CS_PIN, DRDY_PIN);            // the library adds its device on SPI2_HOST
+}
+```
+
+`-DINCUNEST_AFE4490_HAL_SPI_HOST=SPI3_HOST` if the AFE is not on SPI2. The library builds
+under `-Wall -Wextra -Werror` on both frameworks and on the host (`pio test -e native`).
 
 ## Specification
 

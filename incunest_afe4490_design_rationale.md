@@ -385,8 +385,10 @@ A detail worth remembering: the decay regression fails at **800 Hz and above, ne
 the `0.9999` literal is exactly right at the default rate, which is why it survived so long.
 
 **Not covered by the native tests:** `_emit_tasks()` and the rest of the `$TIMING` telemetry live
-behind `INCUNEST_TIMING_STATS` *and* outside `INCUNEST_OFFLINE`, so `pio test -e native` never
-compiles them — the `ts_emit_interval` rename broke the firmware build while all tests passed.
+behind `INCUNEST_TIMING_STATS`, which `pio test -e native` does not define, so the tests never
+compile them — the `ts_emit_interval` rename broke the firmware build while all tests passed.
+(Since v0.91 the host HAL *could* compile that block — `esp_timer_get_time()` and the console
+exist on the host — if a test build defined the flag.)
 Any change touching that block needs `pio run -e incunest_V16` to be verified.
 
 ---

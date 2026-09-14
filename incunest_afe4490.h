@@ -1,33 +1,42 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.90b — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.91 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.90b"
+#define INCUNEST_AFE4490_VERSION "0.91"
 
-#ifdef INCUNEST_OFFLINE
-  #ifndef UNIT_TEST
-    #define UNIT_TEST
-  #endif
-  #include "incunest_afe4490_platform_stub.h"
-#else
-  #include <Arduino.h>
-  #include <SPI.h>
+// Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
+// are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
+// per target, selected by detection — see that file). FreeRTOS, esp_log, esp_timer and esp_attr
+// are the SAME API on Arduino-ESP32 and on ESP-IDF, so they are used directly; on the host,
+// incunest_afe4490_hal_host.h stands in for them under their real names.
+#if defined(ESP_PLATFORM)
   #include <freertos/FreeRTOS.h>
   #include <freertos/task.h>
   #include <freertos/semphr.h>
   #include <freertos/queue.h>
-  #include <stdint.h>
-  // Explicit — this header uses strcmp() (afeStrToRF/CF/RG) and expf() (EmaChannel::init())
-  // directly. Real Arduino.h happens to pull these in transitively, but that must not be
-  // relied upon: the plain UNIT_TEST/native path (pio test -e native, distinct from
-  // INCUNEST_OFFLINE) uses a minimal Arduino.h stub that does not.
-  #include <cstring>
-  #include <cmath>
+  #include <esp_attr.h>
+  #if defined(ARDUINO)
+    // Arduino-ESP32 REDEFINES ESP_LOGx (esp32-hal-log.h: log_printf, CORE_DEBUG_LEVEL, the
+    // "[E][file:line] func(): ..." format). Arduino.h used to pull that in; include it
+    // explicitly so the library logs exactly as it did before the HAL. Without this line the
+    // IDF esp_log.h path would silently take over on Arduino (other format, other level
+    // control) — found by diffing the xtensa object: log_printf/pathToFileName gone,
+    // esp_log_write/esp_log_timestamp in.
+    #include <esp32-hal-log.h>
+  #endif
+  #include <esp_log.h>
+  #include <esp_timer.h>
+#else
+  #include "incunest_afe4490_hal_host.h"
 #endif
+#include "incunest_afe4490_hal.h"
+#include <stdint.h>
+#include <cstring>   // strcmp() in afeStrToRF/CF/RG
+#include <cmath>     // expf() in EmaChannel::init(), roundf()
 
 // ── Compile-time configuration (override before including this header) ────────
 #ifndef INCUNEST_AFE4490_QUEUE_SIZE
@@ -709,14 +718,12 @@ public:
     ~INCUNEST_AFE4490();
 
     // Initialization — configures chip with defaults, attaches DRDY ISR, starts task.
-    // Requires SPI.begin() to have been called beforehand by the application.
-    // This library does not call SPI.begin() internally to avoid interfering with
-    // other SPI devices sharing the same bus.
-#ifndef INCUNEST_OFFLINE
+    // Requires the SPI bus to be initialised beforehand by the application (SPI.begin() under
+    // Arduino, spi_bus_initialize() under ESP-IDF). This library never initialises the bus
+    // itself, to avoid interfering with other devices sharing it; it only runs its transactions.
     // debug=true: queue items carry AFE4490DebugData alongside AFE4490Data — enables
     // getData(data, dbg) with true sample-level atomicity. Zero overhead when false (default).
     void begin(int pin_cs, int pin_drdy, bool debug = false);
-#endif
 
     // Chip configuration setters (callable before or after begin())
     // Sample rate (PRF). Primary form: takes a validated catalogue entry, so an unsupported
@@ -840,17 +847,13 @@ public:
      * @param data  Output: filled with the oldest queued sample if available.
      * @return true if data was available, false if the queue was empty.
      */
-#ifndef INCUNEST_OFFLINE
     // dbg: if non-null and begin(debug=true) was used, filled atomically with the debug
     // snapshot for the same sample. Ignored (not filled) when debug mode is inactive.
     bool getData(AFE4490Data& data, AFE4490DebugData* dbg = nullptr);
-#endif
 
     // Shutdown — detaches ISR, deletes internal task and FreeRTOS objects, resets state.
     // After stop(), begin() can be called again to restart.
-#ifndef INCUNEST_OFFLINE
     void stop();
-#endif
 
     // SpO2 calibration coefficients (SpO2 = a - b*R).
     // Defaults are experimentally calibrated for UpnMed U401-D(01AS-F), Nellcor Non-Oximax type.
@@ -885,14 +888,10 @@ public:
     // absorb gracefully. Set to 0 to observe the raw diagnostic artefacts.
     // Default: kAFE_DIAG_HOLDOFF_MS — derived from kAFE_FLTRCNRSEL (datasheet p.11):
     //   500 Hz corner → 28 ms; 1000 Hz corner → 16 ms.
-#ifndef INCUNEST_OFFLINE
     uint32_t runAfeDiagnostics(uint32_t diag_holdoff_ms = kAFE_DIAG_HOLDOFF_MS);
-#endif
 
     // ISR entry point (must be public for static trampoline)
-#ifndef INCUNEST_OFFLINE
     void _drdy_isr();
-#endif
 
 private:
     // ── Private types ─────────────────────────────────────────────────────────
@@ -1039,11 +1038,9 @@ private:
     // guess — see _compute_switched_rc_settling_samples() below, derived from datasheet §7.7 t5.
 
     // ── SPI primitives ────────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
     void     _write_reg(uint8_t addr, uint32_t data);
     uint32_t _read_spi_raw(uint8_t addr);   // assumes SPI_READ already enabled
     uint32_t _read_reg(uint8_t addr);       // handles SPI_READ enable/disable
-#endif
 
     // Sign-extend 22-bit two's complement ADC output
     static int32_t _sign_extend_22(uint32_t raw);
@@ -1097,30 +1094,26 @@ private:
     float _quantize_led_mA(float mA) const;
 
     // Chip init
-#ifndef INCUNEST_OFFLINE
     void _chip_init();
     void _apply_timing_regs();
     void _apply_analog_regs();
     void _apply_control_regs();
     uint32_t _build_tiagain_led1();        // TIAGAIN register value (LED1 fields + ENSEPGAIN bit)
     uint32_t _build_tia_amb_gain_led2();   // TIA_AMB_GAIN register value (LED2 fields + AMBDAC)
-#endif
 
     // True while the analog front-end is known to be re-settling (diagnostics or an HGAC RF
     // change, §5.6.3/§5.8.4) — _task_body() freezes its input (feeds _last_valid_* instead of a
-    // real SPI read) for as long as this holds. Not gated by INCUNEST_OFFLINE — it's pure member
+    // real SPI read) for as long as this holds. Not platform-dependent — it's pure member
     // reads, no SPI — so the condition itself is unit-testable without a running task.
     bool _should_freeze_input() const {
         return _diag_active || _diag_holdoff_samples > 0 || _switched_rc_settling_countdown > 0;
     }
 
     // FreeRTOS task
-#ifndef INCUNEST_OFFLINE
     static void _task_trampoline(void* pv);
     static void _diag_task_trampoline(void* pv);
     void        _diag_task_body();
     void _task_body();
-#endif
 
     // Signal processing
     void  _process_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
@@ -1191,12 +1184,10 @@ private:
     void _hr3_compute();                          // FFT+HPS on _hr3_fft → _hr3_result/_hr3_result_sqi
 
     // HR2/HR3 async FreeRTOS tasks
-#ifndef INCUNEST_OFFLINE
     static void _hr2_task_trampoline(void* pv);
     void _hr2_task_body();
     static void _hr3_task_trampoline(void* pv);
     void _hr3_task_body();
-#endif
 
     // ── Hardware ──
     int _pin_cs;
@@ -1528,19 +1519,17 @@ private:
 
     // ── Static ISR trampoline ──
     // _g_instance holds a pointer to the single active INCUNEST_AFE4490 object so that
-    // _drdy_isr_static (a plain C-compatible function required by attachInterrupt)
+    // _drdy_isr_static (a plain void(void) function — the shape the HAL's ISR contract takes)
     // can forward the interrupt to the correct instance.
     //
     // LIMITATION: only one INCUNEST_AFE4490 instance is supported at a time. A second
     // instance would overwrite _g_instance and its DRDY interrupts would be routed
     // to the wrong object. To support two AFE4490 chips, either:
     //   - add a second static ISR + pointer pair, or
-    //   - switch to ESP-IDF gpio_isr_handler_add(), which passes a void* argument
-    //     per handler, eliminating the need for a singleton pointer altogether.
-#ifndef INCUNEST_OFFLINE
+    //   - extend incunest_afe4490_hal_gpio_attach_isr_rising() to carry a void* argument
+    //     (ESP-IDF's gpio_isr_handler_add() supports it), removing the singleton.
     static INCUNEST_AFE4490* _g_instance;
     static void IRAM_ATTR _drdy_isr_static();
-#endif
 
 #ifdef UNIT_TEST
 public:

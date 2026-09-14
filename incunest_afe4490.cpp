@@ -1,31 +1,21 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.90b — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.91 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
 #include "incunest_afe4490.h"
-#ifndef INCUNEST_OFFLINE
-#include "esp_log.h"
-#endif
 #include <math.h>
 #include <string.h>
-#if INCUNEST_TIMING_STATS && !defined(INCUNEST_OFFLINE)
-#include "esp_timer.h"
-#endif
 
-#ifdef INCUNEST_OFFLINE
-[[maybe_unused]] static const char* TAG = "";
-#define ESP_LOGE(tag, ...) ((void)0)
-#define ESP_LOGI(tag, ...) ((void)0)
-#define ESP_LOGW(tag, ...) ((void)0)
-#else
 static const char* TAG = "incunest_afe4490";
-#endif
 
 namespace {
     // ── Math ──────────────────────────────────────────────────────────────────
     constexpr float    kPi                  = 3.14159265358979f;
+    // Arduino's constrain macro, as a function. The Arduino build is gnu++11, so std::clamp
+    // (C++17) is not available; unlike the macro, each argument is evaluated once.
+    inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
     constexpr float    spo2_warmup_s       = 18.0f;    // s  — warmup before reporting SpO2 (3 × τ_var = 3 × 6 s)
@@ -298,9 +288,7 @@ namespace {
 // Singleton pointer used by the static ISR trampoline (_drdy_isr_static) to reach
 // the class instance. Static members must be defined exactly once in a .cpp file;
 // the declaration in the header only reserves the name.
-#ifndef INCUNEST_OFFLINE
 INCUNEST_AFE4490* INCUNEST_AFE4490::_g_instance = nullptr;
-#endif
 
 // ── Constructor / destructor ──────────────────────────────────────────────────
 INCUNEST_AFE4490::INCUNEST_AFE4490()
@@ -386,7 +374,6 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
 }
 
 INCUNEST_AFE4490::~INCUNEST_AFE4490() {
-#ifndef INCUNEST_OFFLINE
     if (_task_handle)      { vTaskDelete(_task_handle);      _task_handle      = nullptr; }
     if (_hr2_task_handle)  { vTaskDelete(_hr2_task_handle);  _hr2_task_handle  = nullptr; }
     if (_hr3_task_handle)  { vTaskDelete(_hr3_task_handle);  _hr3_task_handle  = nullptr; }
@@ -397,22 +384,20 @@ INCUNEST_AFE4490::~INCUNEST_AFE4490() {
     if (_spi_mutex)        vSemaphoreDelete(_spi_mutex);
     if (_state_mutex)      vSemaphoreDelete(_state_mutex);
     if (_g_instance == this) _g_instance = nullptr;
-#endif
 }
 
 // ── begin() ───────────────────────────────────────────────────────────────────
-// Requires SPI.begin() to have been called beforehand. This library intentionally
-// does not call SPI.begin() to avoid reinitialising the bus and interfering with
-// other SPI devices. Only SPI.beginTransaction() / endTransaction() are used here.
-#ifndef INCUNEST_OFFLINE
+// Requires the SPI bus to be initialised beforehand by the application (SPI.begin() under
+// Arduino, spi_bus_initialize() under ESP-IDF). This library intentionally never initialises
+// the bus, to avoid reinitialising it under other devices; it only runs its own register
+// transactions through incunest_afe4490_hal_spi_transfer().
 void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
     _pin_cs        = pin_cs;
     _pin_drdy      = pin_drdy;
     _debug_enabled = debug;
     _g_instance    = this;
 
-    pinMode(_pin_cs, OUTPUT);
-    digitalWrite(_pin_cs, HIGH);
+    incunest_afe4490_hal_gpio_init_output(_pin_cs, true);   // CS idles high
 
     const size_t queue_item_size = debug ? sizeof(DebugQueueItem) : sizeof(AFE4490Data);
     _drdy_sem    = xSemaphoreCreateBinary();
@@ -428,14 +413,21 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
         return;
     }
 
+    if (!incunest_afe4490_hal_spi_attach()) {
+        ESP_LOGE(TAG, "SPI attach failed");
+        return;
+    }
+
     xSemaphoreTake(_spi_mutex, portMAX_DELAY);
     _chip_init();
     xSemaphoreGive(_spi_mutex);
 
     _initialized = true;
 
-    pinMode(_pin_drdy, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(_pin_drdy), _drdy_isr_static, RISING);
+    incunest_afe4490_hal_gpio_init_input_pullup(_pin_drdy);
+    if (!incunest_afe4490_hal_gpio_attach_isr_rising(_pin_drdy, _drdy_isr_static)) {
+        ESP_LOGE(TAG, "DRDY interrupt attach failed");   // Arduino: cannot happen; ESP-IDF: ISR service error
+    }
 
     xTaskCreatePinnedToCore(
         _task_trampoline,     "incunest_afe4490",
@@ -459,7 +451,6 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
 
     ESP_LOGI(TAG, "Started: PRF=%u Hz, NUMAV=%u", _afe_sample_rate_hz, _afe_adc_averages);
 }
-#endif
 
 // ── Configuration setters ─────────────────────────────────────────────────────
 // Acceptance policy for sample rates — the ONLY place it lives. setSampleRate(uint16_t) defers
@@ -504,10 +495,8 @@ void INCUNEST_AFE4490::setSampleRate(AFE4490SampleRate rate) {
     const uint16_t hz = sampleRateHz(rate);
     if (hz == _afe_sample_rate_hz) return;   // no-op: never pay a teardown for a no-change call
 
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-#endif
 
     _afe_sample_rate_hz = hz;
 
@@ -545,14 +534,12 @@ void INCUNEST_AFE4490::setSampleRate(AFE4490SampleRate rate) {
     // datasheet's §7.7 t5 — the same reason RF, CF, ILED, AMBDAC, RG and Stage2En arm it.
     _arm_switched_rc_settling();
 
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_timing_regs();
         _apply_control_regs();
         xSemaphoreGive(_state_mutex);
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setAdcAverages(uint8_t num) {
@@ -568,57 +555,45 @@ void INCUNEST_AFE4490::setAdcAverages(uint8_t num) {
         num = clamped;
     }
 
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     _afe_adc_averages = num;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_control_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 float INCUNEST_AFE4490::_quantize_led_mA(float mA) const {
     float full_scale_mA = (float)_afe_led_range_mA;
-    uint8_t code = (uint8_t)constrain(roundf((mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
+    uint8_t code = (uint8_t)clampf(roundf((mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
     return (code / 256.0f) * full_scale_mA;
 }
 
 void INCUNEST_AFE4490::setLED1Current(float mA) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
-    float new_val = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
+    float new_val = _quantize_led_mA(clampf(mA, 0.0f, (float)_afe_led_range_mA));
     bool changed = (new_val != _afe_led1_current_mA);
     // Arm BEFORE mutating: closes the cross-thread race with _process_sample() (spec §5.8.4) —
     // otherwise a reader on another core could observe the new value with the countdown still 0.
     if (changed) _arm_switched_rc_settling();  // datasheet §7.7 t5 footnote (1) names "LED current setting" explicitly
     _afe_led1_current_mA = new_val;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setLED2Current(float mA) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
-    float new_val = _quantize_led_mA(constrain(mA, 0.0f, (float)_afe_led_range_mA));
+    float new_val = _quantize_led_mA(clampf(mA, 0.0f, (float)_afe_led_range_mA));
     bool changed = (new_val != _afe_led2_current_mA);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();  // datasheet §7.7 t5 footnote (1) names "LED current setting" explicitly
     _afe_led2_current_mA = new_val;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setLEDRange(uint8_t mA) {
@@ -626,226 +601,170 @@ void INCUNEST_AFE4490::setLEDRange(uint8_t mA) {
         ESP_LOGE(TAG, "setLEDRange: must be 75 or 150 mA");
         return;
     }
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     _afe_led_range_mA = mA;
     // Re-quantize LED currents to the new range's DAC grid
     _afe_led1_current_mA = _quantize_led_mA(_afe_led1_current_mA);
     _afe_led2_current_mA = _quantize_led_mA(_afe_led2_current_mA);
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 // Joint setters — apply the same value to both LED1 and LED2 channels
 void INCUNEST_AFE4490::setTIAGain(AFE4490RF gain) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (gain != _afe_tia_rf_led1) || (gain != _afe_tia_rf_led2);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_tia_rf_led1 = _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setTIACF(float pF) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     _afe_tia_cf_led1 = _afe_tia_cf_led2 = afeCFPFToCode(pF);
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setStage2Gain(AFE4490RG gain) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (gain != _afe_stg2_rg_led1) || (gain != _afe_stg2_rg_led2);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();  // RG is part of the same feedback path as RF
     _afe_stg2_rg_led1 = _afe_stg2_rg_led2 = gain;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 // Separate gain mode
 void INCUNEST_AFE4490::setEnSepGain(bool enable) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     _afe_sep_tia_en = enable;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 // Per-channel setters — LED1 (IR)
 void INCUNEST_AFE4490::setTIAGainLED1(AFE4490RF gain) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (gain != _afe_tia_rf_led1);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_tia_rf_led1 = gain;
     _recalc_afe_tia_cf_led1();
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setTIACFLED1(float pF) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     _afe_tia_cf_led1 = afeCFPFToCode(pF);
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setStage2GainLED1(AFE4490RG gain) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (gain != _afe_stg2_rg_led1);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_stg2_rg_led1 = gain;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 // Per-channel setters — LED2 (RED)
 void INCUNEST_AFE4490::setTIAGainLED2(AFE4490RF gain) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (gain != _afe_tia_rf_led2);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_tia_rf_led2 = gain;
     _recalc_afe_tia_cf_led2();
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setTIACFLED2(float pF) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     _afe_tia_cf_led2 = afeCFPFToCode(pF);
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setStage2GainLED2(AFE4490RG gain) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (gain != _afe_stg2_rg_led2);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_stg2_rg_led2 = gain;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setStage2En1(bool en) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (en != _afe_stg2_en_led1);
     // Bypassing Stage 2 steps the effective gain between unity and RG, same as setStage2Gain().
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_stg2_en_led1 = en;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setStage2En2(bool en) {
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (en != _afe_stg2_en_led2);
     // Bypassing Stage 2 steps the effective gain between unity and RG, same as setStage2Gain().
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();
     _afe_stg2_en_led2 = en;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setAmbDac(uint8_t uA) {
     if (uA > 10) uA = 10;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     bool changed = (uA != _afe_ambdac_uA);
     // Arm before mutating — closes the cross-thread race with _process_sample(), spec §5.8.4.
     if (changed) _arm_switched_rc_settling();  // same feedback path as RF/CF — datasheet's "and so forth"
     _afe_ambdac_uA = uA;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) {
         _apply_analog_regs();
         xSemaphoreGive(_spi_mutex);
     }
-#endif
 }
 
 void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
@@ -1022,7 +941,7 @@ void INCUNEST_AFE4490::setHgacVTiaHigh2(float v) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     // Keep the guard on the operating axis: it must trip BELOW the TIA full-scale
     // (tia_axis::FS_V) so HGAC acts before the reading turns unreliable — never above it.
-    hgac_v_tia_high2 = constrain(v, 0.0f, tia_axis::FS_V);
+    hgac_v_tia_high2 = clampf(v, 0.0f, tia_axis::FS_V);
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1064,9 +983,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     AFE4490Config cfg;
 
     // SPI-mutex fields: sample rate, averages, LED currents, analog front-end settings
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-#endif
     cfg.afe_sample_rate_hz  = _afe_sample_rate_hz;
     cfg.afe_adc_averages    = _afe_adc_averages;
     cfg.afe_led1_current_mA = _afe_led1_current_mA;
@@ -1084,14 +1001,10 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.afe_stg2_rg_led2 = _afe_stg2_rg_led2;
     cfg.afe_stg2_en_led2       = _afe_stg2_en_led2;
     cfg.afe_ambdac_uA        = _afe_ambdac_uA;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_spi_mutex);
-#endif
 
     // state-mutex fields: PPG channel, filters, SpO2 calibration
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-#endif
     cfg.ppgdisp_channel      = _ppgdisp_channel;
     cfg.ppgdisp_f_low_hz     = _ppgdisp_bpf.f_low;
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
@@ -1128,9 +1041,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hgac_ema_fast_tau_s  = hgac_ema_fast_tau_s;
     cfg.hgac_ema_slow_tau_s  = hgac_ema_slow_tau_s;
     cfg.hgac_ema_ambient_tau_s = hgac_ema_ambient_tau_s;
-#ifndef INCUNEST_OFFLINE
     if (_initialized) xSemaphoreGive(_state_mutex);
-#endif
 
     return cfg;
 }
@@ -1138,7 +1049,6 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
 // ── getTimingConfig() — reads all timing registers from chip via SPI ──────────
 AFE4490TimingConfig INCUNEST_AFE4490::getTimingConfig() {
     AFE4490TimingConfig t = {};
-#ifndef INCUNEST_OFFLINE
     if (!_initialized) return t;
     xSemaphoreTake(_spi_mutex, portMAX_DELAY);
     // Enable SPI_READ once, read all 28 registers sequentially, then disable.
@@ -1159,22 +1069,18 @@ AFE4490TimingConfig INCUNEST_AFE4490::getTimingConfig() {
     t.t27 = _read_spi_raw(0x1B); t.t28 = _read_spi_raw(0x1C);
     _write_reg(REG_CONTROL0, 0x000000UL);
     xSemaphoreGive(_spi_mutex);
-#endif
     return t;
 }
 
 // ── setTimingReg() — writes one timing register directly to chip ──────────────
 void INCUNEST_AFE4490::setTimingReg(uint8_t addr, uint32_t value) {
-#ifndef INCUNEST_OFFLINE
     if (!_initialized) return;
     xSemaphoreTake(_spi_mutex, portMAX_DELAY);
     _write_reg(addr, value);
     xSemaphoreGive(_spi_mutex);
-#endif
 }
 
 // ── getData() ─────────────────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
 bool INCUNEST_AFE4490::getData(AFE4490Data& data, AFE4490DebugData* dbg) {
     if (_debug_enabled) {
         DebugQueueItem item;
@@ -1187,14 +1093,12 @@ bool INCUNEST_AFE4490::getData(AFE4490Data& data, AFE4490DebugData* dbg) {
     }
     return xQueueReceive(_data_queue, &data, 0) == pdTRUE;
 }
-#endif
 
 // ── stop() ────────────────────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
 void INCUNEST_AFE4490::stop() {
     if (!_initialized) return;
 
-    detachInterrupt(digitalPinToInterrupt(_pin_drdy));
+    incunest_afe4490_hal_gpio_detach_isr(_pin_drdy);
 
     // Take mutex to wait for any in-progress SPI transaction to finish
     if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
@@ -1203,6 +1107,8 @@ void INCUNEST_AFE4490::stop() {
     if (_hr2_task_handle)  { vTaskDelete(_hr2_task_handle);  _hr2_task_handle  = nullptr; }
     if (_hr3_task_handle)  { vTaskDelete(_hr3_task_handle);  _hr3_task_handle  = nullptr; }
     if (_diag_task_handle) { vTaskDelete(_diag_task_handle); _diag_task_handle = nullptr; }
+
+    incunest_afe4490_hal_spi_detach();
 
     // Delete FreeRTOS objects (mutexes last since we may hold _spi_mutex)
     if (_data_queue)   { vQueueDelete(_data_queue);          _data_queue   = nullptr; }
@@ -1240,7 +1146,6 @@ void INCUNEST_AFE4490::_diag_task_trampoline(void* pv) {
     static_cast<INCUNEST_AFE4490*>(pv)->_diag_task_body();
     vTaskDelete(nullptr);
 }
-#endif
 
 // ── _reset_algorithms() ───────────────────────────────────────────────────────
 void INCUNEST_AFE4490::_reset_algorithms() {
@@ -1270,7 +1175,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hgac_ema_fast_led1.reset(); _hgac_ema_slow_led1.reset(); _hgac_ema_ambient_led1.reset();
     _hgac_ema_fast_led2.reset(); _hgac_ema_slow_led2.reset(); _hgac_ema_ambient_led2.reset();
     _current_data = AFE4490Data{};
-    // Precompute Hann window — needed for HR3 FFT (moved here from begin() to support INCUNEST_OFFLINE)
+    // Precompute Hann window — needed for HR3 FFT (lives here, not in begin(), so host builds compute it too)
     for (int i = 0; i < hr3_buf_len; i++)
         _hr3_hann[i] = 0.5f * (1.0f - cosf(2.0f * kPi * (float)i / (float)(hr3_buf_len - 1)));
 }
@@ -1600,29 +1505,21 @@ void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
 }
 
 // ── SPI primitives ────────────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
 void INCUNEST_AFE4490::_write_reg(uint8_t addr, uint32_t data) {
-    SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
-    digitalWrite(_pin_cs, LOW);
-    SPI.transfer(addr);
-    SPI.transfer((data >> 16) & 0xFF);
-    SPI.transfer((data >>  8) & 0xFF);
-    SPI.transfer( data        & 0xFF);
-    digitalWrite(_pin_cs, HIGH);
-    SPI.endTransaction();
+    // 1 address byte + 24 data bits, MSB first, one chip-select frame (datasheet §8.5.1).
+    const uint8_t tx[4] = { addr,
+                            (uint8_t)((data >> 16) & 0xFF),
+                            (uint8_t)((data >>  8) & 0xFF),
+                            (uint8_t)( data        & 0xFF) };
+    incunest_afe4490_hal_spi_transfer(_pin_cs, tx, nullptr, sizeof(tx));
 }
 
 // Raw read — caller must have enabled SPI_READ in CONTROL0 beforehand
 uint32_t INCUNEST_AFE4490::_read_spi_raw(uint8_t addr) {
-    SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
-    digitalWrite(_pin_cs, LOW);
-    SPI.transfer(addr);
-    uint32_t data = ((uint32_t)SPI.transfer(0x00) << 16) |
-                    ((uint32_t)SPI.transfer(0x00) <<  8) |
-                     (uint32_t)SPI.transfer(0x00);
-    digitalWrite(_pin_cs, HIGH);
-    SPI.endTransaction();
-    return data;
+    const uint8_t tx[4] = { addr, 0x00, 0x00, 0x00 };
+    uint8_t       rx[4] = { 0x00, 0x00, 0x00, 0x00 };
+    incunest_afe4490_hal_spi_transfer(_pin_cs, tx, rx, sizeof(tx));
+    return ((uint32_t)rx[1] << 16) | ((uint32_t)rx[2] << 8) | (uint32_t)rx[3];
 }
 
 uint32_t INCUNEST_AFE4490::_read_reg(uint8_t addr) {
@@ -1654,7 +1551,6 @@ uint32_t INCUNEST_AFE4490::runAfeDiagnostics(uint32_t diag_holdoff_ms) {
     _diag_code = (_diag_code & ~AFE_DIAG_MASK) | (result & AFE_DIAG_MASK);
     return result;
 }
-#endif
 
 int32_t INCUNEST_AFE4490::_sign_extend_22(uint32_t raw) {
     // AFE4490 ADC output is 22-bit two's complement in bits [21:0]
@@ -1662,7 +1558,6 @@ int32_t INCUNEST_AFE4490::_sign_extend_22(uint32_t raw) {
 }
 
 // ── Chip init ─────────────────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
 void INCUNEST_AFE4490::_chip_init() {
     // Step 2: Set SPI write mode
     _write_reg(REG_CONTROL0, 0x000000UL);
@@ -1781,8 +1676,8 @@ void INCUNEST_AFE4490::_apply_analog_regs() {
     // LEDCNTRL: LED_RANGE | (code_led1 << 8) | code_led2
     // I (mA) = (code / 256) * full_scale_mA
     float full_scale_mA = (float)_afe_led_range_mA;
-    uint8_t code1 = (uint8_t)constrain(roundf((_afe_led1_current_mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
-    uint8_t code2 = (uint8_t)constrain(roundf((_afe_led2_current_mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
+    uint8_t code1 = (uint8_t)clampf(roundf((_afe_led1_current_mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
+    uint8_t code2 = (uint8_t)clampf(roundf((_afe_led2_current_mA / full_scale_mA) * 256.0f), 0.0f, 255.0f);
     uint32_t range_bit = (_afe_led_range_mA == 75) ? 0x010000UL : 0x000000UL;
     _write_reg(REG_LEDCNTRL, range_bit | ((uint32_t)code1 << 8) | code2);
 
@@ -1795,7 +1690,6 @@ void INCUNEST_AFE4490::_apply_control_regs() {
     uint8_t numav = (_afe_adc_averages > 0) ? (_afe_adc_averages - 1u) : 0u;
     _write_reg(REG_CONTROL1, ctrl1_timeren | numav);
 }
-#endif  // !INCUNEST_OFFLINE
 
 void INCUNEST_AFE4490::_recalc_rate_params() {
     float sample_rate_hz              = (float)_afe_sample_rate_hz;
@@ -1984,7 +1878,6 @@ void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float sample_rate_
 // via the pvParameters argument and immediately forwards execution to _task_body(), which is
 // the actual member function with full access to private state. This pattern (trampoline +
 // member body) is the standard idiom for running a C++ method as a FreeRTOS task.
-#ifndef INCUNEST_OFFLINE
 void INCUNEST_AFE4490::_task_trampoline(void* pv) {
     static_cast<INCUNEST_AFE4490*>(pv)->_task_body();
     vTaskDelete(nullptr); // should never reach here
@@ -2071,9 +1964,10 @@ void INCUNEST_AFE4490::_task_body() {
 }
 
 // ── ISR ───────────────────────────────────────────────────────────────────────
-// Trampoline required because attachInterrupt() only accepts a plain C function pointer;
-// C++ member functions are not compatible. _drdy_isr_static is registered with
-// attachInterrupt() and forwards the call to the actual member ISR (_drdy_isr) via
+// Trampoline required because the HAL's ISR contract (like Arduino's attachInterrupt() and
+// ESP-IDF's gpio_isr_handler_add()) takes a plain function pointer; C++ member functions
+// are not compatible. _drdy_isr_static is what incunest_afe4490_hal_gpio_attach_isr_rising()
+// registers; it forwards the call to the actual member ISR (_drdy_isr) via
 // the singleton pointer _g_instance. The null-check guards against a spurious interrupt
 // arriving after stop() has cleared _g_instance.
 void IRAM_ATTR INCUNEST_AFE4490::_drdy_isr_static() {
@@ -2085,7 +1979,6 @@ void IRAM_ATTR INCUNEST_AFE4490::_drdy_isr() {
     xSemaphoreGiveFromISR(_drdy_sem, &woken);
     portYIELD_FROM_ISR(woken);
 }
-#endif  // !INCUNEST_OFFLINE
 
 // ── Signal processing ─────────────────────────────────────────────────────────
 
@@ -2199,7 +2092,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 //                hr2cmp_mean,hr2cmp_max,hr3cmp_mean,hr3cmp_max,stack_free*XX
 // Task A fast-path (first 10 values): budget reference = 2000 µs (1/500 Hz).
 // Task B/C compute (values 11-14): CPU load % = mean / 500000 µs (0.5 s period).
-#if INCUNEST_TIMING_STATS && !defined(INCUNEST_OFFLINE)
+#if INCUNEST_TIMING_STATS
 void INCUNEST_AFE4490::_emit_timing() {
     UBaseType_t stack_free = uxTaskGetStackHighWaterMark(nullptr);
     char buf[256];
@@ -2215,7 +2108,7 @@ void INCUNEST_AFE4490::_emit_timing() {
         (unsigned)stack_free);
     uint8_t chk = 0;
     for (int i = 0; i < n; i++) chk ^= (uint8_t)buf[i];
-    Serial.printf("$%s*%02X\r\n", buf, chk);
+    incunest_afe4490_hal_console_printf("$%s*%02X\r\n", buf, chk);
     // Emit task CPU stats BEFORE resetting accumulators (needs sum_us values)
     _emit_tasks();
     _ts_spo2.reset(); _ts_hr1.reset(); _ts_hr2.reset(); _ts_hr3.reset(); _ts_cycle.reset();
@@ -2226,8 +2119,8 @@ void INCUNEST_AFE4490::_emit_timing() {
 // CPU% is computed from sum_us over the emit window (current interval, not cumulative).
 // Window = _ts_emit_interval samples / sample_rate_hz = ts_emit_period_s.
 // stack_words = uxTaskGetStackHighWaterMark() for each task handle.
-// Does NOT use uxTaskGetSystemState() — avoids requiring configUSE_TRACE_FACILITY=1
-// in the precompiled Arduino ESP32 FreeRTOS library.
+// Does NOT use uxTaskGetSystemState() — avoids requiring configUSE_TRACE_FACILITY=1, which
+// the precompiled Arduino-ESP32 FreeRTOS does not set (ESP-IDF builds could, via menuconfig).
 void INCUNEST_AFE4490::_emit_tasks() {
     uint64_t window_us = (uint64_t)_ts_emit_interval * 1000000u / _afe_sample_rate_hz;
 
@@ -2246,12 +2139,12 @@ void INCUNEST_AFE4490::_emit_tasks() {
             t.name, (unsigned long)pct_x10, (unsigned long)stack);
         uint8_t chk = 0;
         for (int j = 0; j < len; j++) chk ^= (uint8_t)buf[j];
-        Serial.printf("$%s*%02X\r\n", buf, chk);
+        incunest_afe4490_hal_console_printf("$%s*%02X\r\n", buf, chk);
     }
     const char* end_str = "TASKS_END";
     uint8_t end_chk = 0;
     for (int i = 0; end_str[i]; i++) end_chk ^= (uint8_t)end_str[i];
-    Serial.printf("$%s*%02X\r\n", end_str, end_chk);
+    incunest_afe4490_hal_console_printf("$%s*%02X\r\n", end_str, end_chk);
 }
 #endif
 
@@ -2744,7 +2637,6 @@ void INCUNEST_AFE4490::_hr3_update_for_test(float ir, ProbeState probe_state) {
 }
 
 // ── HR2 async task (Task B) ────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
 void INCUNEST_AFE4490::_hr2_task_trampoline(void* pv) {
     static_cast<INCUNEST_AFE4490*>(pv)->_hr2_task_body();
     vTaskDelete(nullptr);
@@ -2772,10 +2664,8 @@ void INCUNEST_AFE4490::_hr2_task_body() {
         _hr2_computing = false;  // release slot after results committed
     }
 }
-#endif  // !INCUNEST_OFFLINE
 
 // ── HR3 async task (Task C) ────────────────────────────────────────────────────
-#ifndef INCUNEST_OFFLINE
 void INCUNEST_AFE4490::_hr3_task_trampoline(void* pv) {
     static_cast<INCUNEST_AFE4490*>(pv)->_hr3_task_body();
     vTaskDelete(nullptr);
@@ -2803,4 +2693,3 @@ void INCUNEST_AFE4490::_hr3_task_body() {
         _hr3_computing = false;  // release slot after results committed
     }
 }
-#endif  // !INCUNEST_OFFLINE

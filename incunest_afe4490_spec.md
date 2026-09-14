@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.90b
+# incunest_afe4490 — Specification v0.91
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -67,6 +67,86 @@ The AFE4490 produces 6 signals per sample. All are read internally:
 only one that still showed a scaling discontinuity whenever HGAC changed RF. See §2.1.
 
 ---
+
+### 1.4 Hardware abstraction layer (HAL) — v0.91
+
+The library builds unchanged on three targets: **Arduino-ESP32** (PlatformIO — PulseNest, and
+IncuNest motherBoard until its ESP-IDF port merges), **ESP-IDF without Arduino** (CMake component —
+motherBoard after the port) and the **host** (PC — `pio test -e native`, `tools/offline_runner`).
+
+**Only what came from `<Arduino.h>` and `<SPI.h>` differs between the two embedded targets.**
+Measured on v0.90b: 18 call sites (GPIO ×7, DRDY interrupt ×2, two 4-byte SPI register
+transactions, `Serial.printf` ×3, `constrain` ×6) plus seven constants. FreeRTOS (~270 calls),
+`esp_timer_get_time()` and `IRAM_ATTR` are the same API on both — Arduino-ESP32 runs on top of
+ESP-IDF — so they are used directly and only have to *exist* on the host. `ESP_LOGx` has the same
+names on both but not the same implementation (see below).
+
+**Contract — `incunest_afe4490_hal.h`.** Free functions, prefix `incunest_afe4490_hal_`:
+
+| Function | Arduino (`_hal_arduino.cpp`) | ESP-IDF (`_hal_idf.cpp`) | Host (`_hal_host.cpp`) |
+|---|---|---|---|
+| `gpio_init_output(pin, level)` | `pinMode(OUTPUT)` + `digitalWrite` | `gpio_config` + `gpio_set_level` | no-op |
+| `gpio_init_input_pullup(pin)` | `pinMode(INPUT_PULLUP)` | `gpio_config` (pull-up) | no-op |
+| `gpio_write(pin, level)` | `digitalWrite` | `gpio_set_level` | no-op |
+| `gpio_attach_isr_rising(pin, isr) → bool` | `attachInterrupt(digitalPinToInterrupt(pin), isr, RISING)`, always `true` | `gpio_install_isr_service(0)` once, per-GPIO trampoline table, `gpio_isr_handler_add` | **`false`** |
+| `gpio_detach_isr(pin)` | `detachInterrupt` | `gpio_intr_disable` + `gpio_isr_handler_remove` | no-op |
+| `spi_attach() → bool` / `spi_detach()` | no-op — the bus is the app's `SPI` | `spi_bus_add_device` (2 MHz, mode 0, `spics_io_num = -1`, queue 1) / remove | `true` / no-op |
+| `spi_transfer(cs, tx, rx, n)` | `beginTransaction(2 MHz, MSB, MODE0)`, CS low, **n × `SPI.transfer(uint8_t)`**, CS high, `endTransaction` | `acquire_bus`, CS low, **one `spi_device_polling_transmit`** (TXDATA/RXDATA for n ≤ 4), CS high, `release_bus` | zero-fills `rx` |
+| `console_printf(fmt, …)` | `vsnprintf` + `Serial.write` | `vprintf` (UART0 via VFS) | `vprintf` |
+
+Rules the contract encodes:
+
+- **The SPI bus belongs to the application** (`SPI.begin()` under Arduino, `spi_bus_initialize()`
+  under ESP-IDF), as it always did; the library only attaches a device and runs its 4-byte frames.
+  Clock 2 MHz, MSB first, mode 0 are the AFE4490's and are fixed in the HAL.
+  `INCUNEST_AFE4490_HAL_SPI_HOST` (default `SPI2_HOST`) selects the peripheral on ESP-IDF.
+- **Arduino path = what v0.90b did, byte for byte.** `spi_transfer` uses the per-byte
+  `SPI.transfer()` so the bus sequence is identical; `attach_isr` keeps `digitalPinToInterrupt()`.
+- **ESP-IDF path = one driver call per register, not four.** The per-call cost of
+  `spi_device_polling_transmit()` is what makes a byte-wise shim 5–10× more expensive than the
+  Arduino register-level `SPI.transfer()`; the bench measurement of the acquisition task under
+  ESP-IDF is still pending.
+- **ISR flags:** `gpio_install_isr_service(0)`, the same as Arduino-ESP32 2.0.x — the handler is
+  not IRAM-safe during flash writes (OTA, NVS). Unchanged on purpose; changing it is a measured
+  decision, not a port side effect.
+- **`console_printf` exists because `$TIMING`/`$TASKS` (§8) are a checksummed line protocol**: the
+  line must start with `$` and end with `*XX\r\n`, so it must not go through `ESP_LOGx` (prefix and
+  extra newline).
+- **The host never pretends.** `attach_isr` returns `false` and the host FreeRTOS creates no
+  objects, so `begin()` logs "FreeRTOS object creation failed" and returns; algorithms are
+  exercised through the `UNIT_TEST` accessors (§9).
+
+**Selection is by detection, never by a hand-set macro.** Each implementation file is guarded —
+`#if defined(ARDUINO)` / `#if defined(ESP_PLATFORM) && !defined(ARDUINO)` / `#if !defined(ESP_PLATFORM)`.
+PlatformIO compiles all three (two are empty translation units); the root `CMakeLists.txt`
+registers `incunest_afe4490.cpp` + `incunest_afe4490_hal_idf.cpp` with
+`REQUIRES esp_driver_gpio esp_driver_spi esp_timer`. `INCUNEST_OFFLINE` no longer exists;
+`UNIT_TEST` remains, only to open the test accessors.
+
+**Host stand-ins — `incunest_afe4490_hal_host.h`**, included by the main header when
+`ESP_PLATFORM` is not defined: FreeRTOS types and functions, `IRAM_ATTR`, `ESP_LOGx` (to stderr),
+`esp_timer_get_time()` (steady clock), all under their real names (§9.4). It replaces the former
+`incunest_afe4490_platform_stub.h` and PulseNest's `test/stubs/`, two host paths that had drifted
+apart.
+
+**`ESP_LOGx` on Arduino.** Arduino-ESP32 redefines `ESP_LOGx` in `esp32-hal-log.h` (`log_printf`,
+`[E][file:line] func():` format, level from `CORE_DEBUG_LEVEL`). `Arduino.h` used to pull it in;
+the main header now includes it explicitly under `ARDUINO`, so the logging path is the one the
+library always had. Without that line IDF's `esp_log.h` silently takes over on Arduino (other
+format, other level control) — found by comparing objects, see below.
+
+**Acceptance evidence, v0.90b → v0.91 (xtensa, PlatformIO's exact command line).** The compiler
+output (`-S`, logging disabled so `__LINE__` immediates do not vary) is identical for **102 of 113
+functions**; the 11 that differ are exactly the ones touched: `_write_reg`, `_read_spi_raw`,
+`_emit_tasks`, `_emit_timing`, `begin`, `stop`, and the five former `constrain()` users
+(`setLED1Current`, `setLED2Current`, `setHgacVTiaHigh2`, `_apply_analog_regs`,
+`_quantize_led_mA` — same comparisons, the 0/255 constant materialised as float instead of int).
+External symbols: the 10 Arduino ones gone, the 8 HAL ones in, nothing else. The assembled
+objects differ in more places, all of them assembler decisions (branch relaxation, alignment
+padding, literal pool) — which is why the comparison is made on compiler output. Builds verified:
+`pio run -e incunest_V17` (Arduino, `-Werror`), `pio test -e native` (76/77 — the failing suite
+predates v0.91, §9), ESP-IDF v6.0.1 component for esp32s3 (`-Wall -Wextra -Werror`, GCC 15.2),
+host link and run.
 
 ## 2. Public API
 
@@ -2245,53 +2325,66 @@ Incunest incubators export 10-second CSV files at 500 Hz (5000 samples). The for
 
 **Optional firmware result columns:** if the CSV also contains columns `FW_HR1`, `FW_HR2`, `FW_HR3`, `FW_SpO2`, the runner includes them in the output and adds delta columns (`delta_HR1`, etc.) for algorithm equivalence checking. These columns do not affect calibration — their sole purpose is to verify that the offline C++ runner and the firmware produce identical results.
 
-### 9.3 Compile-time flag: `INCUNEST_OFFLINE`
+### 9.3 Host build: no compile-time flag any more (v0.91)
 
-To compile `incunest_afe4490.cpp` without Arduino, SPI, or FreeRTOS, define `INCUNEST_OFFLINE` before including the header. This flag:
+Since v0.91 the library needs no `INCUNEST_OFFLINE`. When `ESP_PLATFORM` is not defined the main
+header includes `incunest_afe4490_hal_host.h` (§1.4) and `incunest_afe4490_hal_host.cpp` provides
+the pin/bus/console calls as no-ops. Everything compiles on the host — `begin()`, `stop()`,
+`getData()` included — and fails honestly instead of pretending: `begin()` returns after logging
+"FreeRTOS object creation failed" because the host FreeRTOS creates no objects.
 
-1. Replaces all platform includes with `incunest_afe4490_platform_stub.h` (type stubs only).
-2. Disables `begin()`, `stop()`, `getData()`, the ISR, and all FreeRTOS objects.
-3. Implicitly enables `UNIT_TEST`, exposing `test_feed_*` / `test_hr*` / `test_spo2*` methods.
-4. Keeps all algorithm methods (`_hr1_update`, `_hr2_update_for_test`, `_hr3_update_for_test`, `_spo2_update`, `_reset_algorithms`, `_recalc_rate_params`, `_biquad_process`) fully functional.
+What the runner needs is only **`UNIT_TEST`**, which opens the `test_feed_*` / `test_hr*` /
+`test_spo2*` accessors (not part of the public API). Define it on the command line
+(`-DUNIT_TEST=1`) and compile **`incunest_afe4490_hal_host.cpp` alongside `incunest_afe4490.cpp`**
+so the HAL symbols link.
 
-`INCUNEST_OFFLINE` is never defined in firmware builds. It is only used by the offline runner and any future native unit tests.
+### 9.4 `incunest_afe4490_hal_host.h`
 
-### 9.4 `incunest_afe4490_platform_stub.h`
+Host stand-ins for the ESP-IDF / FreeRTOS API the library calls, under their real names:
 
-Thin stub (~30 lines) located at `lib/incunest_afe4490/incunest_afe4490_platform_stub.h` — alongside the library header that includes it. Provides:
+- `SemaphoreHandle_t`, `QueueHandle_t`, `TaskHandle_t` (`void*`), `TickType_t`, `BaseType_t`,
+  `UBaseType_t`, `TaskFunction_t`; `pdTRUE`/`pdFALSE`/`pdPASS`/`pdFAIL`, `portMAX_DELAY`,
+  `pdMS_TO_TICKS`, `portYIELD_FROM_ISR`.
+- `xSemaphoreCreate*` → `nullptr`; `xSemaphoreTake`/`Give`/`GiveFromISR` → `pdTRUE`;
+  `xQueueCreate` → `nullptr`; `xQueueSend`/`Receive` → `pdFALSE`; `xTaskCreatePinnedToCore` →
+  `pdFAIL`; `vTaskDelete`, `vTaskDelay`, `vSemaphoreDelete`, `vQueueDelete` no-ops;
+  `uxTaskGetStackHighWaterMark` → 0.
+- `IRAM_ATTR` empty; `ESP_LOGE/W/I` to **stderr** (stdout stays clean data for the runner),
+  `ESP_LOGD/V` off; `esp_timer_get_time()` on `std::chrono::steady_clock`.
 
-- Standard integer types (`uint8_t`, `int32_t`, etc.) via `<cstdint>`
-- `inline uint32_t millis() { return 0; }` (not used by algorithms, present to avoid linker error)
-- `SemaphoreHandle_t`, `QueueHandle_t`, `TaskHandle_t` as `void*` typedefs (never accessed under `INCUNEST_OFFLINE`)
-- `IRAM_ATTR` as empty macro
-- `portTICK_PERIOD_MS` as `1`
+It replaces `incunest_afe4490_platform_stub.h` (removed in v0.91) and PulseNest's `test/stubs/`
+(removed the same day): one host path, in the library's repo.
 
-No Arduino-specific classes (`Serial`, `SPI`, `SPIClass`) are needed — they are all guarded by `#ifndef INCUNEST_OFFLINE` in the library.
+### 9.5 History: what `INCUNEST_OFFLINE` used to do (v0.x – v0.90b)
 
-### 9.5 Changes required in `incunest_afe4490.h` / `.cpp`
-
-| Change | Location | Reason |
-|---|---|---|
-| Wrap platform includes in `#ifdef INCUNEST_OFFLINE` / `#else` | `incunest_afe4490.h` top | Avoid Arduino/FreeRTOS headers on native build |
-| Wrap `begin()`, `stop()`, `getData()`, ISR, task methods in `#ifndef INCUNEST_OFFLINE` | `incunest_afe4490.h` + `.cpp` | These are hardware-only |
-| Move Hann window precomputation from `begin()` to `_reset_algorithms()` | `incunest_afe4490.cpp` | `begin()` is disabled under `INCUNEST_OFFLINE`; `_reset_algorithms()` is available |
-| `#define UNIT_TEST` when `INCUNEST_OFFLINE` is defined | `incunest_afe4490.h` | Expose `test_feed_*` API |
+| Former mechanism | Replaced by (v0.91) |
+|---|---|
+| `#ifdef INCUNEST_OFFLINE` → `platform_stub.h`, else Arduino/FreeRTOS headers | `#if defined(ESP_PLATFORM)` → real headers, else `incunest_afe4490_hal_host.h` |
+| `begin()`, `stop()`, `getData()`, ISR, tasks, SPI primitives inside `#ifndef INCUNEST_OFFLINE` (63 conditionals) | none — they compile everywhere; the host HAL makes them no-ops |
+| `INCUNEST_OFFLINE` implied `UNIT_TEST` | `UNIT_TEST` set explicitly by the host build |
+| Hann window precomputed in `_reset_algorithms()`, not `begin()` | unchanged — still there, for the same reason |
 
 ### 9.6 File structure
 
 ```
-lib/incunest_afe4490/
-  incunest_afe4490.h              — library header (includes incunest_afe4490_platform_stub.h when INCUNEST_OFFLINE)
-  incunest_afe4490.cpp            — library implementation
-  incunest_afe4490_platform_stub.h    — Arduino/FreeRTOS type stubs (used by the library, not the runner)
+lib/incunest_afe4490/                       (PulseNest: symlink to the library repo)
+  incunest_afe4490.h / .cpp                 — library
+  incunest_afe4490_hal.h                    — platform contract (§1.4)
+  incunest_afe4490_hal_arduino.cpp          — active under ARDUINO
+  incunest_afe4490_hal_idf.cpp              — active under ESP_PLATFORM && !ARDUINO
+  incunest_afe4490_hal_host.cpp / _host.h   — active when !ESP_PLATFORM
+  CMakeLists.txt                            — ESP-IDF component registration
 
 tools/
   offline_runner/
-    CMakeLists.txt           — CMake build (C++17, no external deps)
+    CMakeLists.txt           — CMake build (C++17): main.cpp + incunest_afe4490.cpp
+                               + incunest_afe4490_hal_host.cpp, UNIT_TEST=1
     main.cpp                 — CSV reader, algorithm driver, output writer
 ```
 
-The runner includes `../../lib/incunest_afe4490/incunest_afe4490.cpp` directly via CMake `target_sources`. No subproject, no installation, no package manager.
+The runner compiles the two library sources directly via CMake. No subproject, no installation,
+no package manager. Known state (2026-09-15): the runner's `test_feed_*` calls predate the
+OT-domain API (v0.6x) and do not compile; the HAL wiring above is in place for when it is revived.
 
 ### 9.7 Execution flow
 
@@ -2742,6 +2835,29 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.91   | **Hardware abstraction layer (§1.4): the library builds unchanged on            |
+|         | Arduino-ESP32, ESP-IDF (as a CMake component) and the host.** Phase 0 of the     |
+|         | ESP-IDF port of IncuNest. Measured first: only `<Arduino.h>`/`<SPI.h>` differed  |
+|         | between the embedded targets — 18 call sites — while FreeRTOS, esp_timer and     |
+|         | IRAM_ATTR are the same API on both, so those are not wrapped; the host gets them |
+|         | from `incunest_afe4490_hal_host.h`. New: `incunest_afe4490_hal.h` (7 functions), |
+|         | `_hal_arduino.cpp` (pure forwarding, byte-for-byte the v0.90b bus sequence),    |
+|         | `_hal_idf.cpp` (driver/gpio + spi_master, ONE polling transmit per 4-byte       |
+|         | frame instead of four), `_hal_host.cpp`, root `CMakeLists.txt`. Selection by    |
+|         | detection (`ARDUINO` / `ESP_PLATFORM` / neither), no macro to set. Removed: the |
+|         | 63 `INCUNEST_OFFLINE` conditionals, `incunest_afe4490_platform_stub.h`, and     |
+|         | PulseNest's `test/stubs/`. `constrain()` → own `clampf()` (gnu++11 has no       |
+|         | std::clamp). `_rsqm_update()` lost the four raw-channel parameters it stopped   |
+|         | reading in v0.35. `begin()` now calls `hal_spi_attach()` and checks the ISR      |
+|         | attach; `stop()` calls `hal_spi_detach()`.                                       |
+|         | **Found while proving the refactor pure:** Arduino-ESP32 redefines `ESP_LOGx`   |
+|         | (`esp32-hal-log.h`); dropping `Arduino.h` silently switched the library to IDF's |
+|         | `esp_log_write` on Arduino. Fixed by including `esp32-hal-log.h` under ARDUINO.  |
+|         | **Evidence:** compiler output identical for 102/113 functions, the 11 others     |
+|         | being exactly the touched ones; 10 Arduino symbols out, 8 HAL symbols in.       |
+|         | Verified on Arduino (V17, -Werror), ESP-IDF v6.0.1 (esp32s3, -Werror, GCC 15.2),|
+|         | host (link + run) and `pio test -e native` (76/77, unchanged).                   |
+|         | No behavioural change on Arduino. On ESP-IDF the library now exists at all.     |
 | v0.90b  | **Warning cleanup: the library compiles clean under `-Wall -Wextra -Werror`, |
 |         | and `library.json` now enforces it for every PlatformIO build of the library.** |
 |         | Prompted by the ESP-IDF port of motherBoard (IncuNest branch                 |
