@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.88 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.90b — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -335,8 +335,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _ppgdisp_channel(AFE4490Channel::LED1),
       _ppgdisp_bpf(),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
-      _hr1_dc_alpha(0.0f),
       _spo2_warmup_samples(0), _hr1_refractory_samples(0),
+      _hr1_dc_alpha(0.0f),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
       _spo2_a(spo2_a_default), _spo2_b(spo2_b_default),
@@ -1392,8 +1392,7 @@ AFE4490AnalogState INCUNEST_AFE4490::_compute_analog_state(
 // Raw Signal Quality Monitor — runs once per sample at 500 Hz.
 // Updates EMA estimators, classifies ProbeState, computes DiagCode and RSQI.
 // Called at the top of _process_sample() after _compute_analog_state().
-void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                                     int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
+void INCUNEST_AFE4490::_rsqm_update(int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as) {
     // ── Probe state detection ──────────────────────────────────────────────────
     // PROBE_DISCONNECTED: instantaneous criterion — all four i_pd below threshold AND
     // |led1_sub|/|led2_sub| near zero on both channels.  When cable is disconnected,
@@ -1471,7 +1470,9 @@ void INCUNEST_AFE4490::_rsqm_update(int32_t led1, int32_t led2, int32_t aled1, i
     // RSQM_DIAG_SWITCHED_RC_SETTLING: set externally by HGAC or config change; counts down to 0
     if (_switched_rc_settling_countdown > 0) {
         diag |= RSQM_DIAG_SWITCHED_RC_SETTLING;
-        --_switched_rc_settling_countdown;
+        // `x = x - 1`, not `--`: compound assignment on a volatile is deprecated in C++20
+        // (-Wvolatile). Same non-atomic read-modify-write as before.
+        _switched_rc_settling_countdown = _switched_rc_settling_countdown - 1;
     }
 
     // ── Merge RSQM flags into _diag_code (bits 13+), preserving AFE DIAG bits (0-12) ──
@@ -2013,7 +2014,7 @@ void INCUNEST_AFE4490::_task_body() {
             // _switched_rc_settling_countdown is decremented inside _process_sample() (_rsqm_update()),
             // unconditionally, whether fed frozen or fresh inputs — no separate decrement needed
             // here, unlike _diag_holdoff_samples (which only exists in this loop).
-            if (_diag_holdoff_samples > 0) --_diag_holdoff_samples;
+            if (_diag_holdoff_samples > 0) _diag_holdoff_samples = _diag_holdoff_samples - 1;  // not `--`: volatile, C++20
             xSemaphoreTake(_state_mutex, portMAX_DELAY);
             _process_sample(_last_valid_led1, _last_valid_led2,
                             _last_valid_aled1, _last_valid_aled2,
@@ -2107,7 +2108,7 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     }
 
     // RSQM runs next — computes probe state, DiagCode, RSQI for this sample
-    _rsqm_update(led1, led2, aled1, aled2, led1_sub, led2_sub, as);
+    _rsqm_update(led1_sub, led2_sub, as);
 
     // HGAC runs next — Phase 1: RF-only saturation guard + descent (see incunest_afe4490_spec.md §5.8)
     _hgac_update(as);

@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.88 — ESP32-S3, Arduino + FreeRTOS
+// Library version: v0.90b — ESP32-S3, Arduino + FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.90"
+#define INCUNEST_AFE4490_VERSION "0.90b"
 
 #ifdef INCUNEST_OFFLINE
   #ifndef UNIT_TEST
@@ -1131,8 +1131,10 @@ private:
                                              int32_t aled1, int32_t aled2) const;
 
     // RSQM — runs after _compute_analog_state(); fills rsqi, diag_code, probe_state
-    void _rsqm_update(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2,
-                      int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as);
+    // The raw LED/ALED values are no longer parameters (v0.90b): everything RSQM needs from
+    // them arrives pre-digested in `as` (OT, saturation masks, i_pd); they had been unused
+    // since v0.35.
+    void _rsqm_update(int32_t led1_sub, int32_t led2_sub, const AFE4490AnalogState& as);
     void _rsqm_request_probe_state(ProbeState requested); // debounce gate: commits state only after _rsqm_probe_state_min_samples consecutive requests
 
     // HGAC — runs after _rsqm_update(); RF-only, two EMA per gain domain (see spec §5.8).

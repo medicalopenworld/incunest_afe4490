@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.90
+# incunest_afe4490 — Specification v0.90b
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -2742,6 +2742,27 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.90b  | **Warning cleanup: the library compiles clean under `-Wall -Wextra -Werror`, |
+|         | and `library.json` now enforces it for every PlatformIO build of the library.** |
+|         | Prompted by the ESP-IDF port of motherBoard (IncuNest branch                 |
+|         | `refactor/idf-native-port`), whose vendored copy of v0.81 silences seven      |
+|         | `-Wno-error=` classes. Reproduced on xtensa GCC 8.4 (Arduino) and host GCC 15 |
+|         | (C++17 and C++20): only **three** were ours. (1) `-Wreorder`: the constructor |
+|         | initialised `_hr1_dc_alpha` before `_spo2_warmup_samples`, against            |
+|         | declaration order — list reordered; no dependency between the members.        |
+|         | (2) `-Wvolatile` ×2: `--` on the volatile countdowns                            |
+|         | `_switched_rc_settling_countdown` and `_diag_holdoff_samples`, deprecated in   |
+|         | C++20 — rewritten as `x = x - 1`, the same non-atomic read-modify-write.       |
+|         | (3) `-Wunused-parameter` ×4: `_rsqm_update()` still took the raw LED/ALED      |
+|         | values it stopped reading in v0.35 (everything arrives via `AFE4490AnalogState`)|
+|         | — removed from the private signature and its single call site.               |
+|         | The other four (`missing-field-initializers`, `unused-variable`,               |
+|         | `format-truncation`, `deprecated`) do not reproduce on either compiler and have|
+|         | no candidate in the code (the only `snprintf`s live under                     |
+|         | `INCUNEST_TIMING_STATS`, off in motherBoard; aggregates use `{}`; no          |
+|         | deprecated IDF API): the same list is applied verbatim to every vendored       |
+|         | component of that port. **No behavioural change.** Also re-syncs the four     |
+|         | file headers that still read v0.88.                                            |
 | v0.90   | **ProbeState renamed and split; `isProbeAbsent()`.** `PROBE_SATURATING` → |
 |         | `PROBE_AMB_SATURATING`: the old name suggested "any saturation", but since |
 |         | v0.61 LED-only saturation never came here — engineers (and this spec's     |
