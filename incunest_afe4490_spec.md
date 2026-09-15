@@ -2269,7 +2269,7 @@ This three-way relationship (spec → firmware, spec → Python mirror, firmware
 
 The `TIMING` window in `pulsenest_lab.py` displays per-algorithm CPU execution times measured in firmware, parsed from `$TIMING` diagnostic frames.
 
-**Compile-time flag:** `INCUNEST_TIMING_STATS` (default 0). Set to 1 via `platformio.ini` `build_flags` to enable. When 0, all instrumentation code is compiled out with zero overhead.
+**Compile-time flag:** `INCUNEST_TIMING_STATS` (default 0). Set to 1 by the consumer's build — PulseNest: `idf_build_set_property(COMPILE_DEFINITIONS "INCUNEST_TIMING_STATS=1" APPEND)` in its root `CMakeLists.txt` (project-wide, the library compiles it in); a PlatformIO consumer would use `build_flags`. When 0, all instrumentation code is compiled out with zero overhead.
 
 **Frame format:**
 ```
