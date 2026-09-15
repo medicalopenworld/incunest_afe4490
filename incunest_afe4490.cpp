@@ -61,9 +61,20 @@ namespace {
     // ── HR1 ───────────────────────────────────────────────────────────────────
     constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
     constexpr float    hr1_lp_cutoff_hz    = 5.0f;     // Hz — low-pass cutoff before peak detection
-    // s — running-max decay. 20 s reproduces the historical 0.9999 per-sample factor at 500 Hz
-    // exactly (exp(-1/(20*500)) = 0.9999), so behaviour at the default rate is unchanged.
-    constexpr float    hr1_max_decay_tau_s = 20.0f;
+    // s — running-max decay: how long an old peak keeps holding the detection threshold up.
+    // MEASURED (v0.93). The former 20 s was not a choice: it is the historical 0.9999
+    // per-sample factor expressed in seconds at 500 Hz (exp(-1/(20*500)) = 0.9999). At 20 s the
+    // threshold still reflects a peak from several seconds ago, so a beat whose amplitude has
+    // since fallen — the pulse amplitude of a real subject swings far more than the textbook
+    // 10-20 % respiratory modulation — does not reach it and is lost; one lost beat then sits in
+    // the 5-interval RR buffer for five beats, and hr1_sqi is 0 for all of them (5.8 s at
+    // 52 bpm, observed on the bench 2026-09-15 on two of three boards).
+    // 1.5 s is the largest value that keeps the whole 40-250 bpm range: the perturbed MS100
+    // sweep (2026-09-08) shows a flat optimum from 1 to 3 s (76-78 % worst case vs 53 % at 20 s)
+    // that collapses at 0.5 s (49 % at 60 bpm — the threshold falls so far between beats that
+    // the dicrotic notch is counted), and the three-board probe capture (2026-09-15) confirms it
+    // on a real subject: every lost beat recovered, no extra detection.
+    constexpr float    hr1_max_decay_tau_s = 1.5f;
     // SQI: CV = std/mean of the 5 most recent RR intervals.
     // CV=0 (perfectly regular) → SQI=1. CV ≥ hr1_sqi_cv_max → SQI=0.
     // Detection threshold, as a FRACTION of the decaying running max. Was a bare 0.6f literal

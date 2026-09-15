@@ -1,5 +1,5 @@
 // incunest_afe4490_hal.h — platform contract of the incunest_afe4490 library
-// Library version: v0.91 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.93 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md §1.4 "Hardware abstraction layer"
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //

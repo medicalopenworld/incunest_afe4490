@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.92
+# incunest_afe4490 — Specification v0.93
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -979,7 +979,14 @@ fresh RR intervals before reporting again, same as any cold start.
 **Processing chain:**
 1. **DC removal:** IIR low-pass filter (τ = 1.6 s) estimates DC; subtracted from raw signal. Signal is negated for conventional PPG polarity (peaks up).
 2. **Low-pass filter:** moving average with cutoff ~5 Hz (`len = fs / (2 × 5)`; at 500 Hz → 50 samples). Capped at 64 samples max.
-3. **Running maximum:** exponential decay tracker (`× 0.9999` per sample) keeps amplitude reference current.
+3. **Running maximum:** amplitude reference, decayed exponentially with time constant
+   `hr1_max_decay_tau_s` (**1.5 s** since v0.93; per-sample factor `exp(-1/(tau × fs))`, derived
+   from the rate so it means the same at every PRF). It is the RECOVERY parameter of the detector:
+   after a step drop in amplitude to a fraction *g* of the previous peak, detection resumes only
+   after `tau × ln(hr1_threshold_fraction / g)` — 1.0 s at tau = 1.5 s for a halved beat, against
+   13.9 s at the former 20 s. Too long blinds the detector after any amplitude change; too short
+   lets the threshold collapse between beats and the dicrotic notch is counted. See §10.4 for the
+   measurements behind 1.5 s.
 4. **Threshold crossing:** rising edge detected when signal crosses `0.6 × running_max`. A
    **refractory period** — a blind window after each accepted beat, during which further
    crossings are ignored, named after the cardiac refractory period — prevents double-detection,
@@ -1011,6 +1018,7 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_dc_tau_s` | 1.6 s | IIR DC removal time constant |
 | `hr1_ma_cutoff_hz` | 5 Hz | Moving average low-pass cutoff |
 | `hr1_ma_max_len` | 64 samples | Max moving average length |
+| `hr1_max_decay_tau_s` | 1.5 s | Running-max decay time constant. **Measured, v0.93** (was 20 s, the inherited `0.9999` per-sample literal). Governs recovery after an amplitude change, not detection margin — see §5.2 step 3 and §10.4 |
 | `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit). A fixed value cannot protect bradycardia — see the rationale §5.3 |
 | `hr1_threshold_fraction` | 0.6 | Detection threshold as a fraction of the decaying running max. **The single parameter that most determines whether a beat is counted.** Lower → more sensitive, risks counting the dicrotic notch; higher → misses weak beats. A bare literal until v0.88 |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
@@ -2538,10 +2546,35 @@ See §5.2 for algorithm description.
 | DC removal time constant | `hr1_dc_tau_s` | 1.6 s | Baseline tracking speed |
 | Low-pass MA cutoff | `hr1_ma_cutoff_hz` | 5 Hz | Noise smoothing before peak detection; affects peak sharpness |
 | Max MA length | `hr1_ma_max_len` | 64 samples | Prevents excessively long moving average at low heart rates |
+| Running-max decay | `hr1_max_decay_tau_s` | 1.5 s | How long an old peak keeps the threshold up. **Recovery**, not detection margin: that is `hr1_threshold_fraction`'s job |
 | Peak threshold fraction | 0.6 | 0.6 × running_max | Trade-off: higher → misses low-amplitude peaks; lower → false detections on noise |
 | Refractory period | `hr1_refractory_s` | 0.185 s | Minimum interval between detected peaks; practical upper HR limit ~324 BPM |
 | RR interval buffer length | 5 intervals | 5 | Number of consecutive intervals averaged for HR1 output |
 | SQI CV threshold | `hr1_sqi_cv_max` | 0.15 (15 %) | CV above this → SQI = 0 (arrhythmia / motion artefact) |
+
+**Where `hr1_max_decay_tau_s` = 1.5 s comes from (v0.93).** Until v0.93 the value was 20 s, which
+was never chosen: it is the historical `× 0.9999` per-sample factor written in seconds at 500 Hz.
+Two independent measurements set it, both on material where the truth is known:
+
+- **Perturbed simulator sweep, 2026-09-08** (five MS100 recordings at 60/140/180/220/250 bpm with
+  the probe squeezed at 20/30/40/50 s; `tools/hr1_probepert_sweep.py` in PulseNest). Metric:
+  share of samples with `hr1_sqi > 0` **and** |HR − truth| ≤ 3 bpm, so a detector that recovers
+  availability by inventing beats scores as the failure it is. τ = 20 s scores 53 % at
+  220–250 bpm; τ = 1–3 s is a flat optimum (76–78 % worst case, 84 % at 220–250); τ = 0.5 s
+  collapses at 60 bpm (49 %) because the threshold falls to ~8 % of the peak between beats and
+  the dicrotic notch is counted. `hr1_threshold_fraction` = 0.6 survives the same sweep.
+- **Three-board probe capture, 2026-09-15** (30 s, same subject at ~52 bpm on three boards, clean
+  signal: `PROBE_APPLIED`, DiagCode 0, RSQI 1). `hr1_sqi` fell to 0 for one ~5.8 s run on two of
+  the three boards while HR2 and HR3 kept publishing. Cause, reproduced off the capture by
+  `tools/hr1_streak_forensics.py`: a single beat missed (amplitude 56 % of the previous one,
+  reaching 85 % of a threshold still held up by a peak 4.5 s old), whose doubled RR interval then
+  occupies the 5-interval buffer for five beats. The boards' beat-to-beat amplitude CV was 37 %
+  and 43 % on the two that failed against 23 % on the one that did not — the modulation that a
+  20 s memory cannot follow. At τ = 1.5 s every missed beat is recovered on all three boards with
+  no extra detection.
+
+The selection rule is the conservative one: **the largest τ that holds across 40–250 bpm**, not the
+peak of the metric — a longer memory is a steadier threshold and less room to invent beats.
 
 ---
 
@@ -2844,6 +2877,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.93   | **`hr1_max_decay_tau_s` 20 s → 1.5 s — the first measured value this          |
+|         | parameter has ever had (§10.4).** The 20 s was the inherited `0.9999`         |
+|         | per-sample literal written in seconds at 500 Hz, and v0.87 said as much.      |
+|         | A threshold held up by a peak seconds old loses any beat whose amplitude has  |
+|         | since fallen, and **one lost beat costs five**: its doubled RR interval sits  |
+|         | in the 5-interval buffer until it is pushed out, so `hr1_sqi` is 0 for five   |
+|         | beats — 5.8 s at 52 bpm, which is exactly what the bench showed on 2026-09-15 |
+|         | on two of three boards while HR2/HR3 never flinched. Note what did NOT fail:  |
+|         | the SQI. Averaging that buffer gives 43 bpm, and publishing it would have     |
+|         | been a false bradycardia — the alarm this monitor exists to raise. The gate   |
+|         | was right; the detector fed it a bad interval. Evidence: the perturbed MS100  |
+|         | sweep (flat optimum 1–3 s, collapse at 0.5 s) and the three-board probe       |
+|         | capture (every missed beat recovered, zero extra detections). No API or       |
+|         | format change: `setHR1MaxDecayTauS()` already existed and the value is a      |
+|         | default. Mirrored in PulseNest's `HR1Variant.FW_MAX_DECAY_TAU_S`.             |
 | v0.92   | **`$TIMING` gains `spi_mean,spi_max` (appended last) and the HAL gains a console   |
 |         | tee.** `_ts_spi` times the six 4-byte SPI frames of one sample on their own — the |
 |         | measurement the ESP-IDF port of PulseNest exists to make (Arduino 4 ×            |
