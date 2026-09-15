@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.91
+# incunest_afe4490 — Specification v0.92
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -92,7 +92,8 @@ names on both but not the same implementation (see below).
 | `gpio_detach_isr(pin)` | `detachInterrupt` | `gpio_intr_disable` + `gpio_isr_handler_remove` | no-op |
 | `spi_attach() → bool` / `spi_detach()` | no-op — the bus is the app's `SPI` | `spi_bus_add_device` (2 MHz, mode 0, `spics_io_num = -1`, queue 1) / remove | `true` / no-op |
 | `spi_transfer(cs, tx, rx, n)` | `beginTransaction(2 MHz, MSB, MODE0)`, CS low, **n × `SPI.transfer(uint8_t)`**, CS high, `endTransaction` | `acquire_bus`, CS low, **one `spi_device_polling_transmit`** (TXDATA/RXDATA for n ≤ 4), CS high, `release_bus` | zero-fills `rx` |
-| `console_printf(fmt, …)` | `vsnprintf` + `Serial.write` | `vprintf` (UART0 via VFS) | `vprintf` |
+| `console_printf(fmt, …)` | `vsnprintf` + `Serial.write` | `vsnprintf` + `fwrite(stdout)` (UART0 via VFS) | `vsnprintf` + `fwrite(stdout)` |
+| `console_set_sink(sink)` (v0.92) | stores the pointer; every `console_printf` line is also handed to it, NUL-terminated, on the calling task (the 500 Hz task) — the sink must only queue. PulseNest forwards to UDP; motherBoard sets none | same | same |
 
 Rules the contract encodes:
 
@@ -2273,12 +2274,17 @@ The `TIMING` window in `pulsenest_lab.py` displays per-algorithm CPU execution t
 **Frame format:**
 ```
 $TIMING,hr1_mean,hr1_max,hr2_mean,hr2_max,hr3_mean,hr3_max,
-        spo2_mean,spo2_max,cycle_mean,cycle_max,stack_free*XX
+        spo2_mean,spo2_max,cycle_mean,cycle_max,
+        hr2cmp_mean,hr2cmp_max,hr3cmp_mean,hr3cmp_max,stack_free,
+        spi_mean,spi_max*XX
 ```
+The last pair (`spi_*`) was appended in v0.92, after `stack_free`, so a parser written for the
+15-value frame keeps working.
 - All time values in **µs** (measured with `esp_timer_get_time()`, resolution 1 µs)
 - `stack_free`: remaining stack of the incunest_afe4490 FreeRTOS task in 4-byte words (`uxTaskGetStackHighWaterMark`)
 - Checksum: XOR of all bytes between `$` and `*` (NMEA style)
-- Emitted every `ts_emit_interval = 2500` samples (~5 s at 500 Hz); stats reset after each emission
+- Emitted every `ts_emit_period_s = 5 s` (`_ts_emit_interval` = round(5 × fs) samples, v0.87); stats reset after each emission
+- Written with `hal_console_printf()` to the console; since v0.92 also handed to the optional HAL console sink (§1.4) — PulseNest puts it on the UDP data stream
 
 **Timing scope:**
 
@@ -2289,6 +2295,9 @@ $TIMING,hr1_mean,hr1_max,hr2_mean,hr2_max,hr3_mean,hr3_max,
 | `hr3_mean/max` | `_hr3_update_sample()` execution time (fast path: LP filter + decimate + buffer; FFT+HPS itself is timed separately by `hr3_compute_mean/max`, Task C) |
 | `spo2_mean/max` | `_spo2_update()` execution time |
 | `cycle_mean/max` | Full sample cycle: SPI burst-read (4 channels) + SW subtraction + `_process_sample()` |
+| `hr2cmp_mean/max` | `_hr2_compute()` (autocorrelation, Task B) |
+| `hr3cmp_mean/max` | `_hr3_compute()` (FFT + HPS, Task C) |
+| `spi_mean/max` | **v0.92** — the six 4-byte SPI frames that read one sample (2 `CONTROL0` writes + 4 register reads), from the first `_write_reg` to the last, mutex excluded. The HAL's bus cost on its own: Arduino = 4 × `SPI.transfer(uint8_t)` per frame, ESP-IDF = one polling transmit per frame |
 
 **Budget:** cycle budget = 2000 µs (1 sample period at 500 Hz).
 - `cycle_max < 1800 µs` → green (safe, 10% margin)
@@ -2296,7 +2305,7 @@ $TIMING,hr1_mean,hr1_max,hr2_mean,hr2_max,hr3_mean,hr3_max,
 - `cycle_max > 2000 µs` → red (over budget, risk of missed samples)
 
 **Implementation notes:**
-- Individual algo timers are in `_process_sample()`; cycle timer is in `_task_body()`
+- Individual algo timers are in `_process_sample()`; cycle and SPI timers are in `_task_body()`
 - `_emit_timing()` is a private method; formats and sends the frame, then resets all `TimingStat` accumulators
 - `TimingStat` struct (fields: `max_us`, `sum_us`, `count`) lives in the private section of `INCUNEST_AFE4490`, guarded by `#if INCUNEST_TIMING_STATS`
 
@@ -2835,6 +2844,16 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.92   | **`$TIMING` gains `spi_mean,spi_max` (appended last) and the HAL gains a console   |
+|         | tee.** `_ts_spi` times the six 4-byte SPI frames of one sample on their own — the |
+|         | measurement the ESP-IDF port of PulseNest exists to make (Arduino 4 ×            |
+|         | `SPI.transfer(uint8_t)` per frame vs one polling transmit under IDF). `hal_console_ |
+|         | set_sink()`: every `hal_console_printf` line is also handed to an app sink,     |
+|         | NUL-terminated, on the calling task (must only queue) — PulseNest forwards       |
+|         | `$TIMING`/`$TASK` to its UDP data queue, so the ESP32 TIMING window needs no UART. |
+|         | The idf and host `console_printf` now format into a buffer (`fwrite`) like the   |
+|         | Arduino one. motherBoard: no behaviour change (`INCUNEST_TIMING_STATS` off, no    |
+|         | sink).                                                                           |
 | v0.91   | **Hardware abstraction layer (§1.4): the library builds unchanged on            |
 |         | Arduino-ESP32, ESP-IDF (as a CMake component) and the host.** Phase 0 of the     |
 |         | ESP-IDF port of IncuNest. Measured first: only `<Arduino.h>`/`<SPI.h>` differed  |

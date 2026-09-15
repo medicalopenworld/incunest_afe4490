@@ -129,8 +129,18 @@ void incunest_afe4490_hal_spi_transfer(int cs_pin, const uint8_t* tx, uint8_t* r
 // must start with '$' and end with "*XX\r\n" and nothing else — so this must NOT go through
 // ESP_LOGx, which prepends "I (ms) tag:" and appends its own newline (the mistake the vendored
 // copy in IncuNest made).
-//   arduino: Serial.printf      idf: vprintf (stdout is UART0 through the VFS)      host: vprintf
+//   arduino: vsnprintf + Serial.write      idf: vsnprintf + fwrite(stdout) (UART0 through the VFS)
+//   host: vsnprintf + fwrite(stdout)       all three: the formatted line is also handed to the sink below
 void incunest_afe4490_hal_console_printf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// Optional tee for those console lines (v0.92). Once a sink is set, every line console_printf()
+// writes is ALSO passed to it, complete and NUL-terminated (len excludes the NUL), on the calling
+// task — the library's 500 Hz acquisition task. So the sink must only queue, never block or send:
+// PulseNest drops the line into its UDP data queue so the ESP32 TIMING window works with no UART
+// attached; motherBoard sets none. nullptr clears it. Not thread-safe against a concurrent
+// console_printf(): set it before begin().
+typedef void (*incunest_afe4490_hal_console_sink_t)(const char* line, size_t len);
+void incunest_afe4490_hal_console_set_sink(incunest_afe4490_hal_console_sink_t sink);
 
 // ── ESP-IDF SPI host selection (idf implementation only) ─────────────────────────────────────
 // Which SPI peripheral the AFE4490 hangs on. Only the _idf implementation reads it; Arduino

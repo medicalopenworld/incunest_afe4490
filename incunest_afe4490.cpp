@@ -1929,6 +1929,9 @@ void INCUNEST_AFE4490::_task_body() {
         // Removed reads (kept for reference):
         //   int32_t led2_diff = _sign_extend_22(_read_spi_raw(REG_LED2_ALED2VAL));  // 22-bit overflow risk
         //   int32_t led1_diff = _sign_extend_22(_read_spi_raw(REG_LED1_ALED1VAL));  // 22-bit overflow risk
+#if INCUNEST_TIMING_STATS
+        uint64_t _t_spi = esp_timer_get_time();
+#endif
         _write_reg(REG_CONTROL0, ctrl0_spi_read);
         int32_t led2      = _sign_extend_22(_read_spi_raw(REG_LED2VAL));
         int32_t aled2     = _sign_extend_22(_read_spi_raw(REG_ALED2VAL));
@@ -1937,6 +1940,9 @@ void INCUNEST_AFE4490::_task_body() {
         int32_t led2_diff = led2 - aled2;  // SW subtraction in int32_t — no overflow
         int32_t led1_diff = led1 - aled1;  // SW subtraction in int32_t — no overflow
         _write_reg(REG_CONTROL0, 0x000000UL);
+#if INCUNEST_TIMING_STATS
+        _ts_spi.update(esp_timer_get_time() - _t_spi);   // the six frames, nothing else
+#endif
         xSemaphoreGive(_spi_mutex);
 
         // Save raw values for use during any subsequent diagnostic holdoff.
@@ -2089,15 +2095,18 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 // and remaining task stack (words). Called every _ts_emit_interval samples (ts_emit_period_s).
 // Frame: $TIMING,hr1_mean,hr1_max,hr2fp_mean,hr2fp_max,hr3fp_mean,hr3fp_max,
 //                spo2_mean,spo2_max,cycle_mean,cycle_max,
-//                hr2cmp_mean,hr2cmp_max,hr3cmp_mean,hr3cmp_max,stack_free*XX
+//                hr2cmp_mean,hr2cmp_max,hr3cmp_mean,hr3cmp_max,stack_free,
+//                spi_mean,spi_max*XX
 // Task A fast-path (first 10 values): budget reference = 2000 µs (1/500 Hz).
 // Task B/C compute (values 11-14): CPU load % = mean / 500000 µs (0.5 s period).
+// SPI (values 16-17, v0.92): the six 4-byte frames of one sample — appended LAST so a parser
+// written for the 15-value frame keeps working.
 #if INCUNEST_TIMING_STATS
 void INCUNEST_AFE4490::_emit_timing() {
     UBaseType_t stack_free = uxTaskGetStackHighWaterMark(nullptr);
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
-        "TIMING,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u",
+        "TIMING,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u,%llu,%llu",
         (unsigned long long)_ts_hr1.mean_us(),          (unsigned long long)_ts_hr1.max_us,
         (unsigned long long)_ts_hr2.mean_us(),          (unsigned long long)_ts_hr2.max_us,
         (unsigned long long)_ts_hr3.mean_us(),          (unsigned long long)_ts_hr3.max_us,
@@ -2105,13 +2114,14 @@ void INCUNEST_AFE4490::_emit_timing() {
         (unsigned long long)_ts_cycle.mean_us(),        (unsigned long long)_ts_cycle.max_us,
         (unsigned long long)_ts_hr2_compute.mean_us(),  (unsigned long long)_ts_hr2_compute.max_us,
         (unsigned long long)_ts_hr3_compute.mean_us(),  (unsigned long long)_ts_hr3_compute.max_us,
-        (unsigned)stack_free);
+        (unsigned)stack_free,
+        (unsigned long long)_ts_spi.mean_us(),          (unsigned long long)_ts_spi.max_us);
     uint8_t chk = 0;
     for (int i = 0; i < n; i++) chk ^= (uint8_t)buf[i];
     incunest_afe4490_hal_console_printf("$%s*%02X\r\n", buf, chk);
     // Emit task CPU stats BEFORE resetting accumulators (needs sum_us values)
     _emit_tasks();
-    _ts_spo2.reset(); _ts_hr1.reset(); _ts_hr2.reset(); _ts_hr3.reset(); _ts_cycle.reset();
+    _ts_spo2.reset(); _ts_hr1.reset(); _ts_hr2.reset(); _ts_hr3.reset(); _ts_cycle.reset(); _ts_spi.reset();
     _ts_hr2_compute.reset(); _ts_hr3_compute.reset();
 }
 

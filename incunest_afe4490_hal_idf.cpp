@@ -166,13 +166,25 @@ void incunest_afe4490_hal_spi_transfer(int cs_pin, const uint8_t* tx, uint8_t* r
 
 // ── Console ──────────────────────────────────────────────────────────────────────────────────
 
+static incunest_afe4490_hal_console_sink_t s_console_sink = nullptr;
+
+void incunest_afe4490_hal_console_set_sink(incunest_afe4490_hal_console_sink_t sink) {
+    s_console_sink = sink;
+}
+
 void incunest_afe4490_hal_console_printf(const char* fmt, ...) {
     // Raw stdout (UART0 through the VFS): the $TIMING/$TASKS lines are a checksummed protocol
     // and must not pick up ESP_LOG's prefix or trailing newline.
+    // Formatted into a buffer first so the optional sink gets the same complete line as the console.
+    char buf[320];
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    if (n <= 0) return;
+    const size_t len = (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1;
+    fwrite(buf, 1, len, stdout);
+    if (s_console_sink) s_console_sink(buf, len);   // tee (v0.92): PulseNest forwards it to UDP
 }
 
 #endif  // defined(ESP_PLATFORM) && !defined(ARDUINO)

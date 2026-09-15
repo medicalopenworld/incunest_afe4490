@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.91"
+#define INCUNEST_AFE4490_VERSION "0.92"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1252,6 +1252,11 @@ private:
     };
     TimingStat _ts_spo2, _ts_hr1, _ts_hr2, _ts_hr3, _ts_cycle;  // Task A fast-path timings
     TimingStat _ts_hr2_compute, _ts_hr3_compute;                 // Task B/C slow-path timings
+    // The six 4-byte SPI frames that read one sample (2 CONTROL0 writes + 4 register reads):
+    // the HAL's bus cost on its own, separated from the algorithms (v0.92). Under Arduino the
+    // frame is 4 × SPI.transfer(uint8_t); under ESP-IDF one polling transmit — this is the number
+    // that says which.
+    TimingStat _ts_spi;
     // Note: uxTaskGetStackHighWaterMark() returns bytes on ESP32 (portSTACK_TYPE = uint8_t)
     uint32_t   _ts_emit_counter = 0;
     // Emission period in SECONDS, converted per rate in _recalc_rate_params(). Was a fixed

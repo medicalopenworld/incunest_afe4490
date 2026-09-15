@@ -72,6 +72,12 @@ void incunest_afe4490_hal_spi_transfer(int cs_pin, const uint8_t* tx, uint8_t* r
 
 // ── Console ──────────────────────────────────────────────────────────────────────────────────
 
+static incunest_afe4490_hal_console_sink_t s_console_sink = nullptr;
+
+void incunest_afe4490_hal_console_set_sink(incunest_afe4490_hal_console_sink_t sink) {
+    s_console_sink = sink;
+}
+
 void incunest_afe4490_hal_console_printf(const char* fmt, ...) {
     // Serial.printf() cannot take a va_list; format here and write the bytes. The only caller
     // emits one $TIMING/$TASKS line (≤ 256-byte payload + "$", "*XX\r\n"), well inside the buffer.
@@ -83,6 +89,7 @@ void incunest_afe4490_hal_console_printf(const char* fmt, ...) {
     if (n <= 0) return;
     const size_t len = (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1;
     Serial.write(reinterpret_cast<const uint8_t*>(buf), len);
+    if (s_console_sink) s_console_sink(buf, len);   // tee (v0.92): PulseNest forwards it to UDP
 }
 
 #endif  // defined(ARDUINO)
