@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.93
+# incunest_afe4490 — Specification v0.94
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1768,6 +1768,19 @@ which take `_spi_mutex` internally; nesting `_spi_mutex` inside the caller's `_s
 (no path takes `_spi_mutex` first then blocks on `_state_mutex`). **Contract:** the `_hgac_*`
 actuation primitives are only ever called from `_hgac_update()`.
 
+**Announcing the move (v0.94).** HGAC is the only thing that changes an AFE register without
+the host asking, so until v0.94 a host recording the stream had no way to know RF had moved
+except by reading `RF1,RF2` off every `$M4` row. `_hgac_change_rf()` now stamps
+`_hgac_rf_change_ts_us = esp_timer_get_time()` and then increments `_hgac_rf_change_count`;
+`hgacRfChangeCount(uint64_t* last_ts_us)` returns both. The library deliberately does **not**
+emit anything itself: it runs in the measurement task, and PulseNest's rule since fw 0.13 is
+that no measurement task calls the network — the consumer's command task polls the count and
+sends whatever frame it likes (PulseNest fw 0.15: a `$CFG` with `cause=hgac`). The getter is
+lock-free: the timestamp is written before the count, and read between two reads of the count
+that must agree, so a reader never gets a torn 64-bit timestamp or a count ahead of its
+timestamp. Manual `setTIAGainLED1/2()` calls are not counted — a `$SET` already answers with its
+own `$CFG`, and counting it twice would tell the host a move happened that it itself made.
+
 #### 5.8.5 Parameters (see §10.9) and telemetry
 
 `AFE4490Config` fields: `hgac_enable`, `hgac_v_tia_high2`, `hgac_v_tia_high1`, `hgac_v_tia_low1`,
@@ -2877,6 +2890,13 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.94   | **HGAC announces its RF moves to the host (§5.8.4).** `_hgac_change_rf()` stamps    |
+|         | `_hgac_rf_change_ts_us` (esp_timer, the row clock) then increments               |
+|         | `_hgac_rf_change_count`; new lock-free getter `hgacRfChangeCount(uint64_t*)`.      |
+|         | The library emits nothing (measurement task never calls the network); the         |
+|         | consumer's command task polls it. Prerequisite 6 of PulseNest's                   |
+|         | `capture_csv_format_spec.md` (R21a: RF as a change-event, not a column).          |
+|         | test_hgac: `test_hgac_rf_change_is_counted_and_stamped`.                          |
 | v0.93   | **`hr1_max_decay_tau_s` 20 s → 1.5 s — the first measured value this          |
 |         | parameter has ever had (§10.4).** The 20 s was the inherited `0.9999`         |
 |         | per-sample literal written in seconds at 500 Hz, and v0.87 said as much.      |

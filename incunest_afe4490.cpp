@@ -366,6 +366,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr_max_bpm(hr_max_bpm),
       _rsqm_probe_state(ProbeState::PROBE_DISCONNECTED),
       _switched_rc_settling_countdown(0),
+      _hgac_rf_change_count(0), _hgac_rf_change_ts_us(0),
       _debug_enabled(false)
 {
     // Quantize initial LED currents to the DAC grid (range already set in init list)
@@ -1437,6 +1438,23 @@ void INCUNEST_AFE4490::_hgac_change_rf(HgacColor color, AFE4490RF new_rf) {
     }
     // HW_SETTLING is now armed by setTIAGainLED1/2() itself (v0.74) — any RF change gets the
     // same protection, HGAC-driven or manual ($SET). No separate arm needed here.
+
+    // Tell the host (v0.94). Timestamp first, count second: a reader that sees count N therefore
+    // sees a timestamp at least as new as move N (hgacRfChangeCount() re-reads the count around it).
+    _hgac_rf_change_ts_us = (uint64_t)esp_timer_get_time();
+    _hgac_rf_change_count = _hgac_rf_change_count + 1;   // not ++: volatile, C++20
+}
+
+uint32_t INCUNEST_AFE4490::hgacRfChangeCount(uint64_t* last_ts_us) const {
+    for (;;) {
+        const uint32_t c1 = _hgac_rf_change_count;
+        const uint64_t ts = _hgac_rf_change_ts_us;   // two 32-bit loads on this core: may tear
+        const uint32_t c2 = _hgac_rf_change_count;
+        if (c1 == c2) {                              // no move landed between the two reads
+            if (last_ts_us) *last_ts_us = ts;
+            return c2;
+        }
+    }
 }
 
 // One gain domain (color) — pure actuation. fast EMA drives the HIGH2 guard (urgent, integrates

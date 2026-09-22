@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.93"
+#define INCUNEST_AFE4490_VERSION "0.94"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -824,6 +824,15 @@ public:
     void setHgacEmaSlowTauS(float s);               // s — leveling EMA time constant; triggers recalc
     void setHgacEmaAmbientTauS(float s);            // s — ambient EMA time constant; triggers recalc
 
+    // HGAC telemetry for the host (v0.94): how many RF moves HGAC has applied since construction
+    // and when the last one happened -- esp_timer_get_time() at the point of the change, the same
+    // clock that stamps every $M1-$M4 row, so a host can place the move on the exact sample.
+    // Manual setTIAGainLED1/2() calls are NOT counted: a $SET already produces its own $CFG.
+    // Lock-free on purpose -- written from _process_sample() (the measurement task, which never
+    // touches the network), read from whichever task is allowed to talk; the count is re-read
+    // around the 64-bit timestamp so a torn read is never returned (§5.8.4).
+    uint32_t hgacRfChangeCount(uint64_t* last_ts_us = nullptr) const;
+
     /**
      * @brief Retrieves the next available sample from the internal queue (non-blocking).
      *
@@ -1516,6 +1525,8 @@ private:
     EmaChannel _hgac_ema_fast_led1, _hgac_ema_fast_led2;         // IR / RED guard estimators (v_tia_led)
     EmaChannel _hgac_ema_slow_led1, _hgac_ema_slow_led2;         // IR / RED leveling estimators (v_tia_led)
     EmaChannel _hgac_ema_ambient_led1, _hgac_ema_ambient_led2;   // IR / RED ambient estimators (v_tia_aled)
+    volatile uint32_t _hgac_rf_change_count;   // RF moves applied by HGAC (hgacRfChangeCount())
+    volatile uint64_t _hgac_rf_change_ts_us;   // esp_timer_get_time() at the last one; written BEFORE the count
 
     bool             _debug_enabled; // set by begin(debug=true); enables combined queue items
     // ── Output snapshot (written by task, pushed to queue) ──
