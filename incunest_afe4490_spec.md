@@ -2346,22 +2346,43 @@ The last pair (`spi_*`) was appended in v0.92, after `stack_free`, so a parser w
 
 A native C++ command-line tool that runs the incunest_afe4490 algorithms (HR1, HR2, HR3, SpO2) on CSV files received from real Incunest incubators, without any hardware. Used to calibrate and improve the Incunest firmware using real neonatal PPG data.
 
-### 9.2 Input CSV format
+### 9.2 Input CSV format (runner v0.20, 2026-09-24)
 
-Incunest incubators export 10-second CSV files at 500 Hz (5000 samples). The format is not fixed — it may vary across firmware versions — but the following six columns are always present:
+Two column dialects, detected from the header row **by name** (case-insensitive; column
+order and extra columns ignored; the parser aborts with a clear error if the raw ADC
+columns are missing):
 
-| Column name | Signal | `AFE4490Data` field |
-|---|---|---|
-| `RED`    | LED2VAL — RED raw          | `led2`       |
-| `IR`     | LED1VAL — IR raw           | `led1`       |
-| `RED_Amb` | ALED2VAL — ambient after LED2 | `aled2`   |
-| `IR_Amb`  | ALED1VAL — ambient after LED1 | `aled1`   |
-| `RED_Sub` | LED2-ALED2 — RED corrected | `led2_aled2` |
-| `IR_Sub`  | LED1-ALED1 — IR corrected  | `led1_aled1` |
+| Signal | PulseNest capture | Legacy IncuNest export | fed as |
+|---|---|---|---|
+| IR raw          | `LED1`  | `IR`      | `test_feed_sample(led1, …)` |
+| RED raw         | `LED2`  | `RED`     | `led2`  |
+| IR ambient      | `ALED1` | `IR_Amb`  | `aled1` |
+| RED ambient     | `ALED2` | `RED_Amb` | `aled2` |
 
-**Parser rule:** the parser reads the CSV header row and finds the above columns **by name** (case-insensitive). Column order and extra columns are ignored. The parser aborts with a clear error if any of the six required columns is missing.
+Since v0.20 the runner feeds the **raw ADC codes** through `test_feed_sample()` — the
+full `_process_sample()` path (analog state → RSQM → SpO2/HR1/HR2/HR3) — so OT, probe
+state (debounce included), R, PI and SpO2 are recomputed by the library itself; the
+`*_Sub` columns are derived internally and no longer read.
 
-**Optional firmware result columns:** if the CSV also contains columns `FW_HR1`, `FW_HR2`, `FW_HR3`, `FW_SpO2`, the runner includes them in the output and adds delta columns (`delta_HR1`, etc.) for algorithm equivalence checking. These columns do not affect calibration — their sole purpose is to verify that the offline C++ runner and the firmware produce identical results.
+**Configuration comes from the capture itself:** the PulseNest capture header carries a
+`# from-board: $CFG,…` line and the runner applies it (PRF, NUMAV, LED currents/range,
+per-channel RF/CF/RG/STAGE2EN, AMBDAC, SpO2 coefficients, filter cutoffs) before feeding
+samples; it refuses to run on a value it does not understand. `--ot-thr <A/A>` overrides
+`rsqm_ot_thr` for the replay (e.g. `1.0e-4` to reproduce a capture taken before v0.95 for
+equivalence checking). Parts of one session (`<stem>_pNN.csv`) share one library instance
+in order, so filter/EMA state is continuous across part boundaries, as it was on the
+board. Output: one `<stem>_replay.csv` per part (`SmpIdx, ProbeState, OT_LED1, OT_LED2,
+R, PI, SpO2, SpO2_SQI, HR1…HR3 + SQIs`).
+
+**Optional firmware result columns:** when the capture carries the firmware's own
+outputs (`SpO2`, `R`, `ProbeState` in the PulseNest dialect), the replay row also emits
+them plus `delta_SpO2`/`delta_R`, for equivalence checking. Measured on
+`20260923_1238_HOSPNAV_SUBJ09` (same threshold as the board, cold-start part excluded):
+median delta 0.00 exactly, 94.6 % of samples within 1 pt, ProbeState match ≥ 99.7 %;
+the residual tail (2.8 % of time) is micro-divergence of the variance-EMA state during
+low-SQI artefact episodes, which 8-second window medians reduce to p95 = 0.84 pt. The
+replay is faithful for calibration work, but it is **not bit-exact**: a cold start
+cannot reproduce the board's warm state, and float rounding may differ across compilers.
 
 ### 9.3 Host build: no compile-time flag any more (v0.91)
 
@@ -2898,6 +2919,13 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.96   | **Offline replay accessors (§9).** `test_last_ot_led2()`, `test_probe_state()`,    |
+|         | `test_pi()` (UNIT_TEST only), so `incunest_offline_runner` can feed raw ADC codes   |
+|         | through `test_feed_sample()` (the full `_process_sample()` path: analog state →     |
+|         | RSQM → SpO2/HR) and read back OT, probe state, R, PI and SpO2 exactly as the       |
+|         | firmware would produce them — e.g. to replay the 2026-09-23 HOSPNAV captures with   |
+|         | the v0.95 `rsqm_ot_thr` and recover the stretches discarded as PROBE_OT_HIGH.       |
+|         | No behavioral change; test surface only.                                            |
 | v0.95   | **`rsqm_ot_thr` 1.0e-4 → 1.5e-4 — first real-patient calibration (§5.6.2, §10).** |
 |         | HOSPNAV campaign 2026-09-23, SUBJ08: probe applied read OT_LED1 mean ≈ 120 ppm /  |
 |         | max ≈ 145 ppm and kept forcing PROBE_OT_HIGH (resetting SpO2/HR) on an applied     |

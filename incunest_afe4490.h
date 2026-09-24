@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.95 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.96 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.95"
+#define INCUNEST_AFE4490_VERSION "0.96"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1628,5 +1628,10 @@ public:
     // OT_LED1 as of the most recently processed sample — equals the `as.ot_led1` just fed to
     // RSQM/SpO2/HR1-3/ppg_disp, whether frozen or freshly computed (v0.79, §5.8.4).
     float test_last_ot_led1() const { return _last_valid_analog_state.ot_led1; }
+    // Offline replay accessors (v0.96, incunest_offline_runner §9): the runner feeds raw ADC
+    // codes through test_feed_sample() and reads back what the firmware would have produced.
+    float      test_last_ot_led2() const { return _last_valid_analog_state.ot_led2; }
+    ProbeState test_probe_state()  const { return _current_data.probe_state; }
+    float      test_pi()           const { return _current_data.pi; }
 #endif
 };
