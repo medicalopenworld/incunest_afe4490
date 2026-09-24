@@ -1367,16 +1367,24 @@ back on the air case.
 > per-wavelength transmittance. The AND does not depend on which channel is larger, so the change
 > stands; its justification does not rest on the ordering.
 
-> **How little margin this leaves.** Both channels sit within 12 % of `rsqm_ot_thr` (100 ppm). The
-> AND holds on the MS100 only because IR happens to be 9 ppm under the threshold. This is a working
-> configuration, not a robust one, and it is direct evidence that `rsqm_ot_thr` needs the empirical
-> calibration it has never had.
+> **How little margin this leaves.** Both channels sit within 12 % of `rsqm_ot_thr` (then 100 ppm).
+> The AND holds on the MS100 only because IR happens to be 9 ppm under the threshold. This is a
+> working configuration, not a robust one, and it is direct evidence that `rsqm_ot_thr` needs the
+> empirical calibration it has never had.
+>
+> **Update (v0.95, 2026-09-24).** That calibration data arrived with the first real-patient
+> campaign (HOSPNAV, 2026-09-23): SUBJ08, probe applied, read OT_LED1 mean ≈ 120 ppm / max
+> ≈ 145 ppm and spent long stretches in PROBE_OT_HIGH — resetting SpO2/HR each time — on an
+> applied probe. `rsqm_ot_thr` widened 1.0e-4 → 1.5e-4. Margin above the observed maximum is
+> only ×1.03 (n=1 patient — revisit as campaigns accumulate); margin below the theoretical
+> probe-in-air OT (~8e-4) remains ×5.3, and ONLY_LED_SATURATING detects probe-in-air
+> independently of OT.
 
 *The cost, stated plainly.* AND introduces a failure mode OR did not have: a channel reading
 persistently low — weak or failing LED, partially obstructed photodiode — now forces APPLIED
 regardless of the other. Two existing guards limit the exposure without removing it: the
 LED-only-saturation branch below detects probe-in-air independently of OT, and PROBE_DISCONNECTED
-still checks all four `i_pd` channels. A channel that is degraded but not dead is not covered. Default `rsqm_ot_thr = 1.0e-4`, runtime-configurable via `setRsqmOtThr()`. Single
+still checks all four `i_pd` channels. A channel that is degraded but not dead is not covered. Default `rsqm_ot_thr = 1.5e-4` (v0.95), runtime-configurable via `setRsqmOtThr()`. Single
 threshold (no hysteresis) — oscillation is prevented by the `rsqm_probe_state_min_s` debounce.
 
 **Saturated — discriminate by phase (v0.61).** When `anyPositiveSaturation()` (ADC positive rail or
@@ -1408,7 +1416,7 @@ name suggested "any saturation"; LED-only saturation never came here) and splits
 into PROBE_OT_HIGH (value 1) and PROBE_ONLY_LED_SATURATING (value 4), with `isProbeAbsent()` as the
 single definition of "no patient". No behavioural change.
 
-Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54). First real-HW test (2026-07-19, CONTEC MS100 simulator, probe applied) showed the theoretical APPLIED estimate does not hold in practice: the simulator is highly sensitive to probe placement and OT frequently reads above 8.5e-5 with the probe applied, so `probe_state` never reached APPLIED at that threshold. `rsqm_ot_thr` was widened to 1.0e-4 as a practical mitigation — still not a calibrated value from a real neonatal probe/patient.
+Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54). First real-HW test (2026-07-19, CONTEC MS100 simulator, probe applied) showed the theoretical APPLIED estimate does not hold in practice: the simulator is highly sensitive to probe placement and OT frequently reads above 8.5e-5 with the probe applied, so `probe_state` never reached APPLIED at that threshold. `rsqm_ot_thr` was widened to 1.0e-4 as a practical mitigation — still not a calibrated value from a real neonatal probe/patient. The first real-patient data (HOSPNAV campaign, 2026-09-23, SUBJ08: probe applied, OT_LED1 mean ≈ 1.2e-4, max ≈ 1.45e-4) widened it again to 1.5e-4 (v0.95); n=1 patient, to be recalibrated as campaigns accumulate.
 
 > Previous formula was heuristic: `LED_Sub / (LED_mA × RF_Ω × RG_linear)` — dimensionally not A/A, scale ~×3495 larger. Values measured in earlier sessions (APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.8) correspond to the old scale.
 
@@ -2890,6 +2898,13 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.95   | **`rsqm_ot_thr` 1.0e-4 → 1.5e-4 — first real-patient calibration (§5.6.2, §10).** |
+|         | HOSPNAV campaign 2026-09-23, SUBJ08: probe applied read OT_LED1 mean ≈ 120 ppm /  |
+|         | max ≈ 145 ppm and kept forcing PROBE_OT_HIGH (resetting SpO2/HR) on an applied     |
+|         | probe — exactly the thin-tissue case the v0.44 note anticipated. Margin ×1.03      |
+|         | above the observed max (n=1 patient, recalibrate with more campaigns); ×5.3 below  |
+|         | the theoretical probe-in-air OT (~8e-4), which ONLY_LED_SATURATING also detects    |
+|         | independently. No code path changed — default value and comments only.             |
 | v0.94   | **HGAC announces its RF moves to the host (§5.8.4).** `_hgac_change_rf()` stamps    |
 |         | `_hgac_rf_change_ts_us` (esp_timer, the row clock) then increments               |
 |         | `_hgac_rf_change_count`; new lock-free getter `hgacRfChangeCount(uint64_t*)`.      |

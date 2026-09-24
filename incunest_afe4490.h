@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.93 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.95 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.94"
+#define INCUNEST_AFE4490_VERSION "0.95"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1024,11 +1024,13 @@ private:
     float             rsqm_disconn_led_sub_thr = 5000.0f;  // |led_sub| < this on both ch → disconnected; measured worst case: LED2_Sub=4013 (×1.25 margin)
     float             rsqm_disconn_i_pd_thr = 150e-9f; // |i_pd| < this on all 4 ch → disconnected; worst case 52 nA (ambdac=2 µA, RF=50K) → ×2.9 margin
                                                                  // Min i_pd LED ch in PROBE_APPLIED: 218 nA → ×1.45 below; sub criterion guards against false positives
-    float             rsqm_ot_thr           = 1.0e-4f;  // not saturated: BOTH channels OT > this → PROBE_OT_HIGH; else → PROBE_APPLIED
+    float             rsqm_ot_thr           = 1.5e-4f;  // not saturated: BOTH channels OT > this → PROBE_OT_HIGH; else → PROBE_APPLIED
                                                                  // (under positive saturation OT is not consulted: AMB_/ONLY_LED_SATURATING by phase)
-                                                                 // Widened from 8.5e-5 (2026-07-19): CONTEC MS100 simulator is highly sensitive
-                                                                 // to probe placement, frequently reading OT above 8.5e-5 with probe applied.
-                                                                 // Still needs empirical calibration with a real neonatal probe/patient.
+                                                                 // History: 8.5e-5 → 1.0e-4 (2026-07-19, CONTEC MS100 placement sensitivity);
+                                                                 // 1.0e-4 → 1.5e-4 (2026-09-24, first real-patient data: HOSPNAV SUBJ08, probe
+                                                                 // applied, OT_LED1 mean ~1.2e-4 / max ~1.45e-4 kept forcing PROBE_OT_HIGH).
+                                                                 // n=1 patient — recalibrate as campaigns accumulate. Probe-in-air estimate
+                                                                 // ~8e-4 keeps ×5.3 margin; ONLY_LED_SATURATING also covers probe-in-air.
     // ADC saturation thresholds live in namespace adc (SAT_POS/SAT_NEG).
     float             rsqm_probe_state_min_s = 0.2f;    // debounce time to change probe state [s] (= 100 samples @ 500 Hz)
     static constexpr uint32_t rsqm_diag_period_ms        = 5000; // periodic runAfeDiagnostics() interval in DISCONNECTED/NOT_APPLIED
