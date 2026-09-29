@@ -2372,7 +2372,11 @@ samples; it refuses to run on a value it does not understand. `--ot-thr <A/A>` o
 equivalence checking). Parts of one session (`<stem>_pNN.csv`) share one library instance
 in order, so filter/EMA state is continuous across part boundaries, as it was on the
 board. Output: one `<stem>_replay.csv` per part (`SmpIdx, ProbeState, OT_LED1, OT_LED2,
-R, PI, SpO2, SpO2_SQI, HR1…HR3 + SQIs`).
+R, PI, SpO2, SpO2_SQI, HR1…HR3 + SQIs`), written since runner v0.21 (2026-09-29) to
+`<input dir>/derived/replay_lib<version>[_ot<thr>]/` — never beside the capture, whose
+directory holds only what was recorded; the directory name records what the replay depends
+on, so a replay with another library version or `--ot-thr` does not overwrite an earlier
+one. `--out DIR` overrides the location.
 
 **Optional firmware result columns:** when the capture carries the firmware's own
 outputs (`SpO2`, `R`, `ProbeState` in the PulseNest dialect), the replay row also emits
