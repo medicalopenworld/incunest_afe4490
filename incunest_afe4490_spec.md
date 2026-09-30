@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.94
+# incunest_afe4490 — Specification v0.97
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1149,21 +1149,25 @@ This had never been justified; it was inherited from dividing 500 Hz by a round 
 1. **50 Hz is the GCD of the validated PRF grid** {500, 800, 1000, 1250, 1600} — the highest
    decimated rate with an *integer* factor at every admissible PRF (10, 16, 20, 25, 32). The only
    alternatives are its divisors (25, 10, 5, 2, 1 Hz).
-2. **Below it the anti-aliasing collapses.** HR3 low-passes at 15 Hz (2nd order), so at a 25 Hz
-   decimated rate the Nyquist limit (12.5 Hz) falls *below the filter's own corner*: −1.7 dB of
-   attenuation, i.e. no protection for the decimation at all.
+2. **Below it the anti-aliasing collapses.** HR3 low-passes at 15 Hz, so at a 25 Hz decimated
+   rate the Nyquist limit (12.5 Hz) falls *below the filter's own corner*: −1.7 dB of attenuation
+   with the 2nd order of v0.96, −0.9 dB with the 4th order of v0.97 — no protection for the
+   decimation at all, whatever the order. That is why the order cannot buy a lower rate on its own:
+   the corner would have to come down too.
 3. **Below it the window collides with physiology.** At 25 Hz it grows to 20.5 s, where a
    transient neonatal bradycardia — seconds long — changes the rate *inside* the window and
    smears the peak instead of sharpening it.
 4. **Above it the fixed-length buffer grows too short in time**, and the bin resolution degrades
    (0.24 Hz, 14.6 BPM per bin, at 125 Hz).
 
-| Decimated rate | Nyquist | 15 Hz LP at Nyquist | Bin (N=512) | HR3 window | HR2 window |
-|---|---|---|---|---|---|
-| 25 Hz | 12.5 Hz | **−1.7 dB** | 0.049 Hz | 20.5 s | 16.0 s |
-| 40 Hz | 20 Hz | −6.2 dB | 0.078 Hz | 12.8 s | 10.0 s |
-| **50 Hz** | 25 Hz | −9.4 dB | 0.098 Hz | 10.24 s | 8.0 s |
-| 100 Hz | 50 Hz | −21.0 dB | 0.195 Hz | 5.1 s | 4.0 s |
+| Decimated rate | Nyquist | 15 Hz LP at Nyquist, 2nd order (≤ v0.96) | 4th order (v0.97) | Bin (N=512) | HR3 window | HR2 window |
+|---|---|---|---|---|---|---|
+| 25 Hz | 12.5 Hz | **−1.7 dB** | **−0.9 dB** | 0.049 Hz | 20.5 s | 16.0 s |
+| 40 Hz | 20 Hz | −6.2 dB | −10.5 dB | 0.078 Hz | 12.8 s | 10.0 s |
+| **50 Hz** | 25 Hz | −9.4 dB | **−18.0 dB** | 0.098 Hz | 10.24 s | 8.0 s |
+| 100 Hz | 50 Hz | −21.0 dB | −42.9 dB | 0.195 Hz | 5.1 s | 4.0 s |
+
+*(Digital responses at a 500 Hz PRF, bilinear transform prewarped at 15 Hz.)*
 
 *HR2's chain does not.* Only reason 1 applies to it. Its bandpass cuts at 5 Hz, so 25 Hz would
 still leave Nyquist at 12.5 Hz — 2.5× of margin, the same HR3's chain has today over its
@@ -1181,11 +1185,16 @@ comparing three lag estimators must not change the chain rate at the same time, 
 chain instead of the estimators. **Decide it from the offline experiment** (`tools/offline_runner`
 replays recorded captures at both rates — no hardware needed), not by reasoning.
 
-**Known weak point of HR3's chain:** −9.4 dB of anti-alias attenuation at Nyquist is thin
-for a ×10 decimation. Harmless for the HR estimate (there is almost no PPG content above 25 Hz),
-but the folded noise raises the spectral floor and that is paid in `hr3_sqi`, not in `hr3`. The
-lever is a 4th-order low-pass before decimating — **not** a different rate, which reasons 1–4 have
-already fixed.
+**HR3's anti-alias low-pass is 4th order since v0.97** (it was the chain's known weak point):
+the 2nd-order low-pass left −9.4 dB at the 25 Hz Nyquist, thin for a ×10 decimation. Harmless for
+the HR estimate (there is almost no PPG content above 25 Hz), but the folded noise raises the
+spectral floor, and that is paid in `hr3_sqi`, not in `hr3`. The lever was the filter order before
+decimating — **not** a different rate, which reasons 1–4 had already fixed. A 4th-order Butterworth
+gives −18.0 dB there for two biquads instead of one (`LowPass4`: sections Q = 0.5412 and 1.3066,
+lower Q first). Its extra group delay (≈ 28 ms at DC vs ≈ 15 ms) is irrelevant to an FFT window
+of 10.24 s. And it is *flatter* over the pulse band the HPS multiplies — at 260 BPM, 2nd harmonic
+(8.7 Hz) −0.05 dB vs −0.46 dB, 3rd harmonic (13 Hz) −1.2 dB vs −1.9 dB — so the harmonics reach the
+HPS less attenuated than before, not more.
 
 ### 5.4 HR3 — FFT + Harmonic Product Spectrum
 
@@ -1204,7 +1213,7 @@ before HR3 reports again.
 Independent third HR algorithm running in parallel with HR1 and HR2 on `led1_aled1`.
 
 **Processing chain:**
-1. 2nd-order Butterworth low-pass filter at 15 Hz (anti-aliasing before decimation — see the note below on why it is a pure low-pass)
+1. 4th-order Butterworth low-pass filter at 15 Hz (`_hr3_lp`, two cascaded biquads; 2nd order until v0.96 — anti-aliasing before decimation, see §5.3.1 for the order and the note below on why it is a pure low-pass)
 2. Decimate via `_hr3_decim` → 50 Hz (see §5.3.1)
 3. Accumulate in circular buffer of 512 samples (10.24 s at 50 Hz)
 4. Every 25 decimated samples (0.5 s): mean subtraction (DC removal) → Hann window → in-place radix-2 DIT FFT → HPS → parabolic interpolation
@@ -2923,6 +2932,18 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.97   | **HR3 anti-alias low-pass: 2nd → 4th-order Butterworth, 15 Hz (§5.3.1, §5.4).**   |
+|         | Closes the weak point recorded in v0.83: −9.4 dB at the 25 Hz Nyquist of the ×10  |
+|         | decimation becomes −18.0 dB (at a 500 Hz PRF), so less folded noise lifts the     |
+|         | spectral floor that `hr3_sqi` pays for, and flatter over the harmonics the HPS    |
+|         | uses (13 Hz: −1.2 vs −1.9 dB). New `LowPass4` (two cascaded biquads,              |
+|         | Q = 0.5412 / 1.3066, −3 dB at the corner); `BiquadFilter::init_lp()` takes an     |
+|         | optional Q (default 1/√2, unchanged behaviour for any other caller). Member        |
+|         | `_hr3_bpf` renamed `_hr3_lp`: it is not a bandpass, and its comment ("0.4–15 Hz")  |
+|         | had been false since v0.83. Public API unchanged (`setHR3Filter()`,               |
+|         | `hr3_f_high_hz`). Tests: `test_biquad` +4 (pulse band passes, −3 dB at the corner, |
+|         | < 0.14 at 25 Hz where the 2nd order leaves > 0.30, unity DC gain + precharge);    |
+|         | all 9 host suites pass (87 tests). Behaviour change: HR3 only.                    |
 | v0.96   | **Offline replay accessors (§9).** `test_last_ot_led2()`, `test_probe_state()`,    |
 |         | `test_pi()` (UNIT_TEST only), so `incunest_offline_runner` can feed raw ADC codes   |
 |         | through `test_feed_sample()` (the full `_process_sample()` path: analog state →     |

@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.96 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.97 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.96"
+#define INCUNEST_AFE4490_VERSION "0.97"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -915,8 +915,9 @@ private:
         // Design a 2nd-order Butterworth bandpass. Recalculates coefficients; does not reset state.
         void init_bp(float f_low_hz, float f_high_hz, float sample_rate_hz);
 
-        // Design a 2nd-order Butterworth lowpass. Recalculates coefficients; does not reset state.
-        void init_lp(float f_high_hz, float sample_rate_hz);
+        // Design a 2nd-order low-pass of quality factor q (default 1/√2 = Butterworth).
+        // Recalculates coefficients; does not reset state.
+        void init_lp(float f_high_hz, float sample_rate_hz, float q = 0.70710678f);
 
         // Clear state and schedule precharge on next process() call.
         void reset() { _v1 = 0.0f; _v2 = 0.0f; _needs_precharge = true; }
@@ -941,6 +942,25 @@ private:
         float _a1 = 0.0f, _a2 = 0.0f;
         float _v1 = 0.0f, _v2 = 0.0f;                 // filter state
         bool  _needs_precharge = true;
+    };
+
+    // 4th-order Butterworth low-pass: two cascaded biquads with Q = 0.5412 and 1.3066, the two
+    // pole pairs of a 4th-order Butterworth, so the cascade is -3 dB at f_high (two identical
+    // 2nd-order sections would be -6 dB there). Lower Q first, so the resonant section never sees
+    // the unfiltered input. Each section precharges on its own after reset().
+    struct LowPass4 {
+        float f_high = 0.0f;   // -3 dB cutoff [Hz]
+
+        void init(float f_high_hz, float sample_rate_hz) {   // does not reset state
+            f_high = f_high_hz;
+            _s1.init_lp(f_high_hz, sample_rate_hz, 0.54119610f);
+            _s2.init_lp(f_high_hz, sample_rate_hz, 1.30656296f);
+        }
+        void reset() { _s1.reset(); _s2.reset(); }
+        inline float process(float x) { return _s2.process(_s1.process(x)); }
+
+    private:
+        BiquadFilter _s1, _s2;
     };
 
     // One decimation chain: keeps its own phase, its own factor and the output rate it
@@ -1457,13 +1477,13 @@ private:
     uint32_t _hr2_update_counter;            // decimated samples since last autocorr computation
 
     // ── HR3 — FFT + Harmonic Product Spectrum HR algorithm ───────────────────
-    // Low-pass-filters led1_sub (15 Hz anti-aliasing, see _hr3_bpf default), decimates via _hr3_decim,
+    // Low-pass-filters led1_sub (15 Hz anti-aliasing, 4th order, see _hr3_lp), decimates via _hr3_decim,
     // accumulates 512 samples, then every hr3_update_interval decimated samples applies
     // a Hann window, computes the real FFT, and finds the dominant peak via the
     // Harmonic Product Spectrum (fundamental × 2nd harmonic × 3rd harmonic).
     static constexpr int hr3_buf_len         = 512;  // 10.24 s at 50 Hz → freq resolution 0.098 Hz ≈ 5.9 BPM/bin
 
-    BiquadFilter _hr3_bpf;                     // bandpass filter (default 0.4–15 Hz)
+    LowPass4     _hr3_lp;                      // 4th-order Butterworth low-pass, 15 Hz (v0.97; 2nd order before)
     float    _hr3_buf[hr3_buf_len];            // circular buffer of decimated LP-filtered samples
     float    _hr3_hann[hr3_buf_len];           // precomputed Hann window coefficients (computed once in begin())
     float    _hr3_fft[hr3_buf_len * 2];        // complex FFT buffer (interleaved re/im), also scratch for windowed input
@@ -1555,6 +1575,7 @@ public:
 
     // Biquad filter
     using TestBiquadFilter = BiquadFilter;
+    using TestLowPass4     = LowPass4;
 
     // HR1
     void  test_feed_hr1(float ot_ir, ProbeState probe_state) { _hr1_update(ot_ir, probe_state); }

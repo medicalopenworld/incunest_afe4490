@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.91 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.97 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -345,7 +345,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_interval_count(0),
       _hr2_bpf(),
       _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_update_counter(0),
-      _hr3_bpf(),
+      _hr3_lp(),
       _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_update_counter(0),
       _spo2_warmup_s(spo2_warmup_s),
       _spo2_ema_mean_tau_s(spo2_ema_mean_tau_s),
@@ -380,7 +380,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     _current_data = AFE4490Data{};
     _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
-    _hr3_bpf.f_high    = 15.0f;   // low-pass only — f_low stays 0 (unused for LP)
+    _hr3_lp.f_high     = 15.0f;   // low-pass only (v0.83); 4th order since v0.97
     _recalc_rate_params();
     _reset_algorithms();
 }
@@ -803,8 +803,8 @@ void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
 
 void INCUNEST_AFE4490::setHR3Filter(float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr3_bpf.init_lp(f_high_hz, (float)_afe_sample_rate_hz);
-    _hr3_bpf.reset();
+    _hr3_lp.init(f_high_hz, (float)_afe_sample_rate_hz);
+    _hr3_lp.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1022,7 +1022,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
-    cfg.hr3_f_high_hz    = _hr3_bpf.f_high;
+    cfg.hr3_f_high_hz    = _hr3_lp.f_high;
     cfg.spo2_a           = _spo2_a;
     cfg.spo2_b           = _spo2_b;
     cfg.spo2_warmup_s         = _spo2_warmup_s;
@@ -1175,7 +1175,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
     _hr2_decim.reset(); _hr2_update_counter = 0;
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
-    _hr3_bpf.reset();
+    _hr3_lp.reset();
     _hr3_buf_idx = 0; _hr3_buf_count = 0;
     _hr3_decim.reset(); _hr3_update_counter = 0;
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
@@ -1770,7 +1770,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     }
     _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
     _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, sample_rate_hz);
-    _hr3_bpf.init_lp(_hr3_bpf.f_high, sample_rate_hz);
+    _hr3_lp.init(_hr3_lp.f_high, sample_rate_hz);
     _recalc_afe_tia_cf_led1();
     _recalc_afe_tia_cf_led2();
 }
@@ -1886,19 +1886,21 @@ void INCUNEST_AFE4490::BiquadFilter::init_bp(float f_low_hz, float f_high_hz, fl
     _a2 =  (k*k - bw*k + o0sq) / d;
 }
 
-void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float sample_rate_hz) {
-    // 2nd-order Butterworth low-pass via bilinear transform.
-    // Uses f_high_hz as the -3 dB cutoff. State unchanged — call reset() if needed.
+void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float sample_rate_hz, float q) {
+    // 2nd-order low-pass via bilinear transform, prewarped at f_high_hz.
+    // Analog prototype: H(s) = Ω² / (s² + (Ω/q)·s + Ω²); q = 1/√2 is Butterworth (-3 dB at
+    // f_high_hz). Other q values are the sections of higher-order Butterworths (LowPass4).
+    // State unchanged — call reset() if needed.
     f_high = f_high_hz;
     float Ohm  = tanf(3.14159265358979f * f_high_hz / sample_rate_hz);
     float Ohm2 = Ohm * Ohm;
-    float sqrt2 = 1.41421356f;
-    float d    = 1.0f + sqrt2 * Ohm + Ohm2;
+    float inv_q = 1.0f / q;
+    float d    = 1.0f + inv_q * Ohm + Ohm2;
     _b0 =  Ohm2 / d;
     _b1 =  2.0f * _b0;
     _b2 =  _b0;
     _a1 =  2.0f * (Ohm2 - 1.0f) / d;
-    _a2 = (1.0f - sqrt2 * Ohm + Ohm2) / d;
+    _a2 = (1.0f - inv_q * Ohm + Ohm2) / d;
 }
 
 // ── FreeRTOS task ─────────────────────────────────────────────────────────────
@@ -2519,7 +2521,7 @@ void INCUNEST_AFE4490::_hr2_update_for_test(float ir, ProbeState probe_state) {
 // (idempotent) and never triggers the slow path (Task C never even gets signalled).
 bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
-        _hr3_bpf.reset();
+        _hr3_lp.reset();
         _hr3_buf_idx = 0; _hr3_buf_count = 0;
         _hr3_decim.reset(); _hr3_update_counter = 0;
         memset(_hr3_buf, 0, sizeof(_hr3_buf));
@@ -2528,7 +2530,7 @@ bool INCUNEST_AFE4490::_hr3_update_sample(float ir, ProbeState probe_state) {
         return false;
     }
 
-    float filtered = -_hr3_bpf.process(ir);  // negate: peaks up
+    float filtered = -_hr3_lp.process(ir);   // negate: peaks up
 
     if (!_hr3_decim.step()) return false;
 
