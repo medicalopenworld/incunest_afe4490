@@ -1,6 +1,34 @@
 # incunest_afe4490 — Design Rationale
 
-> **Status: work in progress, not consolidated (last reviewed 2026-09-04).**
+## 0. Why this document exists
+
+This library takes decisions a patient depends on: when a pulse counts as present, how far the
+SpO₂ value lags reality, how hot a LED may run on a preterm foot, when a signal is declared
+unusable. Each decision ends up as a constant or a structure in the code and as a sentence in the
+spec. **The reason for it ends up in neither** — and a reason that is not written down expires
+silently. §5.1 is the canonical example: HR1's filter was chosen for a premise that stopped being
+true in v0.6 and nobody noticed for ~80 versions, because the premise lived only in a conversation.
+§5.4 is the mirror case: two analyses recommended changes to a measuring algorithm and both had to
+be reversed within two days, once the whole chain was measured instead of one link.
+
+So this document keeps, for every non-obvious choice:
+
+1. **the evidence** — labelled as *measured* (our bench or captures), *literature* (with citation),
+   *standard* (ISO 80601-2-61, WHO/UNICEF, datasheet) or *inference*, so a reader can tell how much
+   to trust it;
+2. **the alternatives** that were considered and why they were rejected;
+3. **the reversals** — a decision that was undone is marked SUPERSEDED and kept, never deleted,
+   because the mistake is as instructive as the fix.
+
+It is written for two readers: whoever is about to change a constant (including ourselves, later),
+who should find here *why* it has its value and what would have to be true for a different value to
+be right; and whoever has to assess the device clinically or against a standard, for whom ISO
+80601-2-61 expects exactly this kind of traceable rationale behind accuracy claims and disclosed
+processing. Rules of use: write the entry **when the decision is taken**, not at consolidation;
+one source per claim; the spec keeps the short "why" next to each number (§1), this document keeps
+the long one.
+
+> **Status: work in progress, not consolidated (last reviewed 2026-10-01).**
 > Sections vary in polish and the document is still growing. It will be consolidated and edited at
 > the **HGAC v1 freeze** milestone, which has not been reached: `hgac_enable` is still `false` by
 > default, phase 1 is done and phases 2-7 are pending.
@@ -12,6 +40,7 @@
 > | §2 HGAC | most complete; developed alongside the implementation |
 > | §3 Analog reconstruction & RSQM | summary only, with pointers to the spec |
 > | §4 Clinical & hardware basis | the most critical to preserve; sourced |
+> | §4.5 Averaging times — evidence base | complete, every claim sourced (2026-10-01) |
 > | §5 HR1 filter & detector | complete, every claim sourced (2026-09-04) |
 > | §5.4 SQI gate & the two reversals | complete, measured (2026-09-06) |
 > | §6 Sample-rate dependency audit | complete; the tests that replace it are in place |
@@ -209,6 +238,73 @@ the thermal/optical budget. See the source notes.
 ### 4.4 AFE selection
 No modern AFE is a drop-in replacement (none has the H-bridge); best candidate for a redesign is
 AFE4900 + external H-bridge. Protocentral rejected as a validation reference.
+
+### 4.5 Averaging times for AC, DC, %mod/PI, R and SpO₂ — evidence base (2026-10-01)
+
+What the library does today: `spo2_ema_mean_tau_s` = 2 s (DC), `spo2_ema_var_tau_s` = 6 s (AC²,
+hence PI and R), `spo2_warmup_s` = 18 s (3·τ). The 6 s was taken from ISO Annex JJ. This section
+records what the standards and the literature actually say, so that value can be re-decided with
+the trade-off in view. Verified in the ISO 80601-2-61:2026 PDF unless marked otherwise.
+
+**Standards — no averaging time is prescribed for the device itself.**
+
+| Source | Statement | Figure |
+|---|---|---|
+| ISO 201.7.9.2.1.101 c), Table GG.3 | The IFU shall describe data averaging, *data update period*, *alarm condition delay* and *alarm signal generation delay*; "averaging time" is an operator setting | disclose, not fix |
+| ISO 201.12.4.101 + AA.2.13 | Indication required when the *data update period* exceeds **30 s**; it "should be shorter than 30 s for continuous **neonatal** monitoring and diagnostic applications". Rationale: the delay between an event and the alarm | 30 s |
+| ISO Annex JJ.2 d)–e) (informative) | A *transfer standard* (reference oximeter for development) shall average SpO₂ over **6–10 s** and output SpO₂, PI and PR at 1 Hz | 6–10 s |
+| ISO Annex FF | Fidelity vs delay: δ (lag) and Δ (under-read nadir). Faster averaging tracks the real desaturation; slower averaging smooths noise and cuts false alarms (Figs. FF.2, FF.4). Cites Lynn & Curry 2011 [94] | qualitative |
+| ISO Annex DD.2.3.2 | Desaturation study: ≥ 60 s after an FiO₂ change, ≥ 30 s plateau stabilisation, consecutive samples ≥ 20 s apart "considering the averaging time of the equipment" | 20–60 s |
+| ISO Annex II.2.1; 201.12.4.102 | Typical %mod 1–8 %; signal inadequacy must use DC and %mod **per wavelength** | — |
+| WHO/UNICEF 2019, Annex 1 A1.11 (cat. 6.5) | Valid data update | ≤ 10 s |
+| AAP / BAPM / NICE / AARC / ILCOR 2010 | No guideline prescribes a window | — |
+
+**Manufacturers (operator manuals / 510(k)).**
+
+| Equipment | Averaging | Source |
+|---|---|---|
+| Masimo Rad-57 / Radical-7 | 2/4/8/10/12/14/16 s selectable, **default 8 s**; PI = AC/DC of IR; PI window not published | LAB-9204A |
+| Nellcor N-600x / PM1000N | Normal **5–7 s**, Fast 2–4 s; extended dynamically above 7 s in low perfusion; > 20 s → "pulse search"; 1 s update; cardiac ensemble averaging (US 7039538) | Operator's Manual |
+| Nonin OEM III / PureSAT | Per **beat**: 4-beat exponential (8 extended), 2-beat latency; "≤ 3 s response at ≥ 60 bpm, adult/paediatric/**neonate**" — the only explicit neonatal figure from a manufacturer | OEM III spec |
+| Philips FAST-SpO₂ / picoSAT II | 5–20 s declared in 510(k) K120366; defaults *not confirmed* | FDA |
+| Nihon Kohden / Mindray / GE | Fast/Normal/Slow, High/Med/Low; seconds *not confirmed* | manuals |
+| Renesas OB1203 reference algorithm | 4 s window (512 @ 128 Hz) for AC/DC and R, 2 Hz update, 5-point moving average on SpO₂ and PI (≈ 6.5 s effective) | AN OB1203 |
+
+**Literature — general.** Vagedes, Sobh, Al Islam, Poets 2024, *Nat Sci Sleep* 16:1131
+(10.2147/NSS.S460231): only 6 % of 151 papers state the averaging time; the most used are 3 s
+(33 %) and 2 s (22 %), range beat-to-beat…10 s. Webster (ed.) 1997, *Design of Pulse Oximeters*:
+R is computable beat-to-beat and stabilised with a weighted moving average. Baquero 2011, *Acta
+Paediatr* 100:515: at maximum sensitivity + 2 s, time to a stable reading on newborns — Radical-7
+20 s, Biox 3700 74 s, Nellcor N395 67 s.
+
+**Literature — neonates and preterms.**
+
+| Study | Population | Windows | Finding |
+|---|---|---|---|
+| Ahmed, Rich, Finer 2010, *Pediatrics* 125:e115 (10.1542/peds.2008-1749) | preterm < 32 wk, respiratory support | 2 vs 16 s | desaturations < 30 s: **41 vs 16**; events > 300 s: 20 vs 40 (merging); nadirs < 70 % under-read at 16 s (p = 0.01) |
+| Vagedes, Poets, Dietz 2013, *ADC F&N* 98:F265 (10.1136/archdischild-2012-302543) | 15 preterms, 168 h | 3 vs 16 s | desaturations < 80 %: **1958 vs 339**; deeper nadirs at 3 s, longer durations at 16 s |
+| Vagedes et al. 2014, *PLoS One* (10.1371/journal.pone.0087280) | 12 preterms 24–27 wk, 170 h | raw red/IR reprocessed at 3/5/8/10/12/14/16 s | conversion **D₂ = D₁·(T₂/T₁)^c**; ≈ ×6 desaturations < 80 % at 3 s vs 16 s |
+| Vagedes, Dietz, Poets 2019, *Acta Paediatr* 108:2246 | 49 children + 15 preterms | 3 → 16 s | count ×0.18, mean duration ×3.34; effect strongest in infants |
+| McClure, Jang, Fairchild 2016, *J Neonatal Perinatal Med* (10.3233/NPM-16162) | 10 VLBW | 2 / 8 / 16 s | 2→16 s: alarms −53 % but duration ×2.15; **2 s + 15 s alarm delay: −67 %**. "NICU default is 8 s" |
+| Janota 2023, *Front Pediatr* (10.3389/fped.2023.1240363) | 10 VLBW, closed-loop FiO₂ | 2–4 / 10 / 16 s | time in range equal (67 %); SpO₂ < 80 %: 6.5 / 5.3 / 4.5 % (p = 0.003) |
+| NeOProM trials (Di Fiore 2012; Di Fiore & Martin) | SUPPORT, COT | — | SUPPORT **16 s**, sampled every 10 s (two centres at 2 s); COT 16 s; BOOST *not confirmed* |
+| Martin 2023, *Acta Paediatr* (10.1111/apa.16766) | 20 extremely preterm | — | staff response median 20.5 s; SpO₂ falls **3.7 % per 10 s** of delay — monitor latency sits in the same chain |
+| Delivery-room resuscitation (Baquero 2011; NCCC guideline) | newborns | — | maximum sensitivity + 2 s |
+| Kemper 2011, *Pediatrics* 128:e1259 (CCHD screening) | — | — | no mention of averaging |
+
+**De facto consensus:** 8 s in the NICU (Masimo default), 2–4 s in resuscitation and
+intermittent-hypoxaemia research, 16 s in the oxygen-target trials. No manufacturer publishes the
+PI window.
+
+**What this means for the 6 s.** It is the *minimum* of an informative range written for a
+reference instrument, not a clinical optimum; it coincides with Nellcor "Normal" and sits between
+the 2–4 s of resuscitation/IH work and the 8 s NICU default. The cost of 6 s against 2–3 s is
+quantified above (Vagedes 2014: fewer short desaturations counted by ≈ (6/3)^c). For IncuNest's
+purpose — detecting apnoea-driven desaturation in an incubator — the neonatal literature points to
+**short window + alarm delay** (McClure 2016), not to a longer window. The ISO obligations we do
+meet by construction: %mod per wavelength (PI_red, PI_ir) and a declared window and update period.
+Open: whether `spo2_ema_var_tau_s` should move towards 3–4 s once an alarm-delay layer exists in
+the integrator (that layer is the integrator's, not the library's).
 
 ---
 

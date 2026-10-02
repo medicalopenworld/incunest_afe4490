@@ -924,10 +924,10 @@ Coefficients `a` and `b` are empirical (calibration). Configurable via `setSpO2C
 Both DC and AC power are extracted from a single `EmaChannel` per signal (IR and RED), using two independent time constants:
 
 - **`spo2_ema_mean_tau_s` = 2.0 s** — tracks the DC baseline (slow IIR low-pass, f_c ≈ 0.08 Hz). Must satisfy f_c << 0.5 Hz (minimum physiological HR at 30 bpm) so the mean does not follow the pulsatile component. Same value as `rsqm_ema_mean_tau_s` — both track the DC of the same signal with the same physical requirement.
-- **`spo2_ema_var_tau_s` = 6.0 s** — tracks the AC² power (EMA of `(x − mean)²`). Minimum averaging time required by **ISO 80601-2-61:2026 Annex JJ.2 d)**, which mandates ≥ 6 s averaging for the SpO2 transfer standard reference. A shorter τ would give a fluctuating AC estimate that violates the norm.
+- **`spo2_ema_var_tau_s` = 6.0 s** — tracks the AC² power (EMA of `(x − mean)²`). Lower end of the 6–10 s averaging window that **ISO 80601-2-61:2026 Annex JJ.2 d)** (informative) sets for an SpO2 *transfer standard*; the standard prescribes no window for the device itself, only its disclosure (201.7.9.2.1.101 c). It sits between the 2–4 s used in neonatal resuscitation and intermittent-hypoxaemia research and the 8 s NICU default (Masimo). A shorter τ gives a noisier AC estimate; a longer one under-reads short neonatal desaturations (Ahmed 2010, Vagedes 2013/2014). Full evidence base in the design rationale §4.5.
 - **`spo2_warmup_s` = 18.0 s** — SpO2 output suppressed until 3 × τ_var = 3 × 6 s, time for the EMA variance estimator to converge.
 
-The two τ values are intentionally different because DC and AC² have distinct temporal requirements: DC must track slow baseline drift (τ = 2 s), while AC² must be stable enough for a reliable SpO2 estimate (τ ≥ 6 s per ISO).
+The two τ values are intentionally different because DC and AC² have distinct temporal requirements: DC must track slow baseline drift (τ = 2 s), while AC² must be stable enough for a reliable SpO2 estimate (τ = 6 s, see above).
 
 **First-sample seeding (v0.55):** `EmaChannel::update()` seeds on the first sample after
 construction or `reset()` — `count == 0` → `mean = x`, `var = 0` — instead of ramping `mean` up
@@ -2584,7 +2584,7 @@ See §5.1 for algorithm description.
 | Calibration coefficient a | `spo2_a` | 114.9208 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R intercept |
 | Calibration coefficient b | `spo2_b` | 30.5547 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R slope |
 | DC EMA time constant | `spo2_ema_mean_tau_s` | 2.0 s | f_c ≈ 0.08 Hz << 0.5 Hz (30 bpm min HR); same signal as RSQM → same τ | Speed of DC baseline tracking |
-| AC² EMA time constant | `spo2_ema_var_tau_s` | 6.0 s | **ISO 80601-2-61:2026 Annex JJ.2 d)**: averaging time ≥ 6 s for SpO2 reference | Stability of AC amplitude / PI estimate |
+| AC² EMA time constant | `spo2_ema_var_tau_s` | 6.0 s | ISO 80601-2-61:2026 Annex JJ.2 d) (informative): 6–10 s window for a *transfer standard*; between 2–4 s (neonatal resuscitation/IH research) and 8 s (NICU default) — design rationale §4.5 | Stability of AC amplitude / PI estimate |
 | Warm-up period | `spo2_warmup_s` | 18.0 s | 3 × τ_var = 3 × 6 s — EMA variance convergence | SpO2 suppressed during initial transient |
 | Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 | No-finger detection guard |
 | SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | Nellcor/Masimo clinical threshold | PI below this → SQI = 0 |
