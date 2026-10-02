@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.97
+# incunest_afe4490 — Specification v0.98
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -260,8 +260,13 @@ struct AFE4490Config {
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;         // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;         // HR3 bandpass upper cutoff [Hz]
-    float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
-    float             spo2_b;
+    // R → SpO2 curve: SpO2 = spo2_r_curve_a − spo2_r_curve_b · R (v0.98; was spo2_a / spo2_b)
+    char              spo2_r_method_id[SPO2_R_ID_LEN];          // how this library computes R (SPO2_R_METHOD_ID)
+    char              spo2_r_curve_id[SPO2_R_ID_LEN];           // the R curve in use
+    char              spo2_r_curve_r_method_id[SPO2_R_ID_LEN];  // the R method that curve was fitted with
+    bool              spo2_r_curve_method_match;               // false: curve fitted for another R method (warning only)
+    float             spo2_r_curve_a;
+    float             spo2_r_curve_b;
     // SpO2 algorithm parameters
     float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
     float             spo2_ema_mean_tau_s;         // DC removal IIR time constant [s]
@@ -320,6 +325,7 @@ void setSpO2EmaVarTauS(float tau_s);                        // AC² EMA time con
 void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
 void setSpO2MinDC(float counts);                           // no-finger DC threshold [adc_code]
 void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+bool setSpO2RCurve(const char* id, const char* r_method_id, float a, float b);  // R curve + the R method it was fitted with (v0.98; replaces setSpO2Coefficients)
 
 // HR1
 void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant [s] — recalc
@@ -917,7 +923,8 @@ R = (AC_RED / DC_RED) / (AC_IR / DC_IR)
 SpO2 = a - b × R
 ```
 
-Coefficients `a` and `b` are empirical (calibration). Configurable via `setSpO2Coefficients()`.
+`a` and `b` are the empirical **R curve**, set with `setSpO2RCurve()` together with the curve's id and
+the R method it was fitted with — see *R methods and R curves* at the end of this section.
 
 **DC and AC² estimation via EmaChannel:**
 
@@ -958,6 +965,59 @@ sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)
 ```
 
 PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference. If SpO2 is outside the valid range [70–100 %] or the DC level is below the no-finger threshold, SQI is forced to 0.
+
+#### R methods and R curves (v0.98)
+
+Two different things decide the SpO2 number, and each has its own identifier:
+
+| | What it names | Format | Where it lives |
+|---|---|---|---|
+| **R method** | *How* R is computed from the signals: input domain, DC and AC estimators and their τ, filtering before them | `R-METHOD-<n>` | `SPO2_R_METHOD_ID` (header constant), `AFE4490Config::spo2_r_method_id` |
+| **R curve** | The curve that turns R into SpO2 (SpO2 = a − b·R), with its provenance | `R-CURVE-<probe>-<source>-<date>` | `setSpO2RCurve()`, `AFE4490Config::spo2_r_curve_*` |
+
+**Rules.**
+1. `SPO2_R_METHOD_ID` changes **if and only if**, for the same input, R comes out as a different
+   number. A change that leaves R alone (HR3's filter in v0.97, for instance) does not change it;
+   the library version is therefore not a substitute for it.
+2. An R curve is only valid for the R method it was fitted with, so the coefficients never travel
+   alone: `setSpO2RCurve(id, r_method_id, a, b)` takes both identifiers, and rejects (keeping the
+   current curve whole) an empty or oversized id (`SPO2_R_ID_LEN`, terminator included) or a
+   non-finite coefficient.
+3. **Mismatch = warning, not invalidation (v0.98).** A curve fitted for another R method is still
+   applied; `getConfig().spo2_r_curve_method_match` is `false` and a warning is logged at `begin()`
+   and at every `setSpO2RCurve()`. It is deliberately **not** a `diag_code` bit: `rsqi` is 1 only
+   while `diag_code == 0`, so a static configuration warning there would zero `rsqi` for good and
+   invalidate the signal — the opposite of a warning. To be made strict once a curve fitted with
+   the current R method exists.
+
+**R methods.**
+
+| Id | Definition | In force |
+|---|---|---|
+| `R-METHOD-0` | Inputs: ambient-corrected `adc_code` (`led1_sub` / `led2_sub`). DC = IIR low-pass, τ = 1.6 s. AC = √(EMA of (x − DC)²), τ = 1.0 s. R = (AC_red/DC_red)/(AC_ir/DC_ir). | The library of 2026-03-23, when the default curve was fitted. Reconstructed from the conversation log (session 26 and the SpO2LocalCalc mirror of that day), not from a tagged version. |
+| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = √(`EmaChannel` var of x − DC), τ = `spo2_ema_var_tau_s` = 6.0 s (both since 2026-06-11). Same ratio. | Current (named in v0.98). |
+
+The OT input domain alone would not move R (each channel's AC/DC is invariant to its own scale),
+but the τ changes do, slightly; with no way to rebuild R-METHOD-0 exactly, the two are kept apart.
+An `$SET`-style runtime change of `spo2_ema_mean_tau_s` / `spo2_ema_var_tau_s` makes the running
+method "R-METHOD-1 with modified parameters"; those parameters travel in the capture's `alg:`
+snapshot. First offline comparison of candidate methods (band-pass + RMS, regression on samples and
+on derivatives): PulseNest `captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r_regression_test.py`.
+
+**R curves known to the library.**
+
+| Id | a | b | Fitted with | Provenance |
+|---|---|---|---|---|
+| `R-CURVE-U401D-MS100-20260323` (**default**) | 114.9208 | 30.5547 | `R-METHOD-0` | CONTEC MS100 simulator, setting "R-Curve Nellcor, 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type, IR 905 nm). A simulator does not validate accuracy (ISO 80601-2-61 EE.4). |
+
+Because the default was fitted with `R-METHOD-0`, **the default configuration raises the
+mismatch warning by itself**: that is the honest state of the library today, not a fault. The
+registry of all curves, with their data and fitting method, lives in PulseNest
+(`docs/spo2_r_curves.md`, planned).
+
+On the wire (PulseNest fw ≥ 0.16), `$CFG` carries `spo2_r_method_id`, `spo2_r_curve_id`,
+`spo2_r_curve_r_method_id`, `spo2_r_curve_method_match`, `spo2_r_curve_a`, `spo2_r_curve_b`
+(fw ≤ 0.15 printed only `spo2a`/`spo2b`).
 
 ### 5.2 HR1 — Peak detection
 
@@ -2581,8 +2641,10 @@ See §5.1 for algorithm description.
 
 | Parameter | Constant | Value | Justification | Effect |
 |---|---|---|---|---|
-| Calibration coefficient a | `spo2_a` | 114.9208 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R intercept |
-| Calibration coefficient b | `spo2_b` | 30.5547 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R slope |
+| R curve id | `spo2_r_curve_id` | `R-CURVE-U401D-MS100-20260323` | MS100 simulator / Nellcor R-curve, probe U401-D | Which curve turns R into SpO2 (§5.1, *R methods and R curves*) |
+| R method of the curve | `spo2_r_curve_r_method_id` | `R-METHOD-0` | The library of 2026-03-23 | ≠ `SPO2_R_METHOD_ID` → mismatch warning (not invalidation) |
+| R curve coefficient a | `spo2_r_curve_a` | 114.9208 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R intercept |
+| R curve coefficient b | `spo2_r_curve_b` | 30.5547 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R slope |
 | DC EMA time constant | `spo2_ema_mean_tau_s` | 2.0 s | f_c ≈ 0.08 Hz << 0.5 Hz (30 bpm min HR); same signal as RSQM → same τ | Speed of DC baseline tracking |
 | AC² EMA time constant | `spo2_ema_var_tau_s` | 6.0 s | ISO 80601-2-61:2026 Annex JJ.2 d) (informative): 6–10 s window for a *transfer standard*; between 2–4 s (neonatal resuscitation/IH research) and 8 s (NICU default) — design rationale §4.5 | Stability of AC amplitude / PI estimate |
 | Warm-up period | `spo2_warmup_s` | 18.0 s | 3 × τ_var = 3 × 6 s — EMA variance convergence | SpO2 suppressed during initial transient |
@@ -2932,6 +2994,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.98   | **R method and R curve get names (§5.1, *R methods and R curves*).**           |
+|         | `SPO2_R_METHOD_ID = "R-METHOD-1"` names how R is computed; it changes only     |
+|         | when R would. The coefficients become an R curve with an id and the R method   |
+|         | it was fitted with: `setSpO2Coefficients(a, b)` → `setSpO2RCurve(id,           |
+|         | r_method_id, a, b)` (rejects empty/oversized ids and non-finite values,        |
+|         | keeping the current curve whole); `AFE4490Config::spo2_a/spo2_b` →             |
+|         | `spo2_r_method_id`, `spo2_r_curve_id`, `spo2_r_curve_r_method_id`,             |
+|         | `spo2_r_curve_method_match`, `spo2_r_curve_a`, `spo2_r_curve_b`. Same root in    |
+|         | every layer (lib, PulseNest `$CFG` fw 0.16, capture header, PILAB). Default    |
+|         | curve labelled `R-CURVE-U401D-MS100-20260323`, fitted with `R-METHOD-0` (the   |
+|         | 2026-03-23 library: adc_code inputs, DC τ 1.6 s, AC τ 1.0 s), so it raises the  |
+|         | **mismatch warning** by itself — warning mode: logged and reported in the       |
+|         | config, never a `diag_code` bit (that would zero `rsqi`). SpO2 values are       |
+|         | unchanged (same coefficients, same R). Tests: `test_spo2` +3 (default labelled  |
+|         | and warning, a matching curve applies, bad input rejected whole); 9/9 suites.  |
 | v0.97   | **HR3 anti-alias low-pass: 2nd → 4th-order Butterworth, 15 Hz (§5.3.1, §5.4).**   |
 |         | Closes the weak point recorded in v0.83: −9.4 dB at the 25 Hz Nyquist of the ×10  |
 |         | decimation becomes −18.0 dB (at a 500 Hz PRF), so less folded noise lifts the     |

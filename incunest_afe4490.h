@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.97 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.98 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.97"
+#define INCUNEST_AFE4490_VERSION "0.98"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -113,6 +113,15 @@ inline bool isProbeAbsent(ProbeState s) {
         || s == ProbeState::PROBE_OT_HIGH
         || s == ProbeState::PROBE_ONLY_LED_SATURATING;
 }
+
+// ── SpO2: R method and R curve identifiers (v0.98) ──────────────────────────
+// SPO2_R_METHOD_ID names HOW this library computes R from the signals. It changes if and only if,
+// for the same input, R comes out as a different number (method, τ of DC or AC, DC split, input
+// domain, filtering before) — never for changes that leave R alone. An R curve
+// ("R-CURVE-<probe>-<source>-<date>") turns R into SpO2 and records the R method it was fitted
+// with: a curve is only valid for that method. Registry of both: spec §5.1, "R methods and R curves".
+inline constexpr char SPO2_R_METHOD_ID[] = "R-METHOD-1";
+inline constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, terminator included
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
 // Multiple bits may be set simultaneously.
@@ -672,8 +681,13 @@ struct AFE4490Config {
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;     // HR3 bandpass upper cutoff [Hz]
-    float             spo2_a;                   // SpO2 calibration: SpO2 = a - b*R
-    float             spo2_b;
+    // R → SpO2 curve: SpO2 = spo2_r_curve_a − spo2_r_curve_b · R (v0.98; was spo2_a / spo2_b)
+    char              spo2_r_method_id[SPO2_R_ID_LEN];          // how this library computes R (SPO2_R_METHOD_ID)
+    char              spo2_r_curve_id[SPO2_R_ID_LEN];           // the R curve in use
+    char              spo2_r_curve_r_method_id[SPO2_R_ID_LEN];  // the R method that curve was fitted with
+    bool              spo2_r_curve_method_match;               // false: curve fitted for another R method (warning only)
+    float             spo2_r_curve_a;
+    float             spo2_r_curve_b;
     // SpO2 algorithm parameters
     float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
     float             spo2_ema_mean_tau_s;         // EMA mean (DC) time constant [s]
@@ -864,9 +878,15 @@ public:
     // After stop(), begin() can be called again to restart.
     void stop();
 
-    // SpO2 calibration coefficients (SpO2 = a - b*R).
-    // Defaults are experimentally calibrated for UpnMed U401-D(01AS-F), Nellcor Non-Oximax type.
-    void setSpO2Coefficients(float a, float b);
+    // R → SpO2 curve: SpO2 = a − b·R (v0.98, replaces setSpO2Coefficients()).
+    // id names the curve ("R-CURVE-<probe>-<source>-<date>") and r_method_id the R method it was
+    // fitted with: the coefficients never travel without them. A curve fitted for another R method
+    // is still applied (warning mode): getConfig().spo2_r_curve_method_match turns false and a warning
+    // is logged; SpO2 is not invalidated. Returns false and keeps the current curve if an id is empty
+    // or does not fit SPO2_R_ID_LEN, or a coefficient is not finite.
+    // Default: R-CURVE-U401D-MS100-20260323 (UpnMed U401-D(01AS-F), CONTEC MS100), fitted with
+    // R-METHOD-0 — so the default itself raises the warning: see spec §5.1, "R methods and R curves".
+    bool setSpO2RCurve(const char* id, const char* r_method_id, float a, float b);
 
     // Returns a snapshot of all current chip and algorithm configuration parameters.
     // Thread-safe: takes the relevant mutexes if the library is initialized.
@@ -1387,8 +1407,11 @@ private:
     //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
-    float    _spo2_a;
-    float    _spo2_b;
+    char     _spo2_r_curve_id[SPO2_R_ID_LEN];            // R curve in use (setSpO2RCurve)
+    char     _spo2_r_curve_r_method_id[SPO2_R_ID_LEN];   // R method that curve was fitted with
+    float    _spo2_r_curve_a;
+    float    _spo2_r_curve_b;
+    static bool _copy_spo2_r_id(char* dst, const char* src);   // false: null, empty or too long
 
     // ── HR1 state ──
     float    _hr1_dc;

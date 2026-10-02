@@ -1,5 +1,5 @@
 // incunest_afe4490 — Basic Example
-// Library version: v0.97 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.98 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
@@ -149,7 +149,7 @@ void setup() {
     // Use Webster (1997) coefficients instead of the default (source-traceable)
     // NOTE: both sets assume ~940 nm IR. For 905 nm probes (e.g. UpnMed U401-D)
     //       an empirical calibration against a certified reference is required.
-    // afe.setSpO2Coefficients(110.0f, 25.0f);
+    // afe.setSpO2RCurve("R-CURVE-<probe>-<source>-<date>", SPO2_R_METHOD_ID, 110.0f, 25.0f);
 
     // Increase LED current if the PPG signal is too weak
     // afe.setLED1Current(10.0f);  // IR  LED, mA

@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.97 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.98 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -30,11 +30,14 @@ namespace {
     // At 60 bpm (period 1 s): covers ~6 cardiac cycles. At 120 bpm: ~12 cycles.
     // Tradeoff: slower response to real desaturation events vs. lower SpO2 noise.
     constexpr float    spo2_ema_var_tau_s    = 6.0f;
-    // Calibration coefficients derived from experimental data with a
-    // UpnMed U401-D(01AS-F) probe, type Nellcor Non-Oximax.
-    // Override at runtime with setSpO2Coefficients() for a different probe.
-    constexpr float    spo2_a_default      = 114.9208f; // SpO2 = a - b·R
-    constexpr float    spo2_b_default      =  30.5547f;
+    // Default R curve: R-CURVE-U401D-MS100-20260323 — CONTEC MS100 simulator, "R-Curve Nellcor
+    // 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type), fitted 2026-03-23 with
+    // R-METHOD-0 (adc_code inputs, DC τ 1.6 s, AC τ 1.0 s). It therefore does NOT match
+    // SPO2_R_METHOD_ID and raises the warning by itself (spec §5.1, "R methods and R curves"). Replace with setSpO2RCurve().
+    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-U401D-MS100-20260323";
+    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-0";
+    constexpr float    spo2_r_curve_a_default = 114.9208f; // SpO2 = a - b·R
+    constexpr float    spo2_r_curve_b_default =  30.5547f;
     constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
     constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
     constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
@@ -338,7 +341,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_dc_alpha(0.0f),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
-      _spo2_a(spo2_a_default), _spo2_b(spo2_b_default),
+      _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
@@ -381,8 +384,20 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
     _hr3_lp.f_high     = 15.0f;   // low-pass only (v0.83); 4th order since v0.97
+    _copy_spo2_r_id(_spo2_r_curve_id, spo2_r_curve_id_default);
+    _copy_spo2_r_id(_spo2_r_curve_r_method_id, spo2_r_curve_r_method_id_default);
     _recalc_rate_params();
     _reset_algorithms();
+}
+
+// Copies an R method / R curve id into a SPO2_R_ID_LEN buffer. Returns false, leaving dst
+// untouched, if src is null, empty or would not fit with its terminator.
+bool INCUNEST_AFE4490::_copy_spo2_r_id(char* dst, const char* src) {
+    if (src == nullptr) return false;
+    size_t n = strnlen(src, SPO2_R_ID_LEN);
+    if (n == 0 || n >= SPO2_R_ID_LEN) return false;
+    memcpy(dst, src, n + 1);
+    return true;
 }
 
 INCUNEST_AFE4490::~INCUNEST_AFE4490() {
@@ -435,6 +450,12 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
     xSemaphoreGive(_spi_mutex);
 
     _initialized = true;
+
+    if (strcmp(_spo2_r_curve_r_method_id, SPO2_R_METHOD_ID) != 0) {
+        ESP_LOGW(TAG, "R curve %s was fitted with %s, this library computes R as %s: SpO2 is "
+                 "shown with a curve for another R method", _spo2_r_curve_id,
+                 _spo2_r_curve_r_method_id, SPO2_R_METHOD_ID);
+    }
 
     incunest_afe4490_hal_gpio_init_input_pullup(_pin_drdy);
     if (!incunest_afe4490_hal_gpio_attach_isr_rising(_pin_drdy, _drdy_isr_static)) {
@@ -808,11 +829,26 @@ void INCUNEST_AFE4490::setHR3Filter(float f_high_hz) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2Coefficients(float a, float b) {
+bool INCUNEST_AFE4490::setSpO2RCurve(const char* id, const char* r_method_id, float a, float b) {
+    char new_id[SPO2_R_ID_LEN];
+    char new_method[SPO2_R_ID_LEN];
+    if (!_copy_spo2_r_id(new_id, id) || !_copy_spo2_r_id(new_method, r_method_id)
+        || !std::isfinite(a) || !std::isfinite(b)) {
+        ESP_LOGE(TAG, "setSpO2RCurve rejected (empty/oversized id or non-finite coefficient); "
+                 "curve unchanged");
+        return false;
+    }
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_a = a;
-    _spo2_b = b;
+    memcpy(_spo2_r_curve_id, new_id, sizeof(new_id));
+    memcpy(_spo2_r_curve_r_method_id, new_method, sizeof(new_method));
+    _spo2_r_curve_a = a;
+    _spo2_r_curve_b = b;
     if (_initialized) xSemaphoreGive(_state_mutex);
+    if (strcmp(new_method, SPO2_R_METHOD_ID) != 0) {
+        ESP_LOGW(TAG, "R curve %s was fitted with %s, this library computes R as %s: SpO2 is "
+                 "shown with a curve for another R method", new_id, new_method, SPO2_R_METHOD_ID);
+    }
+    return true;
 }
 
 void INCUNEST_AFE4490::setSpO2WarmupS(float s) {
@@ -1023,8 +1059,12 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
     cfg.hr3_f_high_hz    = _hr3_lp.f_high;
-    cfg.spo2_a           = _spo2_a;
-    cfg.spo2_b           = _spo2_b;
+    memcpy(cfg.spo2_r_method_id, SPO2_R_METHOD_ID, sizeof(SPO2_R_METHOD_ID));
+    memcpy(cfg.spo2_r_curve_id, _spo2_r_curve_id, sizeof(_spo2_r_curve_id));
+    memcpy(cfg.spo2_r_curve_r_method_id, _spo2_r_curve_r_method_id, sizeof(_spo2_r_curve_r_method_id));
+    cfg.spo2_r_curve_method_match = strcmp(_spo2_r_curve_r_method_id, SPO2_R_METHOD_ID) == 0;
+    cfg.spo2_r_curve_a   = _spo2_r_curve_a;
+    cfg.spo2_r_curve_b   = _spo2_r_curve_b;
     cfg.spo2_warmup_s         = _spo2_warmup_s;
     cfg.spo2_ema_mean_tau_s     = _spo2_ema_mean_tau_s;
     cfg.spo2_ema_var_tau_s     = _spo2_ema_var_tau_s;
@@ -2279,7 +2319,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // This is the core of the SpO2 algorithm. SpO2 = a − b·R (empirical calibration curve).
     // Each term (AC/DC) is the Perfusion Index of the channel (dimensionless, ~0–1).
     float R = (ac_red / dc_red) / (ac_ir / dc_ir);
-    float spo2 = _spo2_a - _spo2_b * R;
+    float spo2 = _spo2_r_curve_a - _spo2_r_curve_b * R;
 
     _current_data.spo2_r = R;
 
