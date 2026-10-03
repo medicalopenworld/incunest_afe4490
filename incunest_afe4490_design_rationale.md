@@ -560,6 +560,67 @@ points (`CAPTURE_SET_SPEC.md`), which is where the HR3-under-drift limit should 
 
 ---
 
+## 9. SpO2 R method — choosing R-METHOD-2 (2026-09-29 → 2026-10-03)
+
+**Problem.** R-METHOD-1 (lib since v0.38) is `R = (σ_red/μ_red)/(σ_ir/μ_ir)` with μ an EMA (τ 2 s)
+and σ the RMS of x − μ by EMA (τ 6 s), on OT. σ takes everything that is not DC — noise, motion,
+venous and respiratory components — and on HOSPNAV SUBJ08/09 (2026-09-23, Medle probe, reference =
+the NICU monitor read by VideoNest) the R→SpO2 scatter was 5.1 points with Spearman ρ −0.44.
+
+**Options listed (Alex, 2026-10-02):** (1) band-pass + RMS ratio; (2) regression red-on-IR, OLS;
+(3) the same, total least squares; (4) regression on derivatives ("reg_dols"); (5) spectral
+amplitude at f_HR (+harmonics); (6) autocorrelation at the pulse lag; (7) literature — Masimo DST
+(expired US 5,632,272), Philips FAST (expired US 6,631,281), per-beat peak-to-trough. All are
+replayable offline: the captures keep raw OT.
+
+**Measured** (3471 stationary pairs, 8 s windows; scripts and summaries in
+`PulseNest/captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/`):
+
+| R estimator | ρ | scatter [SpO2 pts] | note |
+|---|---|---|---|
+| R-METHOD-1 (lib) | −0.44 | 5.07 | baseline |
+| (1) band-pass + RMS, zero-phase | −0.68 | 2.7 | most of the gain is the band-pass |
+| (2) OLS / (3) TLS, zero-phase | −0.71 / −0.69 | 2.4 / 2.6 | r² median 0.988, so OLS ≈ TLS |
+| (4) derivative regression, zero-phase | −0.82 | 1.61 | best |
+| (4) causal: Butterworth 4-pole forward + EMA(dx·dy)/EMA(dx²) | −0.80 | 1.62 | causality costs nothing here (it costs ~0.5 pt to (1)/(2)) |
+| (4) causal with the library's **one-biquad** band-pass | −0.80 | **1.63** | what the firmware can run at today's cost |
+
+Insensitive to band edges (0.3/0.7–4/8 Hz), filter order, derivative lag k 1–25 and τ_dc 1–6 s.
+Leave-one-subject-out median |error| 0.95–1.37 points (R-METHOD-1: 3.1–3.3 with bias ±2.6).
+Why the band-pass matters (step 1d): power below 0.5 Hz, ~2× larger relative to the pulse in red
+than in IR, inflates R-METHOD-1's R by a near-constant ×1.2; it does not correlate with SpO2, so
+the HOSPNAV slope change (21.5 → ~38) is regression dilution by R-METHOD-1's noise times that
+inflation — not motion coinciding with desaturations. Methods (5)–(6) not yet run (step 1e).
+
+**Decisions taken 2026-10-03 (dev session, with Alex):**
+- **Band-pass = the library's one-biquad `BiquadFilter::init_bp`** (2 poles, −6 dB/octave per skirt),
+  not a 4-pole design: 1.63 vs 1.62, same fits and same leave-one-out. No new filter type enters the
+  library for this.
+- **τ_ac stays 6 s.** τ_ac 2 s scored better (1.39), but the averaging time is a separate decision
+  with its own evidence base (§4.5: ISO sets no window, neonatal practice 8 s); the method change
+  must not carry a hidden averaging change. Revisit there, not here.
+- **Step 2 done: the candidate gets worse nowhere it was tested.** `tools/offline_runner` v0.23
+  computes it as `R_CAND` beside the library (C++ float = Python float64 to 2·10⁻⁴ in R; PILAB's
+  [R CANDIDATE] preset = the runner to 2·10⁻⁴) and replayed every capture on disk: 8 HOSPNAV
+  sessions (25 parts), the v0.4 corpus (3 sessions) and 16 MS100 captures. Coverage identical to the
+  library's in every file (same gating and warm-up). MS100 clean, 98 %: library 0.554 flat, candidate
+  0.545–0.551 across 40–250 BPM (a ≤ 0.2-point HR dependence). MS100 with the probe perturbed:
+  library 0.82–0.87, candidate 0.66–0.73 (unperturbed 0.554) — less bias. HOSPNAV: library
+  99th percentile reaches 15–50 in six SUBJ09 parts; the candidate's 99th never exceeds 1.53.
+- **One new failure signature, and its detector.** In 3 episodes (29 s of ~2.7 h valid, all SUBJ09)
+  the candidate's R fell to ~0 or below (down to −1.1) — impossible for an RMS ratio. There the
+  red–IR derivative correlation is r ≈ 0 (median 0.04, max 0.14; elsewhere median 0.99): no pulse in
+  either channel, and the library's R in those same seconds was 2.5–30, just as wrong. The
+  regression's own r detects it; the RMS ratio has no such signal. Gating on r ≥ 0.6…0.9 removes all
+  29 s and keeps 93–94 % of samples. **r becomes the SQI candidate of R-METHOD-2; its threshold is
+  Alex's call** (0.8 keeps 93.4 %).
+
+**Pending:** step 1e (spectral/autocorrelation), 1f (MS100 R stability — partly answered above),
+the r threshold, then step 3 = R-METHOD-2 in the library with an R curve re-fitted with it
+(decision (ii) of 2026-10-02: from MS100 and/or SUBJ08/09 replays).
+
+---
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

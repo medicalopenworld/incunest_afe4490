@@ -2462,6 +2462,14 @@ directory holds only what was recorded; the directory name records what the repl
 on, so a replay with another library version or `--ot-thr` does not overwrite an earlier
 one. `--out DIR` overrides the location.
 
+**R-method candidate columns (runner v0.23, 2026-10-03):** every replay row ends with
+`R_CAND` and `R_CAND_CORR`, the candidate `R-METHOD-CAND-1.2(0.5-5Hz)/2.6(6s)/3.1(2s)` — a causal
+regression on derivatives, `R = EMA(dx·dy)/EMA(dx²)` over the band-passed, DC-normalised OT, and its
+correlation `r` — computed beside the library on the same OT samples and ProbeState `_spo2_update()`
+receives, from library pieces only (`BiquadFilter::init_bp` with precharge, `EmaChannel`-style DC,
+reset and 3·τ warm-up as `_spo2_update()`). Not part of the library: the evidence for R-METHOD-2.
+Rationale §9.
+
 **Optional firmware result columns:** when the capture carries the firmware's own
 outputs (`SpO2`, `R`, `ProbeState` in the PulseNest dialect), the replay row also emits
 them plus `delta_SpO2`/`delta_R`, for equivalence checking. Measured on
