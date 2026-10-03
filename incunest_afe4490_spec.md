@@ -995,28 +995,24 @@ Two different things decide the SpO2 number, and each has its own identifier:
 | Id | Definition | In force |
 |---|---|---|
 | `R-METHOD-0` | Inputs: ambient-corrected `adc_code` (`led1_sub` / `led2_sub`). DC = IIR low-pass, τ = 1.6 s. AC = √(EMA of (x − DC)²), τ = 1.0 s. R = (AC_red/DC_red)/(AC_ir/DC_ir). | The library of 2026-03-23, when the default curve was fitted. Reconstructed from the conversation log (session 26 and the SpO2LocalCalc mirror of that day), not from a tagged version. |
-| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = 2.0 s. AC = √(`EmaChannel` var of x − DC), τ = 6.0 s. R ratio of AC/DC. | v0.38–v0.99 (SQI = PI-based). |
-| `R-METHOD-2` | Inputs: OT. Causal regression on first differences of band-passed (0.5–5 Hz, one-biquad), normalized by DC EMA (τ 2.0 s). x = BP(OT_IR) / DC_IR, y = BP(OT_RED) / DC_RED; R = Σ(Δx·Δy) / Σ(Δx²). SQI = r (goodness of fit: Σ(Δx·Δy) / √(Σ(Δx²)·Σ(Δy²)), gated ≥ 0.8). Warm-up 18 s (3·τ_ac). | v0.100+ (current). |
+| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = √(`EmaChannel` var of x − DC), τ = `spo2_ema_var_tau_s` = 6.0 s (both since 2026-06-11). Same ratio. | Current (named in v0.98). |
 
-**R-METHOD-0 vs R-METHOD-1:** The OT input domain alone would not move R (each channel's AC/DC is
-invariant to its own scale), but the τ changes do, slightly; with no way to rebuild R-METHOD-0
-exactly, the two are kept apart. An `$SET`-style runtime change of `spo2_ema_mean_tau_s` /
-`spo2_ema_var_tau_s` makes the running method "R-METHOD-1 with modified parameters"; those
-parameters travel in the capture's `alg:` snapshot.
-
-**R-METHOD-2 rationale:** Measured on 3471 stationary pairs (HOSPNAV SUBJ08/09, Medle probe, NICU
-reference monitor), regression on derivatives reduces scatter from 5.1 to 1.61 SpO2 points and
-improves Spearman ρ from −0.44 to −0.82 vs reference. Design rationale §9–10; offline analysis and
-evidence: PulseNest `captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r_regression_test.py`.
+The OT input domain alone would not move R (each channel's AC/DC is invariant to its own scale),
+but the τ changes do, slightly; with no way to rebuild R-METHOD-0 exactly, the two are kept apart.
+An `$SET`-style runtime change of `spo2_ema_mean_tau_s` / `spo2_ema_var_tau_s` makes the running
+method "R-METHOD-1 with modified parameters"; those parameters travel in the capture's `alg:`
+snapshot. First offline comparison of candidate methods (band-pass + RMS, regression on samples and
+on derivatives): PulseNest `captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r_regression_test.py`.
 
 **R curves known to the library.**
 
-| Id | a | b | Applied to | Fitted with | Provenance |
-|---|---|---|---|---|---|
-| `R-CURVE-STS0163-HOSPNAV-20260923` (**default**, v0.100+) | 122.62 | 37.63 | `R-METHOD-1` | Causal regression on derivatives | Clinical — NICU ward, 2 neonatal subjects, Medle ST-S0163 probe, 3471 stationary pairs pairing board SpO2 against VideoNest monitor OCR (reference). Reduces scatter from 5.07 (R-METHOD-1 curve) to ≈1.6 points; however, the library's R-METHOD-1 computation (RMS ratio) differs slightly from the regression used to fit the curve (difference negligible for clinical use, §9). Design rationale §9–10. |
-| `R-CURVE-U401D-MS100-20260323` | 114.9208 | 30.5547 | `R-METHOD-0` | Simulator fit | CONTEC MS100 "R-Curve Nellcor, 100 bpm", probe UpnMed U401-D(01AS-F). Historical; not recommended (does not validate accuracy per ISO 80601-2-61 EE.4, fitted with obsolete R-METHOD-0). |
+| Id | a | b | Fitted with | Provenance |
+|---|---|---|---|---|
+| `R-CURVE-U401D-MS100-20260323` (**default**) | 114.9208 | 30.5547 | `R-METHOD-0` | CONTEC MS100 simulator, setting "R-Curve Nellcor, 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type, IR 905 nm). A simulator does not validate accuracy (ISO 80601-2-61 EE.4). |
 
-The registry of all curves, with their data and fitting method, lives in PulseNest
+Because the default was fitted with `R-METHOD-0`, **the default configuration raises the
+mismatch warning by itself**: that is the honest state of the library today, not a fault. The
+registry of all curves, with their data and fitting method, lives in PulseNest
 (`docs/spo2_r_curves.md`, planned).
 
 On the wire (PulseNest fw ≥ 0.16), `$CFG` carries `spo2_r_method_id`, `spo2_r_curve_id`,

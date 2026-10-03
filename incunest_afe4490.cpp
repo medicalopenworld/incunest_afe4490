@@ -34,10 +34,10 @@ namespace {
     // 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type), fitted 2026-03-23 with
     // R-METHOD-0 (adc_code inputs, DC τ 1.6 s, AC τ 1.0 s). It therefore does NOT match
     // SPO2_R_METHOD_ID and raises the warning by itself (spec §5.1, "R methods and R curves"). Replace with setSpO2RCurve().
-    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-STS0163-HOSPNAV-20260923";
-    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-1";
-    constexpr float    spo2_r_curve_a_default = 122.62f;   // SpO2 = a - b·R (v0.100+, fitted with causal regression)
-    constexpr float    spo2_r_curve_b_default =  37.63f;   // HOSPNAV SUBJ08/09 + MS100 (design rationale §9), applied to R-METHOD-1 (minor difference vs reg_dols)
+    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-U401D-MS100-20260323";
+    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-0";
+    constexpr float    spo2_r_curve_a_default = 114.9208f; // SpO2 = a - b·R
+    constexpr float    spo2_r_curve_b_default =  30.5547f;
     constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
     constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
     constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above

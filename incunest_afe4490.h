@@ -120,9 +120,6 @@ inline bool isProbeAbsent(ProbeState s) {
 // domain, filtering before) — never for changes that leave R alone. An R curve
 // ("R-CURVE-<probe>-<source>-<date>") turns R into SpO2 and records the R method it was fitted
 // with: a curve is only valid for that method. Registry of both: spec §5.1, "R methods and R curves".
-// v0.100: new R-CURVE fitted with causal regression on derivatives; library still uses R-METHOD-1
-// (RMS ratio) to compute R, but the curve was optimized with regression data (design rationale §9–10).
-// Future phase: integrate regression in-library if utility on no-pulse signals is confirmed.
 inline constexpr char SPO2_R_METHOD_ID[] = "R-METHOD-1";
 inline constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, terminator included
 
