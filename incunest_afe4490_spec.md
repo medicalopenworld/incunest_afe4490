@@ -2451,7 +2451,15 @@ state (debounce included), R, PI and SpO2 are recomputed by the library itself; 
 **Configuration comes from the capture itself:** the PulseNest capture header carries a
 `# from-board: $CFG,…` line and the runner applies it (PRF, NUMAV, LED currents/range,
 per-channel RF/CF/RG/STAGE2EN, AMBDAC, SpO2 coefficients, filter cutoffs) before feeding
-samples; it refuses to run on a value it does not understand. `--ot-thr <A/A>` overrides
+samples; it refuses to run on a value it does not understand. **Since runner v0.24 the replay also
+follows the capture's `# @row N afe:` records** (v0.4 format: one at every part start, one whenever
+the board's HGAC changes RF, `cause=hgac`): only the keys whose value changes are applied
+(RF/CF/RG/STAGE2EN, AMBDAC, ILED, range, PRF, NUMAV), and an RF change is applied at the row where
+that channel's raw code actually jumps (searched within ±50 rows of the record, whose row is the
+one at which the host learnt of the change), because applying it a few rows off puts one sample of
+old-RF-on-new-codes through the filters and the settling freeze holds it. Before v0.24 the header's
+configuration stood for the whole session, so every HGAC move left the replay dividing by the
+wrong RF from there on (rationale §9, corrected). `--ot-thr <A/A>` overrides
 `rsqm_ot_thr` for the replay (e.g. `1.0e-4` to reproduce a capture taken before v0.95 for
 equivalence checking). Parts of one session (`<stem>_pNN.csv`) share one library instance
 in order, so filter/EMA state is continuous across part boundaries, as it was on the
@@ -2468,7 +2476,11 @@ regression on derivatives, `R = EMA(dx·dy)/EMA(dx²)` over the band-passed, DC-
 correlation `r` — computed beside the library on the same OT samples and ProbeState `_spo2_update()`
 receives, from library pieces only (`BiquadFilter::init_bp` with precharge, `EmaChannel`-style DC,
 reset and 3·τ warm-up as `_spo2_update()`). Not part of the library: the evidence for R-METHOD-2.
-Rationale §9.
+Rationale §9. **Runner v0.24** adds the DC-estimator experiment of rationale §10: the same regression
+with three other DCs, `R_CAND_CD`/`_CORR` (2nd-order low-pass 0.2 Hz, Q 0.5, one biquad), `R_CAND_CE`
+(two EMAs of 0.796 s in cascade, the same transfer function) and `R_CAND_BW` (Butterworth 0.2 Hz);
+each DC runs in float with a double twin, and the per-part summary prints the largest relative
+deviation between the two seen in the session.
 
 **Optional firmware result columns:** when the capture carries the firmware's own
 outputs (`SpO2`, `R`, `ProbeState` in the PulseNest dialect), the replay row also emits

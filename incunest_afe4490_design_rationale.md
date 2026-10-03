@@ -605,34 +605,124 @@ inflation — not motion coinciding with desaturations. Methods (5)–(6) not ye
   sessions (25 parts), the v0.4 corpus (3 sessions) and 16 MS100 captures. Coverage identical to the
   library's in every file (same gating and warm-up). MS100 clean, 98 %: library 0.554 flat, candidate
   0.545–0.551 across 40–250 BPM (a ≤ 0.2-point HR dependence). MS100 with the probe perturbed:
-  library 0.82–0.87, candidate 0.66–0.73 (unperturbed 0.554) — less bias. HOSPNAV: library
-  99th percentile reaches 15–50 in six SUBJ09 parts; the candidate's 99th never exceeds 1.53.
-- **One new failure signature, and its detector.** In 3 episodes (29 s of ~2.7 h valid, all SUBJ09)
-  the candidate's R fell to ~0 or below (down to −1.1) — impossible for an RMS ratio. There the
-  red–IR derivative correlation is r ≈ 0 (median 0.04, max 0.14; elsewhere median 0.99): no pulse in
-  either channel, and the library's R in those same seconds was 2.5–30, just as wrong. The
-  regression's own r detects it; the RMS ratio has no such signal. **r becomes the SQI candidate of
-  R-METHOD-2; its threshold is Alex's call.**
-- **What the r gate rejects, measured on all 8 HOSPNAV sessions (2.66 h valid; replays with the
-  library's recomputed ProbeState; reference = the NICU monitor read by VideoNest, available 48–99 %
-  of the time in 6 sessions, absent in 2).** Time below r: 0.6 → 3.0 %, 0.8 → 3.8 % (362 s), 0.9 →
-  4.2 % — r is bimodal (0.99 or ~0.3), so the threshold barely matters. (A first figure of "93–94 %
-  kept" was wrong: it re-ran the candidate per capture part, adding one 18 s warm-up per part;
-  the runner keeps state across parts.) It is 10 episodes of 30–61 s, all SUBJ09, none in SUBJ08.
-  In every one of them the library's own HR2 and HR3 SQI were 0 and its SpO2 SQI was 0: the firmware
-  already showed no valid SpO2 there, while its R read 1.5–26. So the gate rejects nothing the
-  library accepted, and 0 s of the rejected time looks like a pulse to HR2/HR3. The candidate's R
-  in those episodes (0.65–1.25) is plausible but unsupported. Reference during low r: 32 % of it
-  below 90 % SpO2 vs 23 % elsewhere — the episodes lean towards desaturations (agitation), as
-  expected. Of 69 reference desaturation events (< 90 % for ≥ 5 s), the gate keeps the median
-  event whole; one 6 s event is lost and two long ones in 1238 SUBJ09 (64 s to 79 %, 95 s to 79 %)
-  are 50–62 % kept — stretches where the current firmware also had SpO2 SQI 0. A gate cannot
-  recover a signal that is not there; what it changes is that the invalid periods are declared
-  by the R estimator itself instead of by a separate PI/HR gate.
+  library 0.82–0.87, candidate 0.66–0.73 (unperturbed 0.554) — less bias. HOSPNAV, with the replay following the HGAC records (runner v0.24, see the correction below): the
+  library's 99th percentile reaches 1.4–1.8 in the SUBJ09 parts, the candidate's 1.0–1.2 (the
+  "15–50" first reported here was a replay artefact).
+- **Correction (2026-10-03, same day): the "new failure signature" first reported here — R ≈ 0 or
+  negative with r ≈ 0 in 3 SUBJ09 episodes — was a replay artefact, not a property of the candidate.**
+  The runner (≤ v0.23) kept the header's `$CFG` for the whole session and ignored the capture's
+  `# @row N afe: cause=hgac` records, so after the board's HGAC moved RF2 (100k ↔ 250k, 2–6 times per
+  SUBJ09 session) the replay divided the raw codes by the wrong RF: replayed OT_LED2 stepped +150 % /
+  −60 % where the board's moved 1–4 %, for 82–89 % of those sessions; the library's ProbeState, SQIs
+  and R, and the candidate's R and r, were wrong from there on. Runner v0.24 follows the records, and
+  aligns each RF change to the raw code's own jump (the record's row is where the host learnt of it,
+  −14…+6 rows off): applied at the record's row, one sample of old-RF-on-new-codes still went
+  through the filters and the settling freeze held it for 10 more — a 20 ms ×2.5 spike that alone
+  produced r ≈ 0.3 for 30 s after every HGAC move. With both fixed: no negative R anywhere (candidate
+  p1 ≥ 0.62 in every part), and the r distribution is what the next bullet says. r stays the SQI
+  *candidate* of R-METHOD-2 on first principles (the regression's own goodness of fit), but the
+  corpus no longer supplies evidence for it or for any threshold.
+- **What r actually does on the corpus (replays corrected, 2.66 h valid, 8 HOSPNAV sessions + 16
+  MS100 captures).** r never drops below 0.83: HOSPNAV p0.1 / p1 / p5 / p50 = 0.906 / 0.949 / 0.973 /
+  0.994; r < 0.8 = 0 s, r < 0.9 = 6 s (0.1 %). MS100 clean 0.975–0.996; MS100 with the probe perturbed
+  0.94–0.97 — while R there is biased +0.1 to +0.18 (0.55 → 0.66–0.73). So the "bimodal 0.99 / 0.3"
+  picture, the 3.8 % rejected at 0.8, the 10 SUBJ09 episodes and the desaturation-coverage figures
+  reported earlier in this section were all the artefact: **a gate at 0.8 rejects nothing in this
+  corpus, and would not flag the one bias the corpus does show (probe perturbation, r ≈ 0.95).**
+  69 reference desaturation events are kept 100 % whatever the threshold. The value of r as an SQI
+  has to be shown on signals that lack a pulse (probe off, motion) with the corrected replay — not
+  yet done.
+
+- **r threshold = 0.8 (Alex, 2026-10-03) — decided on the figures above before they were found to be
+  an artefact; to be reconfirmed.** With the corrected replays the choice costs nothing on this corpus
+  (0 s rejected) and protects against nothing the corpus shows; it remains a plausible guard for
+  no-pulse input until measured there. Band-pass order and band confirmed the same day (Alex asked): 2nd order
+  because 4 poles measured equal for R and add nothing the data ask for yet (they buy drift rejection,
+  −30 vs −15 dB at 0.1 Hz, not neonatal respiration rejection — 40–60 breaths/min is inside the pulse
+  band whatever the order); 5 Hz because R does not depend on the cut (both channels share the filter:
+  MS100 0.545 at 40 BPM → 0.551 at 250 BPM; HOSPNAV 0.5–8 Hz 1.59, 0.5–4 Hz 1.67, insensitive).
 
 **Pending:** step 1e (spectral/autocorrelation), 1f (MS100 R stability — partly answered above),
-the r threshold, then step 3 = R-METHOD-2 in the library with an R curve re-fitted with it
-(decision (ii) of 2026-10-02: from MS100 and/or SUBJ08/09 replays).
+then step 3 = R-METHOD-2 in the library (r ≥ 0.8 as its SQI) with an R curve re-fitted with it
+(decision (ii) of 2026-10-02: from MS100 and/or SUBJ08/09 replays). The DC estimator it divides by is
+§10's question.
+
+## 10. The DC estimator under the R method — EMA vs 2nd-order low-pass (2026-10-03)
+
+**Question (Alex).** Replace the EMA that estimates DC — everywhere in the library — by a 2nd-order
+low-pass, and make band-passes 4th order by default. Two reasons given: the EMA is slow (τ 2 s), and
+its selectivity cannot be set with the clarity of a biquad.
+
+**Analysis before measuring.** The slowness is the cutoff's, not the form's: an EMA of τ 2 s is a
+one-pole low-pass at 0.08 Hz, and any filter with that cutoff settles in about the same time. The
+constraint is leakage: the DC must not follow the slowest pulse accepted, 30 BPM = 0.5 Hz. The
+selectivity point is right (−6 vs −12 dB/octave) and converts into speed at equal leakage. Filter
+facts at 500 Hz:
+
+| DC estimator | \|H\| at 0.5 Hz | at 1 Hz | 63 % | 95 % | 98 % | overshoot |
+|---|---|---|---|---|---|---|
+| EMA τ 2 s (library) | −16.1 dB | −22.0 dB | 2.00 s | 5.99 s | 7.82 s | none |
+| 2-pole LP 0.2 Hz, Q 0.5 (one biquad) | −17.2 dB | −28.3 dB | 1.71 s | 3.78 s | 4.64 s | none |
+| two EMAs of 0.796 s in cascade (same H) | −17.2 dB | −28.3 dB | 1.71 s | 3.77 s | 4.64 s | none |
+| 2-pole LP 0.2 Hz Butterworth | −16.0 dB | −28.0 dB | 1.39 s | 2.33 s | 2.50 s | 4.3 % |
+| EMA τ 0.5 s (the "just shorten τ" option) | −5.4 dB | −10.4 dB | 0.50 s | 1.50 s | 1.96 s | none |
+
+EMA τ 0.5 s is out: it lets a 30–60 BPM pulse into the DC at −5 to −10 dB, so PI and R would be
+modulated by the beat. The three 2-pole forms were chosen to leak like the current EMA (−16/−17 dB at
+0.5 Hz) so that the comparison isolates speed and arithmetic.
+
+**Measured** — `tools/offline_runner` v0.24 runs the candidate's regression four times on the same
+samples, differing only in the DC each channel's band-passed signal is divided by (`R_CAND`,
+`R_CAND_CD`, `R_CAND_CE`, `R_CAND_BW`), each DC in float as the firmware would, with a double twin;
+8 HOSPNAV sessions with the HGAC records followed, 16 MS100 captures:
+
+| | EMA 2 s | LP2 0.2 Hz Q 0.5 biquad | 2×EMA 0.796 s | LP2 0.2 Hz Butterworth |
+|---|---|---|---|---|
+| SpO2 scatter vs hospital reference, 3471 stationary pairs | **1.64** | 1.89 | **1.63** | 1.80 |
+| Spearman ρ / joint fit | −0.80 / 124.0 − 39.1·R | −0.80 / 123.7 − 38.7·R | −0.80 / 124.0 − 39.2·R | −0.80 / 123.6 − 38.5·R |
+| Leave-one-subject-out, median \|err\| (08→09 / 09→08) | 1.38 / 0.95 | 1.34 / 0.98 | 1.35 / 0.95 | 1.36 / 0.98 |
+| R excursion after an HGAC RF2 move (4 events ×, median / p90) | 0.076 / 0.134 | 0.071 / 0.137 | 0.077 / 0.134 | 0.071 / 0.136 |
+| recovery to within 0.02 (median / p90) | 2.0 / 3.7 s | 1.7 / 3.9 s | 1.9 / 3.8 s | 1.6 / 4.0 s |
+| MS100 clean → probe perturbed, R bias at 60…250 BPM | +0.015…+0.18 | same ±0.004 | same | same |
+| float vs double, max relative DC deviation | 3·10⁻⁶ | **2–5 %** | 3·10⁻⁶ | **2–5 %** |
+
+**Findings.**
+1. **No measurable gain in R from a faster or steeper DC.** The two-EMA cascade (twice as fast at
+   equal leakage) scores the same as the EMA to the second decimal; the Butterworth, the same within
+   noise. Perturbation bias and HGAC-move transients are identical across the four: those are set by
+   the band-pass and the regression's 6 s memory, not by the DC.
+2. **A float32 biquad at 0.2 Hz / 500 Hz is not usable as a DC estimator.** Its DC gain is
+   (b0+b1+b2)/(1+a1+a2) with 1+a1+a2 ≈ 6·10⁻⁶, a cancellation of numbers of order 1 held to 10⁻⁷ —
+   2–5 % error, state-dependent, and it shows: the biquad forms are the two worst scatters (1.89,
+   1.80) while the identical transfer function computed as two EMAs scores 1.63. The EMA's
+   `dc += α·(x − dc)` has exact unity DC gain by construction. A low-pass this slow would have to run
+   on the decimated 50 Hz stream, in double, or as cascaded EMAs.
+3. The only benefit left is settling after a reset — 95 % in 3.8 s instead of 6.0 s — and the
+   regression's own warm-up (3·τ_ac = 18 s) hides it.
+4. **Band-pass order**: §9 already measured 2 vs 4 poles equal for R (1.63 vs 1.62). 4 poles buy drift
+   rejection (−30 vs −15 dB at 0.1 Hz) and adult-respiration rejection (−8.9 vs −5.6 dB at 0.33 Hz),
+   not neonatal-respiration rejection (40–60 breaths/min is inside the pulse band). Not the data's
+   ask yet.
+
+**Decision (proposed; Alex to confirm).** R-METHOD-2 keeps the EMA DC of τ 2 s (`EmaChannel`,
+spec §4.5). Averagers of products (EMA(dx·dy), EMA(dx²), EMA(AC²)), the probe/HGAC state detectors
+and PILAB's option lists are untouched in any case: an averager must keep its weights positive (a
+2-pole low-pass can ring EMA(dx²) negative), and detectors are calibrated on the EMA's dynamics. If a
+faster DC is ever wanted, the form is two cascaded EMAs, never a float biquad at that cutoff. The
+band-pass stays one biquad, 0.5–5 Hz, unless Alex prefers 4th order for drift rejection — measured
+neutral for R, so that is a preference, not a correction.
+
+**Side finding — what an HGAC move does on OT, measured.** On the board OT_LED2 steps 1–4 % at an RF2
+change (the ±7 % RF tolerance; up to 30 % when the move coincides with a signal change), i.e. 1–30×
+the pulse amplitude. Through the candidate: R excursion 0.07–0.10 for ~2 s, r never below 0.83. The
+"state compensation at RF change" task (×k on the EMAs) was written for v_tia-based estimators
+before SpO2 moved to OT; on OT it is moot for R — the residual step is small and short-lived.
+
+**Method note — the replay artefacts.** Two were found and fixed on the way (runner v0.24, spec §9):
+the replay did not follow the HGAC records, and then applied them a few rows off. They corrupted the
+SUBJ09 half of every runner-based conclusion of §9 (corrected there). Rule drawn: before concluding
+anything from a replay, compare its OT, ProbeState and SQI against the board's recorded columns
+around every `afe:` record; the board's columns are the truth the replay must reproduce.
 
 ---
 
