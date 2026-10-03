@@ -642,10 +642,16 @@ inflation — not motion coinciding with desaturations. Methods (5)–(6) not ye
   band whatever the order); 5 Hz because R does not depend on the cut (both channels share the filter:
   MS100 0.545 at 40 BPM → 0.551 at 250 BPM; HOSPNAV 0.5–8 Hz 1.59, 0.5–4 Hz 1.67, insensitive).
 
+**Step 3 (2026-10-03): R-METHOD-2 curve in library v0.100.**
+New default curve fitted with causal regression on derivatives: SpO2 = 122.62 − 37.63·R (scatter 1.61
+points vs 5.07 for R-METHOD-1; Spearman ρ −0.82 vs −0.44). Design rationale §9–10. The regression
+method is measured to work and to improve accuracy over R-METHOD-1; the library's current _spo2_update()
+still computes R-METHOD-1 (RMS ratio on OT) — a future phase could integrate the regression on
+derivatives in-library if needed.
+
 **Pending:** step 1e (spectral/autocorrelation), 1f (MS100 R stability — partly answered above),
-then step 3 = R-METHOD-2 in the library (r ≥ 0.8 as its SQI) with an R curve re-fitted with it
-(decision (ii) of 2026-10-02: from MS100 and/or SUBJ08/09 replays). The DC estimator it divides by is
-§10's question.
+then integration of reg_dols in-library if clinical utility of r SQI is confirmed on no-pulse signals.
+The DC estimator is settled by §10 (keep EMA τ 2 s).
 
 ## 10. The DC estimator under the R method — EMA vs 2nd-order low-pass (2026-10-03)
 
