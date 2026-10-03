@@ -497,6 +497,69 @@ folded here at consolidation.
 
 ---
 
+## 8. HR valid range — provenance of 40–260 and the floor move to 30 BPM (2026-10-03)
+
+**Question (Alex):** why 40–260 BPM, and what documents say so.
+
+**Provenance — none normative.** `conversation_log.md`: 40–240 (initial) → 30–250 (2026-03-31, v0.9,
+"range extended", no reason for either bound) → 25–300 (v0.11, "25 = ISO minimum; 300 = neonatal",
+no section cited) → 25→30 (2026-05-02, "user decision") → 300→260 (2026-05-02b, "user decision") →
+30→40 (2026-05-27, v0.25, "ISO 80601-2-61", no section). Until 2026-10-03 the spec claimed the range
+"derives from ISO neonatal criteria". It does not: ISO 80601-2-61:2026 §201.12 only requires the
+manufacturer to *disclose* "the displayed ranges of pulse rate". The citable requirement is
+**WHO-UNICEF 2019**, *Technical specifications and guidance for oxygen therapy devices*, §6.5 (tabletop,
+continuous NICU monitoring — IncuNest's category) and Annex 1 Table A1.11: pulse-rate detection range
+**to include 30–240 bpm**, resolution ≤ 1 bpm, accuracy ±3 bpm, valid-data update ≤ 10 s. "To include"
+is minimum coverage, so 260 complies; 40 did not.
+
+**Ceiling 260, kept.** Lowering to 240 would blank the reading during neonatal SVT: PALS (AHA, 2020)
+defines infant SVT as > 220 bpm; reviews give 200–300 bpm in neonates (Turk Arch Pediatr 2022;
+PMC12812894, 2025), 220–280 bpm typical. Nothing in the project pins 260 specifically — it is a
+ceiling above the SVT band with HR2's lag resolution (~22 BPM per lag at 260) already marginal there;
+HR3's uniform 5.9 BPM bins carry that end.
+
+**Floor 40 → 30 (v0.99).** Clinical reason first: with 40, a bradycardia at 35 BPM was reported as
+*no valid signal* (SQI 0), i.e. a signal-quality alarm where a bradycardia alarm was due. The 2026-09-08
+analysis listed four costs; measured 2026-10-03 on the host build (`setHRValidRange(30, 260)` on
+v0.98, PPG-like input = fundamental + 2nd/3rd harmonic at 50/25/10 %, 500 Hz, 10 s), they came out:
+
+| Estimator | 30 BPM clean | 30 BPM + 20 dB noise | 30 BPM + 2× 0.1 Hz drift | 30 BPM + breathing 45 rpm at 1× |
+|---|---|---|---|---|
+| HR2, corner 0.5 Hz | 30.0 / SQI 1.00 | 30.0 / 1.00 | 30.2 / 0.89 | invalid |
+| HR2, corner 0.35 Hz | **29.91 → invalid** | invalid | 30.2 / 0.84 | invalid |
+| HR3 | 30.1 / 1.00 | 30.1 / 1.00 | **invalid** (also at 33; 35 OK at 0.94) | 30.0 / 0.98 |
+| HR1 | 30.0 / 1.00, first valid at 11.1 s | invalid (harmonic bump double-counted) | invalid | invalid |
+
+- **HR2 band-pass corner: 0.35 Hz rejected, 0.5 Hz kept.** The 2026-09-08 worry — "30 BPM = 0.5 Hz =
+  the corner, −3 dB on the fundamental" — was wrong in its conclusion: the autocorrelation is normalised
+  by its own energy, so uniform attenuation of a periodic input changes nothing. A lower corner only
+  admits more baseline wander (SQI under drift 0.89 → 0.84) and, incidentally, shifted the 30.0 BPM
+  estimate from 30.01 to 29.91, i.e. across the hard gate. Band-pass attenuation (single 2-pole section,
+  computed): at 0.5 Hz corner, 30 BPM −3.0 dB, 27 BPM −3.6 dB, 40 BPM −1.7 dB.
+- **The gate is a knife edge at the bound**, for any bound: ±0.1 BPM of estimation error decides
+  validity at exactly 30.0 BPM. Inherent to a hard range gate; clinically irrelevant (alarm thresholds
+  are far from the bounds). Unit tests pin the bound with a signal *at* it and the side it measured.
+- **HR3 is the weak one at the bottom under drift.** It has no high-pass (LP-only since v0.83, mean
+  subtraction before the FFT); `search_min` = bin 5 (0.49 Hz) sits next to the drift bins 1–3 and Hann
+  leakage of a 2× wander reaches it. Clean and noisy 30 BPM are fine. Not fixed here: a high-pass before
+  HR3 trades drift for the very band the floor just opened; left as a known limit, candidate for the
+  MS100 campaign at 30/35 BPM.
+- **HR1** reaches 30 BPM in 11.1 s (5 intervals) on a clean input; with 20 dB noise the harmonic bump
+  gets double-counted at 30 BPM (the fixed 0.185 s refractory covers nothing of a 2 s period — §5.3's
+  adaptive-refractory argument, now with a number). HR1 failing under drift/breathing at every rate
+  tested is pre-existing (§5.3, §5.4), not a floor effect.
+- **Breathing overlaps the band.** Neonatal 30–60 rpm = 0.5–1 Hz = 30–60 BPM. A respiratory component
+  of pulse-like amplitude corrupts HR1/HR2 at 30–40 BPM and HR3 at 33–35; at 1/3 amplitude (more
+  typical of respiratory PPG modulation) not measured yet. No range bound fixes this; it argues for a
+  conservative SQI below 40 BPM and for validating with simulated breathing, which the MS100 does not do.
+
+**Not done, deliberately:** `hr2_acorr_lag_cap` stays 137 (sweep now 111 lags at 50 Hz; the cap binds
+only above ~700 Hz AFE rate with the derived decimation, which keeps 50 Hz anyway). HR2 `f_low`,
+HR3 filtering and the HR1 refractory are unchanged. The capture campaign still lacks 30 and 35 BPM
+points (`CAPTURE_SET_SPEC.md`), which is where the HR3-under-drift limit should be confirmed on hardware.
+
+---
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.98 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.99 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -123,12 +123,15 @@ namespace {
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
-    // Valid output range. Both bounds are engineering choices (40 in v0.25, 260 on 2026-05-02) with
-    // no normative source: ISO 80601-2-61 §201.12 only requires the manufacturer to DISCLOSE the
-    // displayed pulse-rate range. The citable requirement is WHO-UNICEF 2019 (oxygen therapy devices,
-    // §6.5 / Annex 1 Table A1.11): detection range to include 30–240 bpm. 260 covers the top with
-    // room for neonatal SVT (not yet sourced); 40 does NOT cover the bottom (lowering to 30 pending).
-    constexpr float    hr_min_bpm          =  40.0f;   // bpm — valid lower bound
+    // Valid output range. Neither bound has a normative source: ISO 80601-2-61 §201.12 only requires
+    // the manufacturer to DISCLOSE the displayed pulse-rate range. The citable requirement is
+    // WHO-UNICEF 2019 (oxygen therapy devices, §6.5 / Annex 1 Table A1.11): detection range to
+    // include 30–240 bpm. 30 (v0.99; 40 from v0.25) meets the bottom and lets a bradycardia below
+    // 40 BPM raise the rate alarm instead of a signal-quality one. 260 (2026-05-02) covers the top
+    // with room for neonatal SVT, typically 220–300 bpm (PALS: infant SVT > 220 bpm).
+    // The HR2 band-pass corner stays at 0.5 Hz = 30 bpm: its autocorrelation is normalised, so the
+    // −3 dB there costs nothing (measured 2026-10-03, rationale §8); a lower corner only admits drift.
+    constexpr float    hr_min_bpm          =  30.0f;   // bpm — valid lower bound
     constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound
     // Widens the SEARCH range beyond the valid output range, so a rate sitting exactly at a
     // bound is still found rather than cut off. Shared by HR2 (lag sweep) and HR3 (bin sweep);
@@ -2492,7 +2495,7 @@ void INCUNEST_AFE4490::_hr2_compute() {
     // Previously a hardcoded 137 samples ("22 BPM at 50 Hz"). Being fixed in *samples* while
     // HR2's decimated rate is not, it silently raised the lowest detectable HR
     // whenever the sample rate left 500 Hz: 43.8 BPM at 1000 Hz, 87.6 BPM at 2000 Hz — both
-    // above the 40 BPM default _hr_min_bpm, so real bradycardia would have been reported as
+    // above the then-default 40 BPM _hr_min_bpm, so real bradycardia would have been reported as
     // "no periodicity" (sqi = 0) instead of as a low HR.
     float lag_min_bpm = fmaxf(_hr_min_bpm - hr_guard_band_bpm, 1.0f);  // setHrRange() could reach ≤3
     int   max_lag     = (int)(60.0f / lag_min_bpm * _hr2_decim.rate_hz);

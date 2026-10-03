@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.98
+# incunest_afe4490 — Specification v0.99
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1065,7 +1065,7 @@ CV  = std(RR[0..4]) / mean(RR[0..4])
 SQI = clamp(1 − CV / 0.15, 0, 1)
 ```
 
-CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythmia, artefact, or loss of signal). The 15 % threshold is the standard clinical criterion for rhythm regularity. If fewer than 5 intervals have been detected, or if HR1 is outside [40, 260] BPM, SQI is forced to 0. The refractory period of 185 ms naturally supports detection up to ~324 BPM, providing a guard band above the 260 BPM limit at no cost.
+CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythmia, artefact, or loss of signal). The 15 % threshold is the standard clinical criterion for rhythm regularity. If fewer than 5 intervals have been detected, or if HR1 is outside [30, 260] BPM, SQI is forced to 0. The refractory period of 185 ms naturally supports detection up to ~324 BPM, providing a guard band above the 260 BPM limit at no cost.
 
 > **Implementation note:** peak location is currently approximated by the rising threshold crossing (first sample above `0.6 × running_max`). This introduces a timing error that depends on signal slope and amplitude — if either changes (low perfusion, motion), the detected instant shifts relative to the true peak, introducing jitter in the RR interval. Planned improvement: apply derivative to the filtered signal and detect the rising edge as the maximum of the derivative (steepest ascending slope), which gives a more stable and precise timing reference independent of signal amplitude.
 
@@ -1082,21 +1082,27 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit). A fixed value cannot protect bradycardia — see the rationale §5.3 |
 | `hr1_threshold_fraction` | 0.6 | Detection threshold as a fraction of the decaying running max. **The single parameter that most determines whether a beat is counted.** Lower → more sensitive, risks counting the dicrotic notch; higher → misses weak beats. A bare literal until v0.88 |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
-| `hr_min_bpm` | 40 BPM | Reported valid HR range minimum. Engineering choice, no normative source; WHO-UNICEF 2019 §6.5 asks for 30 (lowering pending) — see the note below |
-| `hr_max_bpm` | 260 BPM | Reported valid HR range maximum. Engineering choice; covers WHO-UNICEF's 240 with room for neonatal SVT (source pending) |
-| `hr_search_min_bpm` | 37 BPM | Internal search lower bound (guard band: hr_min − 3) |
+| `hr_min_bpm` | 30 BPM | Reported valid HR range minimum (v0.99; 40 from v0.25 to v0.98). Meets WHO-UNICEF 2019 §6.5, range to include 30–240 bpm — see the note below |
+| `hr_max_bpm` | 260 BPM | Reported valid HR range maximum. Engineering choice; covers WHO-UNICEF's 240 with room for neonatal SVT, typically 220–300 bpm (PALS: infant SVT > 220 bpm) |
+| `hr_search_min_bpm` | 27 BPM | Internal search lower bound (guard band: hr_min − 3) |
 | `hr_search_max_bpm` | 263 BPM | Internal search upper bound (guard band: hr_max + 3) |
 
-> **Guard band design:** all HR algorithms search internally in [37, 263] BPM and force `hr*_sqi = 0.0` when the result falls outside [40, 260] BPM. This prevents boundary-clipping errors where a signal at exactly 40 BPM could be missed due to small algorithmic offsets. The ±3 BPM margin matches the ±3 bpm pulse-rate accuracy of WHO-UNICEF 2019 §6.5.
+> **Guard band design:** all HR algorithms search internally in [27, 263] BPM and force `hr*_sqi = 0.0` when the result falls outside [30, 260] BPM. This prevents boundary-clipping errors where a signal at exactly 30 BPM could be missed by the *search* due to small algorithmic offsets. The validity gate itself stays hard: a rate sitting exactly on a bound is reported or not depending on a ±0.1 BPM estimation error (a 30.0 BPM sine reads 30.01 and passes; 29.91 would not). That is inherent to any hard gate and clinically irrelevant — alarm thresholds are far from the bounds. The ±3 BPM margin matches the ±3 bpm pulse-rate accuracy of WHO-UNICEF 2019 §6.5.
 
-> **Where [40, 260] comes from:** nowhere normative. The history is 40–240 → 30–250 (v0.9) → 25–300 (v0.11) →
-> 40–260 (2026-05-02 for the top, v0.25 for the bottom), each change a project decision with no recorded source.
-> ISO 80601-2-61 §201.12 does not set a pulse-rate range: it requires the manufacturer to disclose "the displayed
-> ranges of pulse rate". The citable requirement is WHO-UNICEF 2019, *Technical specifications and guidance for
-> oxygen therapy devices*, §6.5 (tabletop, continuous NICU monitoring) and Annex 1 Table A1.11: pulse-rate detection
-> range to include **30–240 bpm**, resolution ≤ 1 bpm, accuracy ±3 bpm. 260 meets the top; 40 does not meet the
-> bottom, and lowering it to 30 is pending (HR2 band-pass corner sits at exactly 30 BPM, HR3 nears the drift bins,
-> HR1 needs 10 s for 5 intervals, and neonatal breathing at 30–60 rpm overlaps the band).
+> **Where [30, 260] comes from.** The history is 40–240 → 30–250 (v0.9) → 25–300 (v0.11) → 40–260 (2026-05-02
+> for the top, v0.25 for the bottom) → 30–260 (v0.99); the earlier changes were project decisions with no recorded
+> source. ISO 80601-2-61 §201.12 does not set a pulse-rate range: it requires the manufacturer to disclose "the
+> displayed ranges of pulse rate". The citable requirement is WHO-UNICEF 2019, *Technical specifications and
+> guidance for oxygen therapy devices*, §6.5 (tabletop, continuous NICU monitoring) and Annex 1 Table A1.11:
+> pulse-rate detection range to include **30–240 bpm**, resolution ≤ 1 bpm, accuracy ±3 bpm. 260 meets the top and
+> leaves room for neonatal SVT (220–300 bpm). 30 meets the bottom; with 40, a bradycardia at 35 BPM was reported as
+> *no valid signal* — a signal-quality alarm where a rate alarm was due. What the floor costs, measured on the host
+> build (rationale §8): HR2 locks at 30 BPM with its band-pass corner left at 0.5 Hz (the autocorrelation is
+> normalised, so the −3 dB there is harmless; 0.35 Hz was tried and rejected — no gain, more drift); HR3 holds
+> 30 BPM on a clean PPG-like signal but loses it below ~35 BPM under 2× baseline wander (no high-pass, and bin 5
+> sits next to the drift bins); HR1 needs ~11 s for its 5 intervals at 30 BPM. Neonatal breathing at 30–60 rpm
+> shares the 30–60 BPM band with the pulse: a respiratory component of pulse-like amplitude corrupts all three
+> estimators there, which no range bound can fix.
 
 ### 5.3 HR2 — Autocorrelation
 Independent second HR algorithm running in parallel with HR1 on the same `led1_aled1` signal.
@@ -1143,8 +1149,8 @@ min_lag = 60 / (hr_max_bpm + 3) * hr2_decim.rate_hz
 max_lag = 60 / (hr_min_bpm - 3) * hr2_decim.rate_hz   capped at hr2_acorr_lag_cap and at hr2_buf_len/2 - 1
 ```
 
-At the operating point (`_hr2_decim.rate_hz` = 50 Hz, HR range [40, 260] BPM) this gives
-`min_lag = 11`, `max_lag = 81`. Neither cap is active: 81 is well under both 137 and 199.
+At the operating point (`_hr2_decim.rate_hz` = 50 Hz, HR range [30, 260] BPM) this gives
+`min_lag = 11`, `max_lag = 111`. Neither cap is active: 111 is under both 137 and 199.
 
 The `hr2_buf_len/2 - 1` cap exists because the unbiased normaliser `N/(N−τ)` grows without
 bound as τ → N; beyond τ = N/2 the factor exceeds 2 and the estimate is too noisy to trust.
@@ -1156,7 +1162,7 @@ longer moves the analysis window, the lag bounds or the caps: at 1000 Hz the fac
 the decimated rate stays at 50 Hz. The previous design — a fixed factor of 10 — made
 `hr2_acorr_lag_cap` binding for 40 BPM above ~845 Hz and shrank the window below what 40 BPM needs
 above ~1200 Hz, both silently. Pinned by `test_hr2_decimated_rate_invariant_to_sample_rate`, which
-checks 40 BPM at 1000 Hz: the discriminating case, since a 60 BPM check passes either way.
+checks the range floor at 1000 Hz (30 BPM since v0.99, 40 before): the discriminating case, since a 60 BPM check passes either way.
 
 `hr2_sqi` is a continuous [0–1] quality metric equal to the **unbiased** normalised autocorrelation value at the dominant lag:
 
@@ -2742,9 +2748,9 @@ Applied by all HR algorithms equally to decide whether an output is reportable a
 
 | Parameter | Constant | Value | Scope |
 |---|---|---|---|
-| Reported valid HR lower bound | `hr_min_bpm` | 40 BPM | HR1, HR2, HR3 — engineering choice; WHO-UNICEF asks for 30 (§5.2) |
+| Reported valid HR lower bound | `hr_min_bpm` | 30 BPM | HR1, HR2, HR3 — WHO-UNICEF 2019 §6.5 floor; v0.99 (§5.2) |
 | Reported valid HR upper bound | `hr_max_bpm` | 260 BPM | HR1, HR2, HR3 — engineering choice; covers WHO-UNICEF's 240 (§5.2) |
-| Internal search lower bound | `hr_search_min_bpm` | 37 BPM | Guard band: hr_min − 3 |
+| Internal search lower bound | `hr_search_min_bpm` | 27 BPM | Guard band: hr_min − 3 |
 | Internal search upper bound | `hr_search_max_bpm` | 263 BPM | Guard band: hr_max + 3 |
 | SpO2 reported valid lower bound | `spo2_min` | 70 % | SpO2 |
 | SpO2 reported valid upper bound | `spo2_max` | 100 % | SpO2 |
@@ -2998,6 +3004,10 @@ Key references for each algorithm implemented in this library.
   Technical Series, ISBN 978-92-4-151691-4. §6.5 and Annex 1 Table A1.11: procurement requirements for tabletop
   NICU pulse oximeters — pulse-rate range to include 30–240 bpm, ±3 bpm, update ≤ 10 s.
 
+- **American Heart Association, PALS Provider Manual (2020).** Infant SVT is defined by a narrow-complex rate
+  > 220 bpm; neonatal SVT runs 200–300 bpm (Turk Arch Pediatr 2022 review; PMC12812894, 2025). Why the HR ceiling
+  is 260 rather than WHO-UNICEF's 240: a 240 ceiling would blank the display in the middle of an SVT episode.
+
 - **Severinghaus, J.W. & Astrup, P.B. (1986).** "History of blood gas analysis." *Journal of Clinical Monitoring*, 2(4), 270–288.
   Historical context for non-invasive oxygen saturation measurement.
 
@@ -3007,6 +3017,21 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.99   | **HR valid range floor 40 → 30 BPM (§5.2).** `hr_min_bpm` 40 → 30, so          |
+|         | `hr_search_min_bpm` 37 → 27 and the HR2 lag sweep 81 → 111 lags (caps 137/199  |
+|         | still inactive); HR3's `search_min` stays bin 5. Meets WHO-UNICEF 2019 §6.5    |
+|         | (pulse-rate range to include 30–240 bpm); with 40 a bradycardia at 35 BPM was  |
+|         | reported as no valid signal. Measured on the host build (rationale §8): HR2    |
+|         | locks at 30 BPM with its 0.5 Hz band-pass corner unchanged — the               |
+|         | autocorrelation is normalised, so the −3 dB there is harmless; a 0.35 Hz       |
+|         | corner was tried and rejected (no gain, SQI under drift 0.89 → 0.84, and a     |
+|         | 30.0 BPM sine reads 29.91 → below the gate). HR3 holds 30 BPM clean but loses  |
+|         | < 35 BPM under 2× baseline wander; HR1 needs ~11 s at 30 BPM. The range's      |
+|         | provenance (no normative source; ISO §201.12 only requires disclosure) and the |
+|         | SVT basis of the 260 ceiling are now written where the constants are. Tests:   |
+|         | `test_hr2_30bpm_lower_bound`, `test_hr2_27bpm_guard_band_is_invalid`,          |
+|         | `test_hr2_decimated_rate_invariant_to_sample_rate` (now 30 BPM at 1000 Hz),    |
+|         | `test_hr3_30bpm_lower_bound`, `test_hr1_30bpm_lower_bound`.                    |
 | v0.98   | **R method and R curve get names (§5.1, *R methods and R curves*).**           |
 |         | `SPO2_R_METHOD_ID = "R-METHOD-1"` names how R is computed; it changes only     |
 |         | when R would. The coefficients become an R curve with an id and the R method   |
