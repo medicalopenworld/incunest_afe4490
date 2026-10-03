@@ -123,8 +123,13 @@ namespace {
 
     // ── HR (all algorithms) ───────────────────────────────────────────────────
     // hr_search_{min,max}_bpm are derived inline as hr_{min,max}_bpm ± 3 BPM guard band.
-    constexpr float    hr_min_bpm          =  40.0f;   // bpm — valid lower bound (ISO 80601-2-61; neonatal)
-    constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound (neonatal tachycardia)
+    // Valid output range. Both bounds are engineering choices (40 in v0.25, 260 on 2026-05-02) with
+    // no normative source: ISO 80601-2-61 §201.12 only requires the manufacturer to DISCLOSE the
+    // displayed pulse-rate range. The citable requirement is WHO-UNICEF 2019 (oxygen therapy devices,
+    // §6.5 / Annex 1 Table A1.11): detection range to include 30–240 bpm. 260 covers the top with
+    // room for neonatal SVT (not yet sourced); 40 does NOT cover the bottom (lowering to 30 pending).
+    constexpr float    hr_min_bpm          =  40.0f;   // bpm — valid lower bound
+    constexpr float    hr_max_bpm          = 260.0f;   // bpm — valid upper bound
     // Widens the SEARCH range beyond the valid output range, so a rate sitting exactly at a
     // bound is still found rather than cut off. Shared by HR2 (lag sweep) and HR3 (bin sweep);
     // it was the same 3.0f literal repeated at four sites until v0.88, where changing one and

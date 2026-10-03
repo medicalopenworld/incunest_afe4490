@@ -1082,12 +1082,21 @@ CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythm
 | `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit). A fixed value cannot protect bradycardia — see the rationale §5.3 |
 | `hr1_threshold_fraction` | 0.6 | Detection threshold as a fraction of the decaying running max. **The single parameter that most determines whether a beat is counted.** Lower → more sensitive, risks counting the dicrotic notch; higher → misses weak beats. A bare literal until v0.88 |
 | `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
-| `hr_min_bpm` | 40 BPM | Reported valid HR range minimum (ISO 80601-2-61; neonatal use) |
-| `hr_max_bpm` | 260 BPM | Reported valid HR range maximum (neonatal tachycardia) |
+| `hr_min_bpm` | 40 BPM | Reported valid HR range minimum. Engineering choice, no normative source; WHO-UNICEF 2019 §6.5 asks for 30 (lowering pending) — see the note below |
+| `hr_max_bpm` | 260 BPM | Reported valid HR range maximum. Engineering choice; covers WHO-UNICEF's 240 with room for neonatal SVT (source pending) |
 | `hr_search_min_bpm` | 37 BPM | Internal search lower bound (guard band: hr_min − 3) |
 | `hr_search_max_bpm` | 263 BPM | Internal search upper bound (guard band: hr_max + 3) |
 
-> **Guard band design:** all HR algorithms search internally in [37, 263] BPM and force `hr*_sqi = 0.0` when the result falls outside [40, 260] BPM. This prevents boundary-clipping errors where a signal at exactly 40 BPM could be missed due to small algorithmic offsets. The ±3 BPM margin is consistent with the ISO 80601-2-61 measurement tolerance.
+> **Guard band design:** all HR algorithms search internally in [37, 263] BPM and force `hr*_sqi = 0.0` when the result falls outside [40, 260] BPM. This prevents boundary-clipping errors where a signal at exactly 40 BPM could be missed due to small algorithmic offsets. The ±3 BPM margin matches the ±3 bpm pulse-rate accuracy of WHO-UNICEF 2019 §6.5.
+
+> **Where [40, 260] comes from:** nowhere normative. The history is 40–240 → 30–250 (v0.9) → 25–300 (v0.11) →
+> 40–260 (2026-05-02 for the top, v0.25 for the bottom), each change a project decision with no recorded source.
+> ISO 80601-2-61 §201.12 does not set a pulse-rate range: it requires the manufacturer to disclose "the displayed
+> ranges of pulse rate". The citable requirement is WHO-UNICEF 2019, *Technical specifications and guidance for
+> oxygen therapy devices*, §6.5 (tabletop, continuous NICU monitoring) and Annex 1 Table A1.11: pulse-rate detection
+> range to include **30–240 bpm**, resolution ≤ 1 bpm, accuracy ±3 bpm. 260 meets the top; 40 does not meet the
+> bottom, and lowering it to 30 is pending (HR2 band-pass corner sits at exactly 30 BPM, HR3 nears the drift bins,
+> HR1 needs 10 s for 5 intervals, and neonatal breathing at 30–60 rpm overlaps the band).
 
 ### 5.3 HR2 — Autocorrelation
 Independent second HR algorithm running in parallel with HR1 on the same `led1_aled1` signal.
@@ -2733,8 +2742,8 @@ Applied by all HR algorithms equally to decide whether an output is reportable a
 
 | Parameter | Constant | Value | Scope |
 |---|---|---|---|
-| Reported valid HR lower bound | `hr_min_bpm` | 40 BPM | HR1, HR2, HR3 — ISO 80601-2-61; neonatal |
-| Reported valid HR upper bound | `hr_max_bpm` | 260 BPM | HR1, HR2, HR3 — neonatal tachycardia |
+| Reported valid HR lower bound | `hr_min_bpm` | 40 BPM | HR1, HR2, HR3 — engineering choice; WHO-UNICEF asks for 30 (§5.2) |
+| Reported valid HR upper bound | `hr_max_bpm` | 260 BPM | HR1, HR2, HR3 — engineering choice; covers WHO-UNICEF's 240 (§5.2) |
 | Internal search lower bound | `hr_search_min_bpm` | 37 BPM | Guard band: hr_min − 3 |
 | Internal search upper bound | `hr_search_max_bpm` | 263 BPM | Guard band: hr_max + 3 |
 | SpO2 reported valid lower bound | `spo2_min` | 70 % | SpO2 |
@@ -2983,7 +2992,11 @@ Key references for each algorithm implemented in this library.
   Clear clinical review of the operating principle and limitations.
 
 - **ISO 80601-2-61.** *Medical electrical equipment — Part 2-61: Particular requirements for basic safety and essential performance of pulse oximeter equipment.*
-  Normative standard defining valid measurement ranges, tolerances, and test conditions. Source of the [70–100 %] SpO2 range; HR bounds [40–260 BPM] are derived from ISO neonatal criteria.
+  Normative standard defining valid measurement ranges, tolerances, and test conditions. Source of the [70–100 %] SpO2 range. It does **not** set the HR range (§201.12 only requires disclosing it) — see §5.2.
+
+- **WHO & UNICEF (2019).** *Technical specifications and guidance for oxygen therapy devices.* WHO Medical Device
+  Technical Series, ISBN 978-92-4-151691-4. §6.5 and Annex 1 Table A1.11: procurement requirements for tabletop
+  NICU pulse oximeters — pulse-rate range to include 30–240 bpm, ±3 bpm, update ≤ 10 s.
 
 - **Severinghaus, J.W. & Astrup, P.B. (1986).** "History of blood gas analysis." *Journal of Clinical Monitoring*, 2(4), 270–288.
   Historical context for non-invasive oxygen saturation measurement.
