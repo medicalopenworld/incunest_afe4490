@@ -611,9 +611,24 @@ inflation — not motion coinciding with desaturations. Methods (5)–(6) not ye
   the candidate's R fell to ~0 or below (down to −1.1) — impossible for an RMS ratio. There the
   red–IR derivative correlation is r ≈ 0 (median 0.04, max 0.14; elsewhere median 0.99): no pulse in
   either channel, and the library's R in those same seconds was 2.5–30, just as wrong. The
-  regression's own r detects it; the RMS ratio has no such signal. Gating on r ≥ 0.6…0.9 removes all
-  29 s and keeps 93–94 % of samples. **r becomes the SQI candidate of R-METHOD-2; its threshold is
-  Alex's call** (0.8 keeps 93.4 %).
+  regression's own r detects it; the RMS ratio has no such signal. **r becomes the SQI candidate of
+  R-METHOD-2; its threshold is Alex's call.**
+- **What the r gate rejects, measured on all 8 HOSPNAV sessions (2.66 h valid; replays with the
+  library's recomputed ProbeState; reference = the NICU monitor read by VideoNest, available 48–99 %
+  of the time in 6 sessions, absent in 2).** Time below r: 0.6 → 3.0 %, 0.8 → 3.8 % (362 s), 0.9 →
+  4.2 % — r is bimodal (0.99 or ~0.3), so the threshold barely matters. (A first figure of "93–94 %
+  kept" was wrong: it re-ran the candidate per capture part, adding one 18 s warm-up per part;
+  the runner keeps state across parts.) It is 10 episodes of 30–61 s, all SUBJ09, none in SUBJ08.
+  In every one of them the library's own HR2 and HR3 SQI were 0 and its SpO2 SQI was 0: the firmware
+  already showed no valid SpO2 there, while its R read 1.5–26. So the gate rejects nothing the
+  library accepted, and 0 s of the rejected time looks like a pulse to HR2/HR3. The candidate's R
+  in those episodes (0.65–1.25) is plausible but unsupported. Reference during low r: 32 % of it
+  below 90 % SpO2 vs 23 % elsewhere — the episodes lean towards desaturations (agitation), as
+  expected. Of 69 reference desaturation events (< 90 % for ≥ 5 s), the gate keeps the median
+  event whole; one 6 s event is lost and two long ones in 1238 SUBJ09 (64 s to 79 %, 95 s to 79 %)
+  are 50–62 % kept — stretches where the current firmware also had SpO2 SQI 0. A gate cannot
+  recover a signal that is not there; what it changes is that the invalid periods are declared
+  by the R estimator itself instead of by a separate PI/HR gate.
 
 **Pending:** step 1e (spectral/autocorrelation), 1f (MS100 R stability — partly answered above),
 the r threshold, then step 3 = R-METHOD-2 in the library with an R curve re-fitted with it
