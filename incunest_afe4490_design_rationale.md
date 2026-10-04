@@ -663,7 +663,7 @@ facts at 500 Hz:
 |---|---|---|---|---|---|---|
 | EMA τ 2 s (library) | −16.1 dB | −22.0 dB | 2.00 s | 5.99 s | 7.82 s | none |
 | 2-pole LP 0.2 Hz, Q 0.5 (one biquad) | −17.2 dB | −28.3 dB | 1.71 s | 3.78 s | 4.64 s | none |
-| two EMAs of 0.796 s in cascade (same H) | −17.2 dB | −28.3 dB | 1.71 s | 3.77 s | 4.64 s | none |
+| two EMAs of 0.796 s in cascade (same poles) | −17.2 dB | −28.3 dB | 1.71 s | 3.77 s | 4.64 s | none |
 | 2-pole LP 0.2 Hz Butterworth | −16.0 dB | −28.0 dB | 1.39 s | 2.33 s | 2.50 s | 4.3 % |
 | EMA τ 0.5 s (the "just shorten τ" option) | −5.4 dB | −10.4 dB | 0.50 s | 1.50 s | 1.96 s | none |
 
@@ -694,7 +694,8 @@ samples, differing only in the DC each channel's band-passed signal is divided b
 2. **A float32 biquad at 0.2 Hz / 500 Hz is not usable as a DC estimator.** Its DC gain is
    (b0+b1+b2)/(1+a1+a2) with 1+a1+a2 ≈ 6·10⁻⁶, a cancellation of numbers of order 1 held to 10⁻⁷ —
    2–5 % error, state-dependent, and it shows: the biquad forms are the two worst scatters (1.89,
-   1.80) while the identical transfer function computed as two EMAs scores 1.63. The EMA's
+   1.80) while the same double pole computed as two EMAs scores 1.63 (the cascade lacks only the
+   bilinear biquad's zeros at Nyquist, irrelevant below a few Hz). The EMA's
    `dc += α·(x − dc)` has exact unity DC gain by construction. A low-pass this slow would have to run
    on the decimated 50 Hz stream, in double, or as cascaded EMAs.
 3. The only benefit left is settling after a reset — 95 % in 3.8 s instead of 6.0 s — and the
@@ -723,6 +724,14 @@ the replay did not follow the HGAC records, and then applied them a few rows off
 SUBJ09 half of every runner-based conclusion of §9 (corrected there). Rule drawn: before concluding
 anything from a replay, compare its OT, ProbeState and SQI against the board's recorded columns
 around every `afe:` record; the board's columns are the truth the replay must reproduce.
+**Since runner v0.25 (2026-10-04) that rule is code:** every raw-code replay compares its OT with the
+recorded OT row by row and prints the result per part. Doing so found a third, smaller artefact:
+v0.24 applied each RF change at the raw code's jump, but the board changes RF 8 rows earlier — its
+settling freeze repeats the last codes into the capture, so the jump follows a run of 8 held copies
+— and the replay held the old OT 16 ms too long (~3 % on those rows). Fixed (applied at the first
+held copy); 29 of the 30 parts with OT columns now reproduce the board within 10⁻⁴ on every value.
+The R figures of this section were not re-measured; the change is expected in their last digit only, because the board's own OT steps by the
+same ~3 % (RF tolerance), only 16 ms earlier.
 
 ---
 

@@ -2454,12 +2454,44 @@ per-channel RF/CF/RG/STAGE2EN, AMBDAC, SpO2 coefficients, filter cutoffs) before
 samples; it refuses to run on a value it does not understand. **Since runner v0.24 the replay also
 follows the capture's `# @row N afe:` records** (v0.4 format: one at every part start, one whenever
 the board's HGAC changes RF, `cause=hgac`): only the keys whose value changes are applied
-(RF/CF/RG/STAGE2EN, AMBDAC, ILED, range, PRF, NUMAV), and an RF change is applied at the row where
-that channel's raw code actually jumps (searched within ±50 rows of the record, whose row is the
-one at which the host learnt of the change), because applying it a few rows off puts one sample of
-old-RF-on-new-codes through the filters and the settling freeze holds it. Before v0.24 the header's
+(RF/CF/RG/STAGE2EN, AMBDAC, ILED, range, PRF, NUMAV). An RF change is applied **where the board
+made it**, which the capture itself shows (runner v0.25): the board's settling freeze repeats the
+last sample's four codes, so every HGAC move appears as a run of identical rows (9 rows at 500 Hz:
+the last live sample and 8 held copies) followed by the jump of that channel's raw code. The runner
+finds the jump within ±50 rows of the record (whose row is only where the host learnt of the change)
+and applies the change at the first held copy before it; when the jump cannot be seen because the
+LED codes clip at full scale on both sides, it uses the nearest held run alone. The replay's own
+freeze then falls on the same rows as the board's. (v0.24 applied it at the jump, 8 rows late: the
+replay held the old OT 16 ms longer, a ~3 % OT error on those rows.) Before v0.24 the header's
 configuration stood for the whole session, so every HGAC move left the replay dividing by the
-wrong RF from there on (rationale §9, corrected). `--ot-thr <A/A>` overrides
+wrong RF from there on (rationale §9, corrected).
+
+**Every replay checks itself against the board (runner v0.25).** When the capture carries the
+recorded OT (`OT_LED1`/`OT_LED2`, or `FW_OT_LED1`/`FW_OT_LED2` in captures up to 2026-09-22), each
+row's replayed OT is compared with it and each part prints the largest relative deviation (row and
+channel) and the share of values within 1·10⁻⁴, flagged `OK` or `!!`. The recorded OT has 5
+significant figures up to fw 0.16 (rounding ≤ 5·10⁻⁵) and 7 from fw 0.17, so anything above 10⁻⁴ is
+a replay that does not reproduce the board. The replay's cold-start freeze (its first 8 rows hold
+OT = 0 while the board had been running) is excluded and reported. Measured 2026-10-04 on every part
+with OT columns (8 HOSPNAV sessions + the v0.4 bench corpus, 30 parts): 29 within 10⁻⁴ on 100 % of
+values (max 5.0·10⁻⁵, i.e. the rounding); the one flagged, `SUBJ01_RESTING` (2026-09-22), has a
+header `$CFG` with RF1 = 100 kΩ while its `FW_RF1_OHM` column says 50 kΩ on every row — the HGAC
+had moved before recording started and that capture predates the `afe:` records.
+
+**`--input ot` (runner v0.25):** the algorithms — SpO2, HR1, HR2, HR3 and the R candidates — are fed
+the **recorded** OT and the **recorded** ProbeState through `test_feed_spo2`/`test_feed_hr1..3`, in
+the production order, bypassing the analog reconstruction, RSQM and HGAC: for algorithm
+experiments whose input must be exactly what the board computed. Of the `afe:` records only a PRF
+change is applied. A row without a recorded OT is fed as not applied (the algorithms reset). It
+needs the ProbeState column, so a P5 capture is refused, not guessed; `--ot-thr` is refused too
+(it acts on the RSQM). Output in `replay_lib<version>_inputot/`. HR2/HR3 run there through their
+synchronous test wrappers; **in the raw-code replay they never run on the host** (their slow paths
+live in FreeRTOS tasks the host HAL does not create), so those columns are empty in that mode.
+Measured 2026-10-04 on the 8 HOSPNAV sessions, raw-code replay (with the board's `rsqm_ot_thr`
+1·10⁻⁴) against `--input ot` (OT at 5 figures), rows with equal ProbeState (99.98 %): candidate R
+max |Δ| 2.8·10⁻⁴ (0.011 SpO2 points), flat across PI 0.3–>1.2 % (the corpus has no PI below 0.3 %);
+library R max 5.6·10⁻³, SpO2 max 0.17 points; HR1 differs by > 11 BPM on 0.1 % of rows (max 127):
+a 5·10⁻⁵ perturbation flips its peak decisions. `--ot-thr <A/A>` overrides
 `rsqm_ot_thr` for the replay (e.g. `1.0e-4` to reproduce a capture taken before v0.95 for
 equivalence checking). Parts of one session (`<stem>_pNN.csv`) share one library instance
 in order, so filter/EMA state is continuous across part boundaries, as it was on the
@@ -2478,7 +2510,8 @@ receives, from library pieces only (`BiquadFilter::init_bp` with precharge, `Ema
 reset and 3·τ warm-up as `_spo2_update()`). Not part of the library: the evidence for R-METHOD-2.
 Rationale §9. **Runner v0.24** adds the DC-estimator experiment of rationale §10: the same regression
 with three other DCs, `R_CAND_CD`/`_CORR` (2nd-order low-pass 0.2 Hz, Q 0.5, one biquad), `R_CAND_CE`
-(two EMAs of 0.796 s in cascade, the same transfer function) and `R_CAND_BW` (Butterworth 0.2 Hz);
+(two EMAs of 0.796 s in cascade: the same double pole, without the bilinear biquad's zeros at
+Nyquist — identical below a few Hz) and `R_CAND_BW` (Butterworth 0.2 Hz);
 each DC runs in float with a double twin, and the per-part summary prints the largest relative
 deviation between the two seen in the session.
 
