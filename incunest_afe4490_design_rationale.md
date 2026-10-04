@@ -647,6 +647,34 @@ then step 3 = R-METHOD-2 in the library (r ≥ 0.8 as its SQI) with an R curve r
 (decision (ii) of 2026-10-02: from MS100 and/or SUBJ08/09 replays). The DC estimator it divides by is
 §10's question.
 
+**What R is, and what the shipping devices estimate (prior art, 2026-10-04; consult session
+pulsenest-31, citations verified on the PDF).** ISO 80601-2-61:2026 defines R abstractly — 201.3.239
+*modulation ratio, ratio of ratios, R*: "basic quantity derived by pulse oximeter equipment from
+time-dependent light intensity measurements", with the empirical curve R → SpO2 as note 1 and one
+curve per range of emitter wavelengths as note 2 — and gives the two-point formula only in the
+informative Annex EE.4, as something R "can be approximated as" (EE.1:
+log10(max/min)_red / log10(max/min)_IR ≈ (AC/DC)_red / (AC/DC)_IR ≈ %mod_red / %mod_IR). So
+(AC/DC)_red/(AC/DC)_IR — R-METHOD-1 — is an *estimator* of R, the original one of the analogue
+instruments, not R's definition; the physical quantity is the ratio of the changes in logarithmic
+absorbance at the two wavelengths over the pulse. The public patents of the two largest makers
+describe other estimators: Nellcor (Baker & Yorkey, 1998 on) takes ln and band-passes each channel,
+differentiates, and fits the slope of red on IR **through the origin** over a window of several
+seconds — R = Σ(dRed·dIR)/Σ(dIR²), exactly R-METHOD-2's regression — then feeds the fit's residual
+variance to a Kalman filter on saturation and averages beats aligned to the pulse under motion;
+Masimo SET (Goldman et al. 2000, J Clin Monit Comput; Diab/Kiani patents 1996–97) does not regress
+at all: it sweeps candidate values of R from 100 % down, builds for each the reference
+N(R) = Red − R·IR for an adaptive noise canceller with IR as primary, and reads the arterial R as the
+higher-saturation peak of the output power — separation of the arterial and venous components
+(the venous one, moved by motion, pulses with its own R_v > R_a and is correlated across channels,
+so averaging cannot remove it). Implications: R-METHOD-2 is Nellcor's second step, reached here by
+measurement rather than by reading; its r gate is a crude form of Nellcor's residual weighting;
+beat-aligned averaging and arterial/venous separation remain open. **The lesson recorded with it:**
+R-METHOD-1 was designed from the textbook formula without a prior-art pass, and the regression sat
+as a half-line of a task list from 2026-09-29 until 2026-10-02; the HOSPNAV curve of 2026-09-24
+(21.5 slope) was mostly that estimator's noise. From now on, before any measurement block is designed
+or refined (R, HR, PI, SQI, averaging), the first step is a note of what Nellcor, Masimo and Philips
+do and which part of ours is the textbook simplification (memory `feedback_prior_art_before_design`).
+
 **Step 3 done (2026-10-04, lib v0.100).** R-METHOD-2 is in the library, as the default, built from
 the pieces the candidate used (one-biquad `init_bp` 0.5–5 Hz, the `EmaChannel` mean as DC, three
 EMAs of τ_var on dx·dy, dx², dy²); `offline_runner` v0.25 reports its R bit-identical to `R_CAND`
