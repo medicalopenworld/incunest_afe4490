@@ -30,14 +30,20 @@ namespace {
     // At 60 bpm (period 1 s): covers ~6 cardiac cycles. At 120 bpm: ~12 cycles.
     // Tradeoff: slower response to real desaturation events vs. lower SpO2 noise.
     constexpr float    spo2_ema_var_tau_s    = 6.0f;
-    // Default R curve: R-CURVE-U401D-MS100-20260323 — CONTEC MS100 simulator, "R-Curve Nellcor
-    // 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type), fitted 2026-03-23 with
-    // R-METHOD-0 (adc_code inputs, DC τ 1.6 s, AC τ 1.0 s). It therefore does NOT match
-    // SPO2_R_METHOD_ID and raises the warning by itself (spec §5.1, "R methods and R curves"). Replace with setSpO2RCurve().
-    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-U401D-MS100-20260323";
-    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-0";
-    constexpr float    spo2_r_curve_a_default = 114.9208f; // SpO2 = a - b·R
-    constexpr float    spo2_r_curve_b_default =  30.5547f;
+    // Default R curve (v0.100): R-CURVE-STS0163-HOSPNAV-20260923 — fitted with R-METHOD-2 as this
+    // library computes it (offline_runner replay of the 2026-09-23 HOSPNAV campaigns, two neonates,
+    // Medle ST-S0163 probe, reference = the ward monitor read by VideoNest, 3455 stationary 8 s
+    // windows): SpO2 = 123.98 − 39.13·R, Spearman ρ −0.80, scatter 1.65 points, median |residual|
+    // 0.91; per subject 129.2 − 46.7·R and 118.8 − 32.1·R, leave-one-subject-out median |error|
+    // 0.95–1.38. Reference range 85–100 % (31 windows below 85, where it reads −3.4 points);
+    // a simulator-free, hospital-monitor-referenced curve, not a controlled desaturation study
+    // (ISO 80601-2-61 Annex DD). Only valid with R-METHOD-2 and for that probe. Spec §5.1,
+    // rationale §9. The previous default (MS100 simulator, R-METHOD-0: 114.9208 − 30.5547·R)
+    // stays in the spec's registry.
+    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-STS0163-HOSPNAV-20260923";
+    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-2";
+    constexpr float    spo2_r_curve_a_default = 123.98f;   // SpO2 = a - b·R
+    constexpr float    spo2_r_curve_b_default =  39.13f;
     constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
     constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
     constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
@@ -60,6 +66,16 @@ namespace {
     // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
     constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
     constexpr float    spo2_pi_sqi_hi      = 2.0f;     // % — PI above this → SQI = 1
+    // R-METHOD-2 (v0.100, design rationale §9–§10). Band-pass = the pulse band HR2 uses, one
+    // biquad: 0.3/0.7–4/8 Hz and 2 vs 4 poles measured equal for R on HOSPNAV (scatter 1.63 vs
+    // 1.62 points), so no new filter type enters the library for it. r below spo2_r_corr_min
+    // invalidates SpO2: on the corpus r never fell below 0.83 with a pulse (p1 0.949), and the
+    // threshold is provisional until r has been measured on pulse-less input (probe off, motion).
+    constexpr uint8_t  spo2_r_method_default = 2;
+    constexpr float    spo2_r_corr_min       = 0.8f;
+    constexpr float    spo2_bp_f_low_hz      = 0.5f;    // Hz — 30 BPM, the HR floor (§8)
+    constexpr float    spo2_bp_f_high_hz     = 5.0f;    // Hz — R does not depend on the cut (MS100 40–250 BPM)
+    constexpr float    spo2_reg_eps          = 1e-30f;  // EMA(dx²)/EMA(dy²) at or below this: no slope yet
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
     constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
@@ -349,6 +365,10 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr1_dc_alpha(0.0f),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
+      _spo2_bp_ir(), _spo2_bp_red(),
+      _spo2_reg_x_prev(0.0f), _spo2_reg_y_prev(0.0f),
+      _spo2_reg_sxy(0.0f), _spo2_reg_sxx(0.0f), _spo2_reg_syy(0.0f),
+      _spo2_reg_alpha(0.0f), _spo2_reg_count(0),
       _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
@@ -365,6 +385,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_max(spo2_max),
       _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
+      _spo2_r_method(spo2_r_method_default),
+      _spo2_r_corr_min(spo2_r_corr_min),
       _hr1_dc_tau_s(hr1_dc_tau_s),
       _hr1_lp_cutoff_hz(hr1_lp_cutoff_hz), _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
       _hr1_threshold_fraction(hr1_threshold_fraction),
@@ -459,11 +481,7 @@ void INCUNEST_AFE4490::begin(int pin_cs, int pin_drdy, bool debug) {
 
     _initialized = true;
 
-    if (strcmp(_spo2_r_curve_r_method_id, SPO2_R_METHOD_ID) != 0) {
-        ESP_LOGW(TAG, "R curve %s was fitted with %s, this library computes R as %s: SpO2 is "
-                 "shown with a curve for another R method", _spo2_r_curve_id,
-                 _spo2_r_curve_r_method_id, SPO2_R_METHOD_ID);
-    }
+    _spo2_warn_if_curve_mismatch();
 
     incunest_afe4490_hal_gpio_init_input_pullup(_pin_drdy);
     if (!incunest_afe4490_hal_gpio_attach_isr_rising(_pin_drdy, _drdy_isr_static)) {
@@ -852,11 +870,33 @@ bool INCUNEST_AFE4490::setSpO2RCurve(const char* id, const char* r_method_id, fl
     _spo2_r_curve_a = a;
     _spo2_r_curve_b = b;
     if (_initialized) xSemaphoreGive(_state_mutex);
-    if (strcmp(new_method, SPO2_R_METHOD_ID) != 0) {
-        ESP_LOGW(TAG, "R curve %s was fitted with %s, this library computes R as %s: SpO2 is "
-                 "shown with a curve for another R method", new_id, new_method, SPO2_R_METHOD_ID);
-    }
+    _spo2_warn_if_curve_mismatch();
     return true;
+}
+
+void INCUNEST_AFE4490::_spo2_warn_if_curve_mismatch() const {
+    if (strcmp(_spo2_r_curve_r_method_id, _spo2_r_method_id()) != 0) {
+        ESP_LOGW(TAG, "R curve %s was fitted with %s, this library computes R as %s: SpO2 is "
+                 "shown with a curve for another R method", _spo2_r_curve_id,
+                 _spo2_r_curve_r_method_id, _spo2_r_method_id());
+    }
+}
+
+void INCUNEST_AFE4490::setSpO2RMethod(uint8_t method) {
+    if (method != 1 && method != 2) {
+        ESP_LOGE(TAG, "setSpO2RMethod(%u) rejected: 1 or 2; method unchanged", (unsigned)method);
+        return;
+    }
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_r_method = method;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+    _spo2_warn_if_curve_mismatch();
+}
+
+void INCUNEST_AFE4490::setSpO2RCorrMin(float r) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_r_corr_min = r;
+    if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
 void INCUNEST_AFE4490::setSpO2WarmupS(float s) {
@@ -1067,10 +1107,12 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
     cfg.hr2_f_high_hz    = _hr2_bpf.f_high;
     cfg.hr3_f_high_hz    = _hr3_lp.f_high;
-    memcpy(cfg.spo2_r_method_id, SPO2_R_METHOD_ID, sizeof(SPO2_R_METHOD_ID));
+    _copy_spo2_r_id(cfg.spo2_r_method_id, _spo2_r_method_id());
     memcpy(cfg.spo2_r_curve_id, _spo2_r_curve_id, sizeof(_spo2_r_curve_id));
     memcpy(cfg.spo2_r_curve_r_method_id, _spo2_r_curve_r_method_id, sizeof(_spo2_r_curve_r_method_id));
-    cfg.spo2_r_curve_method_match = strcmp(_spo2_r_curve_r_method_id, SPO2_R_METHOD_ID) == 0;
+    cfg.spo2_r_curve_method_match = strcmp(_spo2_r_curve_r_method_id, _spo2_r_method_id()) == 0;
+    cfg.spo2_r_method         = _spo2_r_method;
+    cfg.spo2_r_corr_min       = _spo2_r_corr_min;
     cfg.spo2_r_curve_a   = _spo2_r_curve_a;
     cfg.spo2_r_curve_b   = _spo2_r_curve_b;
     cfg.spo2_warmup_s         = _spo2_warmup_s;
@@ -1209,8 +1251,7 @@ void INCUNEST_AFE4490::_diag_task_trampoline(void* pv) {
 
 // ── _reset_algorithms() ───────────────────────────────────────────────────────
 void INCUNEST_AFE4490::_reset_algorithms() {
-    _spo2_ch_ir_ema.reset();
-    _spo2_ch_red_ema.reset();
+    _spo2_reset_state();
     _hr1_dc                    = 0.0f;
     _hr1_running_max           = 0.0f;
     _hr1_ppg_above_thresh   = false;
@@ -1783,6 +1824,9 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
     _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, sample_rate_hz);
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, sample_rate_hz);
+    _spo2_bp_ir.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
+    _spo2_bp_red.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
+    _spo2_reg_alpha = 1.0f - expf(-1.0f / (_spo2_ema_var_tau_s * sample_rate_hz));
     // HGAC EMAs: var unused (only mean is read), so var_tau = mean_tau; warmup = 3·τ (fail-safe
     // via valid() → NaN-free: _hgac_track() skips checks until the EMA has matured after a reset).
     _hgac_ema_fast_led1.init(hgac_ema_fast_tau_s, hgac_ema_fast_tau_s, sample_rate_hz, 3.0f * hgac_ema_fast_tau_s);
@@ -2255,83 +2299,99 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // sentinel like -1.0f) fails safe: any consumer that forgets to check sqi and instead
 // compares/averages a NAN value gets a comparison that is always false / a propagated NAN,
 // rather than a plausible-looking-but-wrong number that could trigger a false alarm.
+void INCUNEST_AFE4490::_spo2_reset_state() {
+    _spo2_ch_ir_ema.reset();
+    _spo2_ch_red_ema.reset();
+    _spo2_bp_ir.reset();
+    _spo2_bp_red.reset();
+    _spo2_reg_x_prev = 0.0f; _spo2_reg_y_prev = 0.0f;
+    _spo2_reg_sxy = 0.0f; _spo2_reg_sxx = 0.0f; _spo2_reg_syy = 0.0f;
+    _spo2_reg_count = 0;
+}
+
 void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         // Reset every sample while not applied (idempotent — cheap, no stored "previous
-        // probe_state" needed): the EMAs are already clean the instant probe_state returns
+        // probe_state" needed): the state is already clean the instant probe_state returns
         // to APPLIED, so warmup restarts naturally via ir_ema.count below.
-        _spo2_ch_ir_ema.reset();
-        _spo2_ch_red_ema.reset();
-        _current_data.pi       = NAN;
-        _current_data.spo2     = NAN;
-        _current_data.spo2_r   = NAN;
-        _current_data.spo2_sqi = 0.0f;
+        _spo2_reset_state();
+        _current_data.pi          = NAN;
+        _current_data.spo2        = NAN;
+        _current_data.spo2_r      = NAN;
+        _current_data.spo2_r_corr = NAN;
+        _current_data.spo2_sqi    = 0.0f;
         return;
     }
 
-    // DC extraction + AC² power estimation via EmaChannel (one call per channel):
-    //   Step 1 — DC: mean += α_mean × (x − mean)           slow IIR low-pass, τ = 2.0 s
-    //   Step 2 — AC: d = x − mean                           DC-subtraction high-pass
-    //                NOTE: future alternative — replace DC-subtraction with a BPF (0.5–5 Hz)
-    //                      to isolate the pulsatile band more precisely and reject motion artefacts
-    //   Step 3 — AC²: var += α_var × (d² − var)            EMA of AC², τ = 6.0 s (ISO 80601-2-61:2026 JJ.2 d)
-    //                NOTE: future alternative — BPF-filtered AC² for a PI closer to spectral PI
+    // DC + AC² power via EmaChannel (one per channel):
+    //   mean += α_mean × (x − mean)   slow IIR low-pass, τ = spo2_ema_mean_tau_s (2.0 s) — the DC
+    //   var  += α_var  × (d² − var)    EMA of (x − mean)², τ = spo2_ema_var_tau_s (6.0 s)
+    // The mean is the DC of both R methods and of PI; var is PI's AC² and R-METHOD-1's.
     _spo2_ch_ir_ema.update(ot_ir);
     _spo2_ch_red_ema.update(ot_red);
+    const float dc_ir  = _spo2_ch_ir_ema.mean;
+    const float dc_red = _spo2_ch_red_ema.mean;
 
-    // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup)
-    // PI = sqrt(E[AC²]) / DC — a pure ratio, numerically identical whether DC/AC are expressed
-    // in OT or in raw counts. Guard is division-safety only (spo2_div_eps), not physiological.
-    _current_data.pi = (_spo2_ch_ir_ema.mean > spo2_div_eps)
-                       ? (sqrtf(_spo2_ch_ir_ema.var) / _spo2_ch_ir_ema.mean) * 100.0f
-                       : NAN;
+    // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup).
+    // A pure ratio, identical in OT or in raw counts. Guard is division-safety only.
+    _current_data.pi = (dc_ir > spo2_div_eps) ? (sqrtf(_spo2_ch_ir_ema.var) / dc_ir) * 100.0f : NAN;
 
-    // Skip during warmup. Sample count comes directly from the EMA itself (ir_ema.count) —
-    // ir_ema/red_ema are always updated together above, so either's count works; no separate
-    // _spo2_sample_count needed. Naturally restarts after the reset-on-not-applied above.
+    // R-METHOD-2 state advances on every applied sample whichever method is selected, so a
+    // switch costs no warm-up. x, y: band-passed OT normalised by its DC; the regression runs
+    // on their first differences, averaged with τ_var (the averaging time).
+    {
+        const float x = (dc_ir  > spo2_div_eps) ? _spo2_bp_ir.process(ot_ir)   / dc_ir  : 0.0f;
+        const float y = (dc_red > spo2_div_eps) ? _spo2_bp_red.process(ot_red) / dc_red : 0.0f;
+        if (_spo2_reg_count > 0) {
+            const float dx = x - _spo2_reg_x_prev, dy = y - _spo2_reg_y_prev;
+            _spo2_reg_sxy += _spo2_reg_alpha * (dx * dy - _spo2_reg_sxy);
+            _spo2_reg_sxx += _spo2_reg_alpha * (dx * dx - _spo2_reg_sxx);
+            _spo2_reg_syy += _spo2_reg_alpha * (dy * dy - _spo2_reg_syy);
+        }
+        _spo2_reg_x_prev = x; _spo2_reg_y_prev = y;
+        _spo2_reg_count++;
+    }
+
+    // Skip during warmup (3·τ_var). Sample count comes from the EMA itself (ir_ema.count) —
+    // ir_ema/red_ema are always updated together above. Restarts after the reset above.
     if (_spo2_ch_ir_ema.count < _spo2_warmup_samples) {
-        _current_data.spo2   = NAN;
-        _current_data.spo2_r = NAN;
+        _current_data.spo2        = NAN;
+        _current_data.spo2_r      = NAN;
+        _current_data.spo2_r_corr = NAN;
+        _current_data.spo2_sqi    = 0.0f;
+        return;
+    }
+
+    float R, r = NAN;
+    bool  valid;
+    if (_spo2_r_method == 2) {
+        // R = EMA(dx·dy)/EMA(dx²): the least-squares slope of dy on dx through the origin, i.e. of
+        // ln(I_red) on ln(I_ir) over the pulse — the Beer-Lambert ratio R-METHOD-1 approximates.
+        // r = EMA(dx·dy)/√(EMA(dx²)·EMA(dy²)) is that fit's correlation: ~0.99 with a pulse.
+        valid = _spo2_reg_sxx > spo2_reg_eps && _spo2_reg_syy > spo2_reg_eps;
+        R = valid ? _spo2_reg_sxy / _spo2_reg_sxx : NAN;
+        r = valid ? _spo2_reg_sxy / sqrtf(_spo2_reg_sxx * _spo2_reg_syy) : NAN;
+    } else {
+        // R = (AC_red/DC_red)/(AC_ir/DC_ir) — ISO 80601-2-61:2026 "ratio of ratios"; each term is
+        // the channel's AC/DC. Guard is division-safety only (presence is probe_state's job).
+        const float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
+        const float ac_red = sqrtf(_spo2_ch_red_ema.var);
+        valid = dc_red >= spo2_div_eps && ac_ir >= spo2_div_eps;
+        R = valid ? (ac_red / dc_red) / (ac_ir / dc_ir) : NAN;
+    }
+    _current_data.spo2_r      = R;
+    _current_data.spo2_r_corr = r;
+    if (!valid) {
+        _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
         return;
     }
 
-    // ── DC (current EMA method) ───────────────────────────────────────────────
-    // DC = slow IIR low-pass of OT (mean of EmaChannel, τ = 1.6 s).
-    // NOTE: future alternative — median over a sliding window (more robust to motion).
-    float dc_ir  = _spo2_ch_ir_ema.mean;
-    float dc_red = _spo2_ch_red_ema.mean;
-
-    // ── AC (current method: DC subtraction) ──────────────────────────────────
-    // AC amplitude = RMS of (x − DC) = sqrt(EMA of (x−DC)²) = sqrt(var of EmaChannel).
-    // NOTE: future alternative A — bandpass filter (0.5–5 Hz) applied to raw signal,
-    //       then RMS of filtered output. More selective, rejects sub-Hz motion baseline.
-    // NOTE: future alternative B — peak-to-peak amplitude of bandpass-filtered signal
-    //       over one cardiac cycle, then divided by 2. Used by some Masimo implementations.
-    float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
-    float ac_red = sqrtf(_spo2_ch_red_ema.var);
-
-    // Division-safety guard only (spo2_div_eps, NOT physiological — presence detection is
-    // probe_state's job above). dc_red and ac_ir are the actual divisors in R below (dc_ir is
-    // already guarded above for the PI calc; ac_red is a numerator-only multiplicand in R).
-    if (dc_red < spo2_div_eps || ac_ir < spo2_div_eps) {
-        _current_data.spo2   = NAN;
-        _current_data.spo2_r = NAN;
-        _current_data.spo2_sqi = 0.0f;
-        return;
-    }
-
-    // ── R ratio ───────────────────────────────────────────────────────────────
-    // R = (AC_red / DC_red) / (AC_ir / DC_ir)
-    // ISO 80601-2-61:2026 calls this the "modulation ratio" or "ratio of ratios".
-    // This is the core of the SpO2 algorithm. SpO2 = a − b·R (empirical calibration curve).
-    // Each term (AC/DC) is the Perfusion Index of the channel (dimensionless, ~0–1).
-    float R = (ac_red / dc_red) / (ac_ir / dc_ir);
-    float spo2 = _spo2_r_curve_a - _spo2_r_curve_b * R;
-
-    _current_data.spo2_r = R;
-
-    if (spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
+    const float spo2 = _spo2_r_curve_a - _spo2_r_curve_b * R;    // the R curve (setSpO2RCurve)
+    // R-METHOD-2's validity gate: a fit that does not describe the data gives no SpO2. R and r
+    // stay visible so the reason is on record.
+    const bool r_ok = (_spo2_r_method != 2) || (r >= _spo2_r_corr_min);
+    if (r_ok && spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
         _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
         // PI < spo2_pi_sqi_lo → SQI = 0 (very weak signal). PI ≥ spo2_pi_sqi_hi → SQI = 1
@@ -2339,7 +2399,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         float sqi = (_current_data.pi - _spo2_pi_sqi_lo) / (_spo2_pi_sqi_hi - _spo2_pi_sqi_lo);
         _current_data.spo2_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
-        _current_data.spo2   = NAN;
+        _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
     }
 }

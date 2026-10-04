@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.99"
+#define INCUNEST_AFE4490_VERSION "0.100"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -115,12 +115,15 @@ inline bool isProbeAbsent(ProbeState s) {
 }
 
 // ── SpO2: R method and R curve identifiers (v0.98) ──────────────────────────
-// SPO2_R_METHOD_ID names HOW this library computes R from the signals. It changes if and only if,
+// An R method id names HOW this library computes R from the signals. It changes if and only if,
 // for the same input, R comes out as a different number (method, τ of DC or AC, DC split, input
 // domain, filtering before) — never for changes that leave R alone. An R curve
 // ("R-CURVE-<probe>-<source>-<date>") turns R into SpO2 and records the R method it was fitted
 // with: a curve is only valid for that method. Registry of both: spec §5.1, "R methods and R curves".
-inline constexpr char SPO2_R_METHOD_ID[] = "R-METHOD-1";
+// Since v0.100 the library implements two methods, selected with setSpO2RMethod() (default 2);
+// getConfig().spo2_r_method_id names the one in force.
+inline constexpr char SPO2_R_METHOD_1_ID[] = "R-METHOD-1";   // RMS ratio: (σ_red/μ_red)/(σ_ir/μ_ir)
+inline constexpr char SPO2_R_METHOD_2_ID[] = "R-METHOD-2";   // regression on derivatives of the band-passed, DC-normalised OT
 inline constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, terminator included
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
@@ -178,8 +181,9 @@ struct AFE4490Data {
                               // HGAC changes RF, unlike the raw-ADC-code led1_sub/led2_sub it replaced.
                               // Display only — not an input to algorithms.
     float   spo2;        // SpO2 in %
-    float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based; 0=invalid/no finger, 1=full quality (PI ≥ 2%)
-    float   spo2_r;      // R ratio used for SpO2 calculation: (AC_red/DC_red)/(AC_ir/DC_ir)
+    float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based ramp; 0 also when R-METHOD-2's r < spo2_r_corr_min
+    float   spo2_r;      // R used for SpO2: R-METHOD-1 ratio or R-METHOD-2 regression slope (getConfig().spo2_r_method_id)
+    float   spo2_r_corr; // R-METHOD-2 only: correlation r of the regression [−1…1], its goodness of fit; NaN otherwise
     float   pi;          // Perfusion Index: (AC_ir / DC_ir) * 100 [%]
     float   hr1;         // HR1 (peak detection) in bpm
     float   hr1_sqi;     // HR1 Signal Quality Index [0–1]: 1 − CV/0.15; 0=arrhythmia/artefact/invalid, 1=perfectly regular
@@ -682,7 +686,7 @@ struct AFE4490Config {
     float             hr2_f_high_hz;     // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;     // HR3 bandpass upper cutoff [Hz]
     // R → SpO2 curve: SpO2 = spo2_r_curve_a − spo2_r_curve_b · R (v0.98; was spo2_a / spo2_b)
-    char              spo2_r_method_id[SPO2_R_ID_LEN];          // how this library computes R (SPO2_R_METHOD_ID)
+    char              spo2_r_method_id[SPO2_R_ID_LEN];          // how this library computes R (SPO2_R_METHOD_1_ID or _2_ID, per spo2_r_method)
     char              spo2_r_curve_id[SPO2_R_ID_LEN];           // the R curve in use
     char              spo2_r_curve_r_method_id[SPO2_R_ID_LEN];  // the R method that curve was fitted with
     bool              spo2_r_curve_method_match;               // false: curve fitted for another R method (warning only)
@@ -696,6 +700,8 @@ struct AFE4490Config {
     float             spo2_max;                  // valid output upper bound [%]
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
+    uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
+    float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
@@ -805,6 +811,10 @@ public:
     void setSpO2EmaVarTauS(float tau_s);                       // EMA variance (AC²) time constant; triggers recalc
     void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
     void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+    // R method in force (v0.100): 1 = RMS ratio, 2 = regression on derivatives (default). Both
+    // run on every sample, so switching is immediate; anything else is rejected and logged.
+    void setSpO2RMethod(uint8_t method);
+    void setSpO2RCorrMin(float r);                              // R-METHOD-2 validity gate on r
 
     // HR1 algorithm setters
     void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant; triggers recalc
@@ -1407,11 +1417,29 @@ private:
     //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
+    // R-METHOD-2 (v0.100): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red with the one-biquad band-pass
+    // spo2_bp_f_low_hz–spo2_bp_f_high_hz and the EmaChannel means as DC; then, on the first
+    // differences dx, dy: R = EMA(dx·dy)/EMA(dx²), r = EMA(dx·dy)/√(EMA(dx²)·EMA(dy²)), all three
+    // EMAs with τ = spo2_ema_var_tau_s (the averaging time, shared with R-METHOD-1's AC²). The
+    // derivative weights the systolic upstroke, where the two channels move together, over the
+    // slow venous/motion components; the band-pass removes the out-of-band power that inflates
+    // R-METHOD-1's red RMS more than its IR RMS. Design rationale §9–§10.
+    BiquadFilter _spo2_bp_ir;
+    BiquadFilter _spo2_bp_red;
+    float    _spo2_reg_x_prev, _spo2_reg_y_prev;
+    float    _spo2_reg_sxy, _spo2_reg_sxx, _spo2_reg_syy;
+    float    _spo2_reg_alpha;                              // 1 − exp(−1/(τ_var·fs))
+    uint32_t _spo2_reg_count;                              // samples since reset (0 → no difference yet)
     char     _spo2_r_curve_id[SPO2_R_ID_LEN];            // R curve in use (setSpO2RCurve)
     char     _spo2_r_curve_r_method_id[SPO2_R_ID_LEN];   // R method that curve was fitted with
     float    _spo2_r_curve_a;
     float    _spo2_r_curve_b;
     static bool _copy_spo2_r_id(char* dst, const char* src);   // false: null, empty or too long
+    const char* _spo2_r_method_id() const {                     // id of the method in force
+        return _spo2_r_method == 1 ? SPO2_R_METHOD_1_ID : SPO2_R_METHOD_2_ID;
+    }
+    void _spo2_warn_if_curve_mismatch() const;
+    void _spo2_reset_state();                                   // EMAs, band-passes, regression
 
     // ── HR1 state ──
     float    _hr1_dc;
@@ -1522,6 +1550,8 @@ private:
     float    _spo2_max;
     float    _spo2_pi_sqi_lo;
     float    _spo2_pi_sqi_hi;
+    uint8_t  _spo2_r_method;
+    float    _spo2_r_corr_min;
     float    _hr1_dc_tau_s;
     float    _hr1_lp_cutoff_hz;
     // Decay of the running max that sets HR1's detection threshold. Was a bare 0.9999f literal
@@ -1627,6 +1657,7 @@ public:
     }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }
+    float test_spo2_r_corr()                { return _current_data.spo2_r_corr; }
     float test_spo2_sqi()                   { return _current_data.spo2_sqi; }
     float test_spo2_ir_ema_mean()  const { return _spo2_ch_ir_ema.mean; }
     float test_spo2_ir_ema_var()   const { return _spo2_ch_ir_ema.var; }

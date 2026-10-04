@@ -276,6 +276,8 @@ struct AFE4490Config {
     float             spo2_min_dc;               // no-finger DC threshold [adc_code]
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
+    uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
+    float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
@@ -325,6 +327,8 @@ void setSpO2EmaVarTauS(float tau_s);                        // AC² EMA time con
 void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
 void setSpO2MinDC(float counts);                           // no-finger DC threshold [adc_code]
 void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+void setSpO2RMethod(uint8_t method);                       // 1 = RMS ratio, 2 = regression on derivatives (default, v0.100)
+void setSpO2RCorrMin(float r);                              // R-METHOD-2 validity gate on r (default 0.8)
 bool setSpO2RCurve(const char* id, const char* r_method_id, float a, float b);  // R curve + the R method it was fitted with (v0.98; replaces setSpO2Coefficients)
 
 // HR1
@@ -918,7 +922,8 @@ already-parsed `ProbeState` column, `spo2_div_eps` (single numerical guard), `Na
 Based on the ratio R of the AC and DC components of the ambient-corrected signals:
 
 ```
-R = (AC_RED / DC_RED) / (AC_IR / DC_IR)
+R-METHOD-1:  R = (AC_RED / DC_RED) / (AC_IR / DC_IR)
+R-METHOD-2:  R = EMA(dx·dy) / EMA(dx²),  dx = Δ(BP(OT_IR)/DC_IR),  dy = Δ(BP(OT_RED)/DC_RED)   (default since v0.100)
 
 SpO2 = a - b × R
 ```
@@ -964,7 +969,7 @@ PI = sqrt(EmaChannel.var) / EmaChannel.mean × 100  [%]
 sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)
 ```
 
-PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference. If SpO2 is outside the valid range [70–100 %] or the DC level is below the no-finger threshold, SQI is forced to 0.
+PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference. SQI is forced to 0, with SpO2 = NaN, when SpO2 falls outside the valid range [70–100 %] and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
 #### R methods and R curves (v0.98)
 
@@ -995,7 +1000,20 @@ Two different things decide the SpO2 number, and each has its own identifier:
 | Id | Definition | In force |
 |---|---|---|
 | `R-METHOD-0` | Inputs: ambient-corrected `adc_code` (`led1_sub` / `led2_sub`). DC = IIR low-pass, τ = 1.6 s. AC = √(EMA of (x − DC)²), τ = 1.0 s. R = (AC_red/DC_red)/(AC_ir/DC_ir). | The library of 2026-03-23, when the default curve was fitted. Reconstructed from the conversation log (session 26 and the SpO2LocalCalc mirror of that day), not from a tagged version. |
-| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = √(`EmaChannel` var of x − DC), τ = `spo2_ema_var_tau_s` = 6.0 s (both since 2026-06-11). Same ratio. | Current (named in v0.98). |
+| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = √(`EmaChannel` var of x − DC), τ = `spo2_ema_var_tau_s` = 6.0 s (both since 2026-06-11). Same ratio. | v0.38 – v0.99 default; since v0.100 selectable with `setSpO2RMethod(1)`. |
+| `R-METHOD-2` | Inputs: OT. Per channel: one-biquad band-pass 0.5–5 Hz (`BiquadFilter::init_bp`, precharged) divided by the same `EmaChannel` mean (DC, τ 2.0 s): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red. On the first differences dx = x[n] − x[n−1], dy: **R = EMA(dx·dy) / EMA(dx²)**, the least-squares slope of dy on dx through the origin, and **r = EMA(dx·dy) / √(EMA(dx²)·EMA(dy²))**, its correlation; the three EMAs run with τ = `spo2_ema_var_tau_s` = 6.0 s, warm-up `spo2_warmup_s` = 18 s as before. SpO2 is withheld (NaN, SQI 0) while r < `spo2_r_corr_min` = 0.8; R and r stay reported. The band-pass corners are constants (`spo2_bp_f_low_hz`, `spo2_bp_f_high_hz`); the gate has `setSpO2RCorrMin()`. | **Current, default since v0.100** (`setSpO2RMethod(2)`). Rationale §9–§10. |
+
+Both methods run on every applied sample (the regression state is cheap: two biquads, three
+EMAs), so `setSpO2RMethod()` takes effect on the next sample with no new warm-up;
+`AFE4490Config::spo2_r_method` (1 | 2) and `spo2_r_method_id` say which is in force, and the
+curve-mismatch check follows it. `AFE4490Data::spo2_r_corr` carries r (NaN under R-METHOD-1).
+**Why the derivative regression (measured, rationale §9):** on 3471 stationary 8 s windows of the
+HOSPNAV campaigns it brings the R→SpO2 scatter from 5.07 points (R-METHOD-1) to 1.6 and Spearman ρ
+from −0.44 to −0.80; it estimates the same Beer-Lambert quantity (the slope of ln I_red on ln I_ir
+over the pulse) that the ratio of ratios approximates, weights the systolic upstroke where both
+channels move together, and the band-pass removes the sub-0.5 Hz power that inflates the red RMS
+more than the IR RMS (regression dilution: it is why R-METHOD-1's fitted slope came out ~21 instead
+of ~39).
 
 The OT input domain alone would not move R (each channel's AC/DC is invariant to its own scale),
 but the τ changes do, slightly; with no way to rebuild R-METHOD-0 exactly, the two are kept apart.
@@ -1008,12 +1026,13 @@ on derivatives): PulseNest `captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r
 
 | Id | a | b | Fitted with | Provenance |
 |---|---|---|---|---|
-| `R-CURVE-U401D-MS100-20260323` (**default**) | 114.9208 | 30.5547 | `R-METHOD-0` | CONTEC MS100 simulator, setting "R-Curve Nellcor, 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type, IR 905 nm). A simulator does not validate accuracy (ISO 80601-2-61 EE.4). |
+| `R-CURVE-STS0163-HOSPNAV-20260923` (**default since v0.100**) | 123.98 | 39.13 | `R-METHOD-2` | Clinical, not a desaturation study: the two 2026-09-23 HOSPNAV campaigns (two neonates, probe Medle ST-S0163, reference = the ward monitor read by VideoNest OCR — make, model and averaging not recorded), replayed by `incunest_offline_runner` with lib v0.100 and paired on 3455 stationary 8 s windows (`fit_method2.py` in the SUBJ08 analysis directory). Spearman ρ −0.80, scatter 1.65 points, median \|residual\| 0.91; per subject 129.2 − 46.7·R / 118.8 − 32.1·R, leave-one-subject-out median \|error\| 0.95–1.38. Reference 85–100 % (31 windows below 85, read −3.4 points). The same id was used on 2026-09-24 for a 115.17 − 21.54·R proposal fitted with R-METHOD-1 (findings.md); that one was never applied. |
+| `R-CURVE-U401D-MS100-20260323` (default until v0.99) | 114.9208 | 30.5547 | `R-METHOD-0` | CONTEC MS100 simulator, setting "R-Curve Nellcor, 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type, IR 905 nm). A simulator does not validate accuracy (ISO 80601-2-61 EE.4). |
 
-Because the default was fitted with `R-METHOD-0`, **the default configuration raises the
-mismatch warning by itself**: that is the honest state of the library today, not a fault. The
-registry of all curves, with their data and fitting method, lives in PulseNest
-(`docs/spo2_r_curves.md`, planned).
+The default pair matches since v0.100 (it raised the mismatch warning by itself from v0.98 to
+v0.99: the only curve was R-METHOD-0's). A curve is for one probe model: this one is for the Medle
+ST-S0163 and says nothing about the UpnMed U401-D. The registry of all curves, with their data and
+fitting method, lives in PulseNest (`docs/spo2_r_curves.md`, planned).
 
 On the wire (PulseNest fw ≥ 0.16), `$CFG` carries `spo2_r_method_id`, `spo2_r_curve_id`,
 `spo2_r_curve_r_method_id`, `spo2_r_curve_method_match`, `spo2_r_curve_a`, `spo2_r_curve_b`
@@ -2483,7 +2502,8 @@ the **recorded** OT and the **recorded** ProbeState through `test_feed_spo2`/`te
 the production order, bypassing the analog reconstruction, RSQM and HGAC: for algorithm
 experiments whose input must be exactly what the board computed. Of the `afe:` records only a PRF
 change is applied. A row without a recorded OT is fed as not applied (the algorithms reset). It
-needs the ProbeState column, so a P5 capture is refused, not guessed; `--ot-thr` is refused too
+needs the ProbeState column (a capture without it is refused, not guessed; P5 carries it since
+2026-10-04 afternoon); `--ot-thr` is refused too
 (it acts on the RSQM). Output in `replay_lib<version>_inputot/`. HR2/HR3 run there through their
 synchronous test wrappers; **in the raw-code replay they never run on the host** (their slow paths
 live in FreeRTOS tasks the host HAL does not create), so those columns are empty in that mode.
@@ -3070,6 +3090,19 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.100  | **R-METHOD-2 in the library, default (§5.1).** `setSpO2RMethod(1|2)`: 2 = causal    |
+|         | regression on the first differences of the band-passed (0.5–5 Hz, one biquad),  |
+|         | DC-normalised OT, R = EMA(dx·dy)/EMA(dx²), with its correlation r as validity  |
+|         | gate (`spo2_r_corr_min` 0.8, `setSpO2RCorrMin()`) and `AFE4490Data::spo2_r_corr`; |
+|         | 1 = the RMS ratio of v0.38–v0.99, still selectable (both run every sample, no   |
+|         | warm-up on switch). The port is bit-identical to the runner's `R_CAND` on all  |
+|         | 24 HOSPNAV parts. New default curve `R-CURVE-STS0163-HOSPNAV-20260923`        |
+|         | (R-METHOD-2): SpO2 = 123.98 − 39.13·R, fitted on the library's own replay of   |
+|         | the two HOSPNAV campaigns (scatter 1.65 points, ρ −0.80; R-METHOD-1 with the   |
+|         | MS100 curve read −10 points there). `AFE4490Config::spo2_r_method`,            |
+|         | `spo2_r_corr_min`. Tests: `test_spo2_method2_equals_method1_on_clean_sines`,   |
+|         | `test_spo2_method2_low_r_invalidates`, `test_spo2_method_switch_is_immediate`.  |
+|         | Rationale §9–§10.                                                             |
 | v0.99   | **HR valid range floor 40 → 30 BPM (§5.2).** `hr_min_bpm` 40 → 30, so          |
 |         | `hr_search_min_bpm` 37 → 27 and the HR2 lag sweep 81 → 111 lags (caps 137/199  |
 |         | still inactive); HR3's `search_min` stays bin 5. Meets WHO-UNICEF 2019 §6.5    |

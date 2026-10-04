@@ -647,6 +647,40 @@ then step 3 = R-METHOD-2 in the library (r ≥ 0.8 as its SQI) with an R curve r
 (decision (ii) of 2026-10-02: from MS100 and/or SUBJ08/09 replays). The DC estimator it divides by is
 §10's question.
 
+**Step 3 done (2026-10-04, lib v0.100).** R-METHOD-2 is in the library, as the default, built from
+the pieces the candidate used (one-biquad `init_bp` 0.5–5 Hz, the `EmaChannel` mean as DC, three
+EMAs of τ_var on dx·dy, dx², dy²); `offline_runner` v0.25 reports its R bit-identical to `R_CAND`
+on every sample of the 24 HOSPNAV parts. Decisions taken with it:
+- **R-METHOD-1 stays selectable** (`setSpO2RMethod(1)`), both methods computed on every sample.
+  PI needs R-METHOD-1's EMAs anyway, so the cost is one more variance EMA; what it buys is an on-board
+  A/B in the next hospital campaign and the replay of older behaviour. Not two outputs: `spo2_r` is
+  the method in force, `$CFG` names it.
+- **r is a validity gate, not the SQI value.** SQI keeps its PI ramp (signal strength); under
+  R-METHOD-2, r < `spo2_r_corr_min` (0.8) sets SpO2 = NaN, SQI = 0 and leaves R and r reported, so
+  the reason is on record. Mapping r itself onto [0, 1] was rejected: r = 0.9 is a sound fit on this
+  corpus (p1 of the window medians 0.944) and would have read as "half quality". The 0.8 stays
+  provisional (§9 above): it costs nothing on the corpus and has not been measured on pulse-less
+  input. r travels in `AFE4490Data::spo2_r_corr`; whether the `$M4` frame carries it is the
+  firmware's call (its 288-byte slot has ~10 B of margin after the 7-figure OT).
+- **The curve is fitted on the library's own R** (`fit_method2.py`, same pairs, stationarity rule
+  and bin fit as the step-1 table): SpO2 = 123.98 − 39.13·R, pooled over 3455 windows of the two
+  subjects — the same numbers §10 obtained through the runner's candidate (124.0 − 39.1·R), by a
+  different path. ρ −0.80, scatter 1.65, median |residual| 0.91; per subject 129.2 − 46.7·R and
+  118.8 − 32.1·R (leave-one-out median |error| 0.95 / 1.38). Below a reference of 85 % (31 windows,
+  all dynamic) it reads −3.4 points: the low range is unmeasured, not fitted. It is a hospital-monitor-
+  referenced curve for one probe model (Medle ST-S0163), not an ISO Annex DD desaturation study; the
+  reference monitor's make and averaging were not recorded. Its id reuses
+  `R-CURVE-STS0163-HOSPNAV-20260923`: the 2026-09-24 proposal under that id (115.17 − 21.54·R,
+  R-METHOD-1) was never applied, and the pair (id, method) is what identifies a curve.
+- **Why not the MS100 curve any more:** with R-METHOD-1 it read a median −9.9 points against the
+  ward monitor on these campaigns (p10 −17.2), and a curve fitted with one method applied to the R of
+  another is worse still (−9.7 for the step-1 `reg_dols` fit on R-METHOD-1's R — the 2026-10-03
+  "v0.100" that was reverted the next day). The simulator curve stays in the registry for the UpnMed
+  probe and for replaying older captures.
+- **Not changed:** τ_var 6 s (the averaging time, §4.5), the warm-up (18 s), the DC estimator (§10),
+  PI (still RMS/DC from the EMAs), HR1–HR3.
+
+
 ## 10. The DC estimator under the R method — EMA vs 2nd-order low-pass (2026-10-03)
 
 **Question (Alex).** Replace the EMA that estimates DC — everywhere in the library — by a 2nd-order
