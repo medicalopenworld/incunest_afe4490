@@ -656,8 +656,19 @@ informative Annex EE.4, as something R "can be approximated as" (EE.1:
 log10(max/min)_red / log10(max/min)_IR ≈ (AC/DC)_red / (AC/DC)_IR ≈ %mod_red / %mod_IR). So
 (AC/DC)_red/(AC/DC)_IR — R-METHOD-1 — is an *estimator* of R, the original one of the analogue
 instruments, not R's definition; the physical quantity is the ratio of the changes in logarithmic
-absorbance at the two wavelengths over the pulse. The public patents of the two largest makers
-describe other estimators: Nellcor (Baker & Yorkey, 1998 on) takes ln and band-passes each channel,
+absorbance at the two wavelengths over the pulse. The public patents describe other estimators.
+**The direct antecedent of R-METHOD-2 is Ohmeda's US 5,503,148** ("System for pulse oximetry SpO2
+determination", filed 1994-11-01, granted 1996-04-02, expired 2014-11-01 — public domain; verified
+on Google Patents 2026-10-05, found by consult session pulsenest-4f): it takes the sample-to-sample
+differences of the red and IR signals ("or a logarithmic difference circuit"), fits the (dRed, dIR)
+pairs by a least-squares regression "that accounts for noise present in both data channels"
+(a two-variable fit — our offline `reg_tls`, which measured the same as `reg_ols` because r² is
+0.99), reads R as the slope of that line, and uses the fit's "goodness-of-fit correlation
+coefficient … a measure of linearity" to detect motion artefact and poor data — our r gate, thirty
+years earlier. Ohmeda's lineage (Biox → Ohmeda → Datex-Ohmeda 1998 → GE HealthCare 2003) is today's
+TruSignal; GE's white paper "Accuracy of TruSignal SpO2" (Hyle, 2014) discloses no internals, only
+adult Arms 1.4 % still / 1.9 % with motion / up to 2.7 % at low perfusion (manufacturer data). Then
+Nellcor (Baker & Yorkey, 1998 on) takes ln and band-passes each channel,
 differentiates, and fits the slope of red on IR **through the origin** over a window of several
 seconds — R = Σ(dRed·dIR)/Σ(dIR²), exactly R-METHOD-2's regression — then feeds the fit's residual
 variance to a Kalman filter on saturation and averages beats aligned to the pulse under motion;
