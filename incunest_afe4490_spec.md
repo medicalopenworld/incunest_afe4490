@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.99
+# incunest_afe4490 — Specification v0.102
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -268,9 +268,8 @@ struct AFE4490Config {
     float             spo2_r_curve_a;
     float             spo2_r_curve_b;
     // SpO2 algorithm parameters
-    float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
     float             spo2_ema_mean_tau_s;         // DC removal IIR time constant [s]
-    float             spo2_ema_var_tau_s;         // AC² EMA time constant [s]
+    float             spo2_window_s;               // SpO2 averaging window [s] (v0.102; 2–12 s)
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
     float             spo2_min_dc;               // no-finger DC threshold [adc_code]
@@ -282,6 +281,7 @@ struct AFE4490Config {
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11)
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
+    float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, independent of spo2_window_s)
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
@@ -325,9 +325,9 @@ All setters callable before or after `begin()`. Setters marked *recalc* internal
 
 ```cpp
 // SpO2
-void setSpO2WarmupS(float s);                              // warmup before reporting SpO2 [s] — recalc
 void setSpO2EmaMeanTauS(float tau_s);                        // DC IIR time constant [s] — recalc
-void setSpO2EmaVarTauS(float tau_s);                        // AC² EMA time constant [s] — recalc
+void setSpO2WindowS(float window_s);                        // SpO2 averaging window [s], clamped 2–12; empties the window (v0.102)
+void setPIWindowS(float window_s);                          // PI averaging window [s], clamped 2–12, independent of SpO2's (v0.102)
 void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
 void setSpO2MinDC(float counts);                           // no-finger DC threshold [adc_code]
 void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
@@ -935,23 +935,22 @@ SpO2 = a - b × R
 `a` and `b` are the empirical **R curve**, set with `setSpO2RCurve()` together with the curve's id and
 the R method it was fitted with — see *R methods and R curves* at the end of this section.
 
-**DC and AC² estimation via EmaChannel:**
+**DC via EmaChannel, AC and R over a sliding window (v0.102):**
 
-Both DC and AC power are extracted from a single `EmaChannel` per signal (IR and RED), using two independent time constants:
+The DC of each channel (IR and RED) is the mean of an `EmaChannel`; everything that is *averaged*
+— R-METHOD-1's AC², R-METHOD-2's three products — is summed over a true sliding window of
+`spo2_window_s` seconds (rationale §12):
 
 - **`spo2_ema_mean_tau_s` = 2.0 s** — tracks the DC baseline (slow IIR low-pass, f_c ≈ 0.08 Hz). Must satisfy f_c << 0.5 Hz (minimum physiological HR at 30 bpm) so the mean does not follow the pulsatile component. Same value as `rsqm_ema_mean_tau_s` — both track the DC of the same signal with the same physical requirement.
-- **`spo2_ema_var_tau_s` = 6.0 s** — tracks the AC² power (EMA of `(x − mean)²`). Lower end of the 6–10 s averaging window that **ISO 80601-2-61:2026 Annex JJ.2 d)** (informative) sets for an SpO2 *transfer standard*; the standard prescribes no window for the device itself, only its disclosure (201.7.9.2.1.101 c). It sits between the 2–4 s used in neonatal resuscitation and intermittent-hypoxaemia research and the 8 s NICU default (Masimo). A shorter τ gives a noisier AC estimate; a longer one under-reads short neonatal desaturations (Ahmed 2010, Vagedes 2013/2014). Full evidence base in the design rationale §4.5.
-- **`spo2_warmup_s` = 18.0 s** — SpO2 output suppressed until 3 × τ_var = 3 × 6 s, time for the EMA variance estimator to converge.
+- **`spo2_window_s` = 6.0 s** (`setSpO2WindowS()`, clamped to **2–12 s**) — the SpO2 averaging time, a true rectangular sliding window. The products (dx·dy, dx², dy² for R-METHOD-2; (x − mean)² per channel for R-METHOD-1) are formed at the full AFE rate and summed over each block of the SpO2 decimation chain (`_spo2_decim`, target 50 Hz, §5.3.1); each block sum enters a circular buffer with an O(1) running total over the newest `spo2_window_s` seconds. A sum of block sums is the full-rate sum, so nothing is decimated away — only the window edge moves in 20 ms steps, and R, r and SpO2 refresh at that cadence (they hold their value between blocks, as PI). The totals are rebuilt from the buffers each time the index wraps, so float32 add/subtract drift cannot accumulate. **The window is the warm-up:** the first estimate appears when the window is full and is exact from then on (there is no `spo2_warmup_s` any more); a length change (setter or PRF change) empties the window (NaN for one window length). Until v0.101 these were EMAs with τ = 6 s: an EMA of τ averages like a window of **2τ** in noise and in group delay, so the declared "6 s" was effectively 12 s — slower than the 8 s NICU default and outside the 6–10 s of **ISO 80601-2-61:2026 Annex JJ.2 d)** it had been taken from — and needed 3·τ = 18 s to be considered settled. Measured on the HOSPNAV campaigns (rationale §12): same accuracy against the reference, 36 % more noise than the EMA at equal nominal length (0.34 vs 0.25 SpO2 points), ~2 s less lag, exact purge of a transient after one window. 6 s: Nellcor "Normal" 5–7 s, between the 2–4 s of neonatal resuscitation / intermittent-hypoxaemia work and the 8 s NICU default (rationale §4.5); the 2 s floor keeps the neonatal "short window + alarm delay" configuration (McClure 2016) reachable. Buffers are sized for 12 s at 50 Hz (`alg_window_buf_len_max` = 600).
 
-The two τ values are intentionally different because DC and AC² have distinct temporal requirements: DC must track slow baseline drift (τ = 2 s), while AC² must be stable enough for a reliable SpO2 estimate (τ = 6 s, see above).
+DC and the window are intentionally different mechanisms: DC must track slow baseline drift (τ = 2 s, only ever a denominator for R-METHOD-2 — the experiment of rationale §10 found nothing to gain by making it faster), while the averaging must mean what the literature means by averaging time.
 
 **First-sample seeding (v0.55):** `EmaChannel::update()` seeds on the first sample after
 construction or `reset()` — `count == 0` → `mean = x`, `var = 0` — instead of ramping `mean` up
-from 0. Ramping from 0 leaves `d = x − mean ≈ x` for the first ~3·τ, which spuriously **inflates
-`var`** (hence PI) during warm-up. Seeding removes that
-start-up bias. It does **not** shorten `spo2_warmup_s` (= 3·τ_var): `var`
-still needs several pulse cycles to become representative — seeding only fixes the *bias*, not the
-*convergence time*. Steady-state behaviour is unchanged (same recursion, same α).
+from 0. Ramping from 0 leaves `d = x − mean ≈ x` for the first ~3·τ, which would spuriously
+**inflate** any AC estimate built on `d` during warm-up. Seeding removes that start-up bias.
+(Since v0.102 SpO2 reads only `mean`; `var` is left running with τ_var = τ_mean and unused.)
 
 **Optional warmup / `valid()` (v0.58):** `init()` takes an optional `warmup_s` (default 0). When
 > 0, `valid()` returns false until `warmup_s · fs` samples have been seen since the last `reset()`;
@@ -975,13 +974,15 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   modulation a 5 Hz ceiling read PI 25 % lower at 220 BPM than at 60 BPM; 15 Hz removes the HR
   dependence and admits no measurable noise (rationale §11). R keeps 5 Hz: there the same filter
   sits on both channels and cancels.
-- **AC and DC from the same 6 s sliding window** (fixed at compile time like `hr2_buf_len`), not
-  EMAs: two circular buffers at the decimated rate — squared band-passed samples (AC²) and block
-  means of the raw OT (DC: the mean of the raw samples behind each decimated one, so no
-  aliasing) — each with an O(1) running sum. Numerator and denominator always span the same 6 s;
-  PI settles EXACTLY at 6 s instead of asymptotically, with no EMA and no seed. (A 2 s EMA
-  measured within ±0.25 % of the window mean on HOSPNAV; the choice is structural.) No slow/async
-  Task is needed (unlike HR2/HR3's autocorrelation/FFT).
+- **AC and DC from the same sliding window** of `pi_window_s` seconds (default **6 s**;
+  `setPIWindowS()`, clamped to 2–12 s since v0.102, independent of `spo2_window_s`), not EMAs:
+  two circular buffers at the decimated rate — squared band-passed samples (AC²) and block means
+  of the raw OT (DC: the mean of the raw samples behind each decimated one, so no aliasing) —
+  each with an O(1) running sum, rebuilt at every wrap of the buffer (float32 drift guard).
+  Numerator and denominator always span the same seconds; PI settles EXACTLY at `pi_window_s`
+  instead of asymptotically, with no EMA and no seed. (A 2 s EMA measured within ±0.25 % of the
+  window mean on HOSPNAV; the choice is structural.) No slow/async Task is needed (unlike
+  HR2/HR3's autocorrelation/FFT). A length change empties the window (NaN for one window length).
 - **Peak-to-peak units** — the industry's PI (Nellcor Max−Min per pulse, Masimo λmax−λmin; ISO
   80601-2-61:2026 §201.3.245 *%mod* ≈ AC/DC×100, with Annex II.2.1 naming *%mod*, *pulse
   amplitude* and *PI* as synonyms, and every published neonatal threshold): `AC_pp = 2√2 · RMS`,
@@ -990,14 +991,14 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   v0.101.
 
 ```
-PI = 2√2 · sqrt(Σ AC² / N) / (Σ DC_block / N) × 100  [%]      N = 300 (6 s @ 50 Hz)
+PI = 2√2 · sqrt(Σ AC² / N) / (Σ DC_block / N) × 100  [%]      N = pi_window_s · 50 Hz (300 by default)
    = AC_pp / DC × 100
 ```
 
-PI is `NaN` while its own 6 s window is still filling or while `probe_state != PROBE_APPLIED`
-(reset every sample while not applied, same contract as every other algorithm). This is shorter
-than SpO2's 18 s warmup, so in continuous operation PI is already valid by the time SpO2's own
-warmup gate clears — `_spo2_update()` still reads `AFE4490Data::pi` for its SQI (below) and
+PI is `NaN` while its own window is still filling or while `probe_state != PROBE_APPLIED`
+(reset every sample while not applied, same contract as every other algorithm). With the default
+lengths both windows fill together; a PI window longer than the SpO2 window makes SpO2's SQI gate
+on PI bind for the difference — `_spo2_update()` still reads `AFE4490Data::pi` for its SQI (below) and
 explicitly guards against a not-yet-valid (`NaN`) PI rather than relying on `fmaxf`/`fminf`'s
 NaN pass-through.
 
@@ -1038,11 +1039,12 @@ Two different things decide the SpO2 number, and each has its own identifier:
 | Id | Definition | In force |
 |---|---|---|
 | `R-METHOD-0` | Inputs: ambient-corrected `adc_code` (`led1_sub` / `led2_sub`). DC = IIR low-pass, τ = 1.6 s. AC = √(EMA of (x − DC)²), τ = 1.0 s. R = (AC_red/DC_red)/(AC_ir/DC_ir). | The library of 2026-03-23, when the default curve was fitted. Reconstructed from the conversation log (session 26 and the SpO2LocalCalc mirror of that day), not from a tagged version. |
-| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = √(`EmaChannel` var of x − DC), τ = `spo2_ema_var_tau_s` = 6.0 s (both since 2026-06-11). Same ratio. | v0.38 – v0.99 default; since v0.100 selectable with `setSpO2RMethod(1)`. |
-| `R-METHOD-2` | Inputs: OT. Per channel: one-biquad band-pass 0.5–5 Hz (`BiquadFilter::init_bp`, precharged) divided by the same `EmaChannel` mean (DC, τ 2.0 s): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red. On the first differences dx = x[n] − x[n−1], dy: **R = EMA(dx·dy) / EMA(dx²)**, the least-squares slope of dy on dx through the origin, and **r = EMA(dx·dy) / √(EMA(dx²)·EMA(dy²))**, its correlation; the three EMAs run with τ = `spo2_ema_var_tau_s` = 6.0 s, warm-up `spo2_warmup_s` = 18 s as before. SpO2 is withheld (NaN, SQI 0) while r < `spo2_r_corr_min` = 0.8; R and r stay reported. The band-pass corners are constants (`spo2_bp_f_low_hz`, `spo2_bp_f_high_hz`); the gate has `setSpO2RCorrMin()`. | **Current, default since v0.100** (`setSpO2RMethod(2)`). Rationale §9–§10. |
+| `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = RMS of (x − DC) over the `spo2_window_s` = 6.0 s sliding window (v0.102; until v0.101 √(`EmaChannel` var), an EMA with τ 6.0 s, both since 2026-06-11). Same ratio. | v0.38 – v0.99 default; since v0.100 selectable with `setSpO2RMethod(1)`. |
+| `R-METHOD-2` | Inputs: OT. Per channel: one-biquad band-pass 0.5–5 Hz (`BiquadFilter::init_bp`, precharged) divided by the same `EmaChannel` mean (DC, τ 2.0 s): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red. On the first differences dx = x[n] − x[n−1], dy: **R = Σ(dx·dy) / Σ(dx²)**, the least-squares slope of dy on dx through the origin, and **r = Σ(dx·dy) / √(Σ(dx²)·Σ(dy²))**, its correlation; the three sums run over the `spo2_window_s` = 6.0 s sliding window (v0.102; EMAs with τ 6.0 s and an 18 s warm-up until v0.101), valid from the first full window. SpO2 is withheld (NaN, SQI 0) while r < `spo2_r_corr_min` = 0.8; R and r stay reported. The band-pass corners are constants (`spo2_bp_f_low_hz`, `spo2_bp_f_high_hz`); the gate has `setSpO2RCorrMin()`. | **Current, default since v0.100** (`setSpO2RMethod(2)`). Rationale §9–§10. |
 
-Both methods run on every applied sample (the regression state is cheap: two biquads, three
-EMAs), so `setSpO2RMethod()` takes effect on the next sample with no new warm-up;
+Both methods run on every applied sample (the regression state is cheap: two biquads, five block
+accumulators and their buffers), so `setSpO2RMethod()` takes effect at the next window update
+(one decimation block) with no new warm-up;
 `AFE4490Config::spo2_r_method` (1 | 2) and `spo2_r_method_id` say which is in force, and the
 curve-mismatch check follows it. `AFE4490Data::spo2_r_corr` carries r (NaN under R-METHOD-1).
 **Why the derivative regression (measured, rationale §9):** on 3471 stationary 8 s windows of the
@@ -1055,7 +1057,7 @@ of ~39).
 
 The OT input domain alone would not move R (each channel's AC/DC is invariant to its own scale),
 but the τ changes do, slightly; with no way to rebuild R-METHOD-0 exactly, the two are kept apart.
-An `$SET`-style runtime change of `spo2_ema_mean_tau_s` / `spo2_ema_var_tau_s` makes the running
+An `$SET`-style runtime change of `spo2_ema_mean_tau_s` / `spo2_window_s` makes the running
 method "R-METHOD-1 with modified parameters"; those parameters travel in the capture's `alg:`
 snapshot. First offline comparison of candidate methods (band-pass + RMS, regression on samples and
 on derivatives): PulseNest `captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r_regression_test.py`.
@@ -2772,8 +2774,7 @@ See §5.1 for algorithm description.
 | R curve coefficient a | `spo2_r_curve_a` | 114.9208 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R intercept |
 | R curve coefficient b | `spo2_r_curve_b` | 30.5547 | Empirical — MS100 simulator / Nellcor R-curve | SpO2 = a − b·R slope |
 | DC EMA time constant | `spo2_ema_mean_tau_s` | 2.0 s | f_c ≈ 0.08 Hz << 0.5 Hz (30 bpm min HR); same signal as RSQM → same τ | Speed of DC baseline tracking |
-| AC² EMA time constant | `spo2_ema_var_tau_s` | 6.0 s | ISO 80601-2-61:2026 Annex JJ.2 d) (informative): 6–10 s window for a *transfer standard*; between 2–4 s (neonatal resuscitation/IH research) and 8 s (NICU default) — design rationale §4.5 | Stability of AC amplitude / PI estimate |
-| Warm-up period | `spo2_warmup_s` | 18.0 s | 3 × τ_var = 3 × 6 s — EMA variance convergence | SpO2 suppressed during initial transient |
+| SpO2 averaging window | `spo2_window_s` (`setSpO2WindowS()`, 2–12 s) | 6.0 s | True sliding window (v0.102, rationale §12) — replaces the EMA τ 6 s, which averaged like a 12 s window: ISO 80601-2-61:2026 Annex JJ.2 d) 6–10 s for a *transfer standard*; between 2–4 s (neonatal resuscitation/IH research) and 8 s (NICU default) — rationale §4.5; 2 s floor keeps "short window + alarm delay" (McClure 2016) reachable | Noise vs. response of R/SpO2; the window IS the warm-up (first value when full) |
 | Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 | No-finger detection guard |
 | SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | Nellcor/Masimo clinical threshold | PI below this → SQI = 0 |
 | SQI PI upper bound | `spo2_pi_sqi_hi` | 2.0 % | Nellcor/Masimo clinical threshold | PI above this → SQI = 1 |
@@ -2788,7 +2789,7 @@ See §5.1, *Perfusion Index (PI)* and rationale §11.
 |---|---|---|---|---|
 | Band-pass lower cutoff | `pi_bp_f_low_hz` | 0.5 Hz | Same 30 BPM floor as `hr2_f_low_hz`/`spo2_bp_f_low_hz`, through PI's own private `BiquadFilter` instance ("paths share nothing", §5.3.1) | AC waveform extraction — replaces the old EMA subtraction |
 | Band-pass upper cutoff | `pi_bp_f_high_hz` | 15.0 Hz | HR3's ceiling (3rd harmonic of 260 BPM = 13 Hz): a magnitude needs the harmonics — 5 Hz read −25 % at 220 vs 60 BPM on the MS100; noise above 10 Hz unmeasurable in the lowest-PI decile of a neonate (rationale §11) | HR-independence of PI |
-| Sliding-window length | `pi_window_s` (compile-time, `pi_buf_len` = 300 samples @ 50 Hz) | 6 s | Shared by AC and DC; matches SpO2's old AC² averaging time while settling exactly instead of asymptotically; no setter, same treatment as `hr2_buf_len` | PI settling time |
+| Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; buffers `alg_window_buf_len_max` = 600 @ 50 Hz) | 6 s | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements) | PI settling time / noise |
 | RMS → peak-to-peak | `pi_rms_to_pp` | 2√2 | Exact for a sinusoid; band-passed PPG measured 2.79/2.92 (neonates), 3.0–3.2 (MS100) → under-reads a per-beat Max−Min by 0–12 %. Per-beat peaks (Masimo/Nellcor exact) need a beat detector: PILAB option, not library | PI in the industry's units |
 | PI upper bound | `spo2_pi_max` | 20 % | Top of the displayed range of Masimo (0.02–20), Mindray (0.05–20), Nellcor (0.03–20); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2PiSqiThresholds(lo, hi, max)`) |
 
@@ -3142,6 +3143,23 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.102  | **SpO2 averaged over a true sliding window; window lengths runtime and      |
+|         | independent for SpO2 and PI (§5.1, §10.3, §10.3b, rationale §12).**         |
+|         | R-METHOD-2's Σ(dx·dy)/Σ(dx²)/Σ(dy²) and R-METHOD-1's AC² are block sums at   |
+|         | the 50 Hz cadence of a new `_spo2_decim` chain, kept in circular buffers    |
+|         | with O(1) running totals (rebuilt at every wrap: float32 drift guard);       |
+|         | R, r and SpO2 refresh per block and are valid from the first full window.   |
+|         | Replaces the EMAs with τ = 6 s, equivalent to a 12 s window in noise and    |
+|         | delay and 18 s to settle; measured on HOSPNAV: same accuracy, +36 % noise   |
+|         | at equal nominal length, ~2 s less lag, exact purge after one window.       |
+|         | New `spo2_window_s` (6 s) / `setSpO2WindowS()` and `pi_window_s` (6 s) /    |
+|         | `setPIWindowS()`, both clamped 2–12 s, independent; a length change empties |
+|         | the window. **Removed:** `spo2_warmup_s`/`setSpO2WarmupS()` (the window is  |
+|         | the warm-up) and `spo2_ema_var_tau_s`/`setSpO2EmaVarTauS()`; the SpO2       |
+|         | `EmaChannel`s keep only the mean (var_tau = mean_tau). `AFE4490Config`      |
+|         | gains `spo2_window_s`, `pi_window_s`. Tests: test_spo2 16 (window exactness, |
+|         | setter clamps/reset), test_pi 7, test_sample_rate asserts both windows in   |
+|         | seconds across the PRF catalogue. Firmware: no `$SET` key yet (defaults).   |
 | v0.101  | **PI (Perfusion Index) decoupled from SpO2 and redefined in the industry's   |
 |         | units (§5.1, §10.3b, rationale §11).** `_pi_update_sample()` replaces the    |
 |         | `sqrt(EmaChannel.var)/EmaChannel.mean` computed inside `_spo2_update()`.     |

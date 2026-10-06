@@ -18,18 +18,21 @@ namespace {
     inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
-    constexpr float    spo2_warmup_s       = 18.0f;    // s  — warmup before reporting SpO2 (3 × τ_var = 3 × 6 s)
     // EMA mean τ (DC baseline): 2.0 s, f_c ≈ 0.08 Hz.
     // f_c << min physiological HR (0.5 Hz @ 30 bpm) so the DC estimate does not follow the
     // pulsatile component; if it did, AC = x−DC would be underestimated, biasing the R ratio and SpO2.
     constexpr float    spo2_ema_mean_tau_s   = 2.0f;
-    // EMA variance τ (AC² power = SpO2 averaging time): 6.0 s.
-    // ISO 80601-2-61:2026 Annex JJ.2 d) requires a transfer standard to have an averaging
-    // time of minimum 6 s and maximum 10 s for determining SpO2. 6 s is therefore the
-    // minimum considered adequate for a stable, calibration-grade SpO2 estimate.
-    // At 60 bpm (period 1 s): covers ~6 cardiac cycles. At 120 bpm: ~12 cycles.
-    // Tradeoff: slower response to real desaturation events vs. lower SpO2 noise.
-    constexpr float    spo2_ema_var_tau_s    = 6.0f;
+    // SpO2 averaging window (v0.102, rationale §12): a true sliding window of 6.0 s over the
+    // products of R-METHOD-2 (and the AC² of R-METHOD-1). Replaces the EMA with τ = 6 s, which
+    // in noise and group delay was equivalent to a 12 s window (an EMA of τ averages like a
+    // window of 2τ) and so was slower than the 8 s NICU default and outside the 6–10 s of ISO
+    // 80601-2-61:2026 Annex JJ.2 d) it was taken from. 6 s: Nellcor "Normal" 5–7 s, between the
+    // 2–4 s of neonatal resuscitation / intermittent-hypoxaemia work and the 8 s NICU default
+    // (rationale §4.5). Measured on HOSPNAV SUBJ08/09: same accuracy as the EMA, 36 % more noise
+    // (0.34 vs 0.25 SpO2 points), ~2 s less lag, exact settling. The window IS the warm-up.
+    // Runtime range [alg_window_s_min, alg_window_s_max] — 2 s keeps the "short window + alarm
+    // delay" configuration of the neonatal literature (McClure 2016) reachable.
+    constexpr float    spo2_window_s         = 6.0f;
     // Default R curve (v0.100): R-CURVE-STS0163-HOSPNAV-20260923 — fitted with R-METHOD-2 as this
     // library computes it (offline_runner replay of the 2026-09-23 HOSPNAV campaigns, two neonates,
     // Medle ST-S0163 probe, reference = the ward monitor read by VideoNest, 3455 stationary 8 s
@@ -93,7 +96,7 @@ namespace {
     // neonatal capture. R keeps 5 Hz because there the same filter sits on both channels and cancels.
     constexpr float    pi_bp_f_low_hz        = 0.5f;    // Hz — 30 BPM floor, same reasoning as spo2_bp_f_low_hz
     constexpr float    pi_bp_f_high_hz       = 15.0f;   // Hz — 3rd harmonic of hr_max_bpm (13 Hz) with margin, as HR3
-    constexpr float    pi_window_s           = 6.0f;    // s — sliding-window length; see pi_buf_len in the header
+    constexpr float    pi_window_s           = 6.0f;    // s — sliding-window length (runtime since v0.102, setPIWindowS)
     // RMS → peak-to-peak, exact for a sinusoid. The band-passed PPG measured 2.79/2.92 on two
     // neonates and 3.0–3.2 on the MS100, so this under-reads a per-beat Max−Min by 0–12 %; the
     // alternative (per-beat peaks) needs a beat detector and is kept for PILAB (rationale §11).
@@ -384,17 +387,21 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _ppgdisp_channel(AFE4490Channel::LED1),
       _ppgdisp_bpf(),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
-      _spo2_warmup_samples(0), _hr1_refractory_samples(0),
+      _hr1_refractory_samples(0),
       _hr1_dc_alpha(0.0f),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
       _spo2_bp_ir(), _spo2_bp_red(),
-      _spo2_reg_x_prev(0.0f), _spo2_reg_y_prev(0.0f),
-      _spo2_reg_sxy(0.0f), _spo2_reg_sxx(0.0f), _spo2_reg_syy(0.0f),
-      _spo2_reg_alpha(0.0f), _spo2_reg_count(0),
+      _spo2_reg_x_prev(0.0f), _spo2_reg_y_prev(0.0f), _spo2_reg_count(0),
+      _spo2_decim(),
+      _spo2_blk_sxy(0.0f), _spo2_blk_sxx(0.0f), _spo2_blk_syy(0.0f),
+      _spo2_blk_var_ir(0.0f), _spo2_blk_var_red(0.0f),
+      _spo2_sxy_sum(0.0f), _spo2_sxx_sum(0.0f), _spo2_syy_sum(0.0f),
+      _spo2_var_ir_sum(0.0f), _spo2_var_red_sum(0.0f),
+      _spo2_buf_n(1), _spo2_buf_idx(0), _spo2_buf_count(0),
       _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
       _pi_bpf(), _pi_decim(),
-      _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_dc_block_sum(0.0f), _pi_buf_idx(0), _pi_buf_count(0),
+      _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_dc_block_sum(0.0f), _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
@@ -403,9 +410,9 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_update_counter(0),
       _hr3_lp(),
       _hr3_buf_idx(0), _hr3_buf_count(0), _hr3_update_counter(0),
-      _spo2_warmup_s(spo2_warmup_s),
       _spo2_ema_mean_tau_s(spo2_ema_mean_tau_s),
-      _spo2_ema_var_tau_s(spo2_ema_var_tau_s),
+      _spo2_window_s(spo2_window_s),
+      _pi_window_s(pi_window_s),
       _spo2_min(spo2_min),
       _spo2_max(spo2_max),
       _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
@@ -935,13 +942,6 @@ void INCUNEST_AFE4490::setSpO2RCorrMin(float r) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2WarmupS(float s) {
-    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_warmup_s = s;
-    _recalc_rate_params();
-    if (_initialized) xSemaphoreGive(_state_mutex);
-}
-
 void INCUNEST_AFE4490::setSpO2EmaMeanTauS(float tau_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _spo2_ema_mean_tau_s = tau_s;
@@ -949,9 +949,19 @@ void INCUNEST_AFE4490::setSpO2EmaMeanTauS(float tau_s) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2EmaVarTauS(float tau_s) {
+// Window lengths (v0.102): clamped to [alg_window_s_min, alg_window_s_max]; the buffer length
+// follows in _recalc_rate_params(), which empties the window when it changes (a half-filled
+// window of another length is not a valid estimate — NaN for one window length instead).
+void INCUNEST_AFE4490::setSpO2WindowS(float window_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_ema_var_tau_s = tau_s;
+    _spo2_window_s = clampf(window_s, alg_window_s_min, alg_window_s_max);
+    _recalc_rate_params();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setPIWindowS(float window_s) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _pi_window_s = clampf(window_s, alg_window_s_min, alg_window_s_max);
     _recalc_rate_params();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
@@ -1152,9 +1162,9 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_r_corr_min       = _spo2_r_corr_min;
     cfg.spo2_r_curve_a   = _spo2_r_curve_a;
     cfg.spo2_r_curve_b   = _spo2_r_curve_b;
-    cfg.spo2_warmup_s         = _spo2_warmup_s;
     cfg.spo2_ema_mean_tau_s     = _spo2_ema_mean_tau_s;
-    cfg.spo2_ema_var_tau_s     = _spo2_ema_var_tau_s;
+    cfg.spo2_window_s         = _spo2_window_s;
+    cfg.pi_window_s           = _pi_window_s;
     cfg.spo2_min              = _spo2_min;
     cfg.spo2_max              = _spo2_max;
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
@@ -1309,11 +1319,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr3_decim.reset(); _hr3_update_counter = 0;
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
     _pi_bpf.reset();
-    _pi_decim.reset();
-    _pi_buf_idx = 0; _pi_buf_count = 0;
-    _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_dc_block_sum = 0.0f;
-    memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
-    memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
+    _pi_window_reset();
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_result_sqi = 0.0f;
     _hr3_result = 0.0f; _hr3_result_sqi = 0.0f;
@@ -1864,17 +1870,23 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     // achieved — never the nominal target.
     _hr2_decim.configure(sample_rate_hz, hr2_decim_target_rate_hz);
     _hr3_decim.configure(sample_rate_hz, hr3_decim_target_rate_hz);
-    _spo2_warmup_samples         = (uint32_t)(_spo2_warmup_s         * sample_rate_hz);
     _hr1_refractory_samples      = (uint32_t)(hr1_refractory_s       * sample_rate_hz);
     _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * sample_rate_hz);
     if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
-    _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, sample_rate_hz);
-    _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_var_tau_s, sample_rate_hz);
+    // SpO2 EMAs: only the mean (DC) is read since v0.102, so var_tau = mean_tau (as HGAC's).
+    _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_mean_tau_s, sample_rate_hz);
+    _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_mean_tau_s, sample_rate_hz);
     _spo2_bp_ir.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
     _spo2_bp_red.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
-    _spo2_reg_alpha = 1.0f - expf(-1.0f / (_spo2_ema_var_tau_s * sample_rate_hz));
-    // PI (v0.101): own decimation chain (same target-rate family as HR2/HR3, §5.3.1), own band-pass.
+    // Sliding windows (v0.102): block cadence from each path's own decimation chain; the live
+    // length is the window in SECONDS at the rate really achieved, capped by the buffer. A length
+    // change (window setter or PRF change) empties the window: its content would mix two lengths.
+    _spo2_decim.configure(sample_rate_hz, spo2_decim_target_rate_hz);
     _pi_decim.configure(sample_rate_hz, pi_decim_target_rate_hz);
+    const int spo2_n = _window_len(_spo2_window_s, _spo2_decim.rate_hz);
+    if (spo2_n != _spo2_buf_n) { _spo2_buf_n = spo2_n; _spo2_window_reset(); }
+    const int pi_n = _window_len(_pi_window_s, _pi_decim.rate_hz);
+    if (pi_n != _pi_buf_n) { _pi_buf_n = pi_n; _pi_window_reset(); }
     _pi_bpf.init_bp(_pi_bpf.f_low, _pi_bpf.f_high, sample_rate_hz);
     // HGAC EMAs: var unused (only mean is read), so var_tau = mean_tau; warmup = 3·τ (fail-safe
     // via valid() → NaN-free: _hgac_track() skips checks until the EMA has matured after a reset).
@@ -2351,14 +2363,38 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // sentinel like -1.0f) fails safe: any consumer that forgets to check sqi and instead
 // compares/averages a NAN value gets a comparison that is always false / a propagated NAN,
 // rather than a plausible-looking-but-wrong number that could trigger a false alarm.
+// Window length in decimated samples for a window in seconds at the rate really achieved,
+// capped by the buffer (alg_window_s_max at 50 Hz; a chain running faster than 50 Hz because the
+// PRF is not a multiple of it would otherwise overflow — then the longest window that fits).
+int INCUNEST_AFE4490::_window_len(float window_s, float rate_hz) {
+    long n = lroundf(window_s * rate_hz);
+    if (n < 1) n = 1;
+    if (n > alg_window_buf_len_max) n = alg_window_buf_len_max;
+    return (int)n;
+}
+
+void INCUNEST_AFE4490::_spo2_window_reset() {
+    _spo2_decim.reset();
+    _spo2_blk_sxy = 0.0f; _spo2_blk_sxx = 0.0f; _spo2_blk_syy = 0.0f;
+    _spo2_blk_var_ir = 0.0f; _spo2_blk_var_red = 0.0f;
+    _spo2_sxy_sum = 0.0f; _spo2_sxx_sum = 0.0f; _spo2_syy_sum = 0.0f;
+    _spo2_var_ir_sum = 0.0f; _spo2_var_red_sum = 0.0f;
+    _spo2_buf_idx = 0; _spo2_buf_count = 0;
+    memset(_spo2_sxy_buf, 0, sizeof(_spo2_sxy_buf));
+    memset(_spo2_sxx_buf, 0, sizeof(_spo2_sxx_buf));
+    memset(_spo2_syy_buf, 0, sizeof(_spo2_syy_buf));
+    memset(_spo2_var_ir_buf, 0, sizeof(_spo2_var_ir_buf));
+    memset(_spo2_var_red_buf, 0, sizeof(_spo2_var_red_buf));
+}
+
 void INCUNEST_AFE4490::_spo2_reset_state() {
     _spo2_ch_ir_ema.reset();
     _spo2_ch_red_ema.reset();
     _spo2_bp_ir.reset();
     _spo2_bp_red.reset();
     _spo2_reg_x_prev = 0.0f; _spo2_reg_y_prev = 0.0f;
-    _spo2_reg_sxy = 0.0f; _spo2_reg_sxx = 0.0f; _spo2_reg_syy = 0.0f;
     _spo2_reg_count = 0;
+    _spo2_window_reset();
 }
 
 void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_state) {
@@ -2374,35 +2410,74 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         return;
     }
 
-    // DC + AC² power via EmaChannel (one per channel):
-    //   mean += α_mean × (x − mean)   slow IIR low-pass, τ = spo2_ema_mean_tau_s (2.0 s) — the DC
-    //   var  += α_var  × (d² − var)    EMA of (x − mean)², τ = spo2_ema_var_tau_s (6.0 s)
-    // The mean is the DC of both R methods; var is R-METHOD-1's AC². PI is computed independently
-    // by _pi_update_sample() since v0.101 (rationale §11) — it no longer reads this EMA.
+    // DC via EmaChannel (one per channel): mean += α_mean × (x − mean), slow IIR low-pass,
+    // τ = spo2_ema_mean_tau_s (2.0 s) — the DC of both R methods. PI is computed independently by
+    // _pi_update_sample() since v0.101 (rationale §11) — it no longer reads this EMA.
     _spo2_ch_ir_ema.update(ot_ir);
     _spo2_ch_red_ema.update(ot_red);
     const float dc_ir  = _spo2_ch_ir_ema.mean;
     const float dc_red = _spo2_ch_red_ema.mean;
 
-    // R-METHOD-2 state advances on every applied sample whichever method is selected, so a
-    // switch costs no warm-up. x, y: band-passed OT normalised by its DC; the regression runs
-    // on their first differences, averaged with τ_var (the averaging time).
+    // Both methods' state advances on every applied sample whichever method is selected, so a
+    // switch costs no warm-up. Full rate: R-METHOD-1's (x − mean)² per channel; R-METHOD-2's x, y
+    // (band-passed OT normalised by its DC), their first differences and the three products. All
+    // five are summed over the current decimation block (v0.102, header SpO2 state block).
     {
+        const float d_ir = ot_ir - dc_ir, d_red = ot_red - dc_red;
+        _spo2_blk_var_ir  += d_ir  * d_ir;
+        _spo2_blk_var_red += d_red * d_red;
         const float x = (dc_ir  > spo2_div_eps) ? _spo2_bp_ir.process(ot_ir)   / dc_ir  : 0.0f;
         const float y = (dc_red > spo2_div_eps) ? _spo2_bp_red.process(ot_red) / dc_red : 0.0f;
         if (_spo2_reg_count > 0) {
             const float dx = x - _spo2_reg_x_prev, dy = y - _spo2_reg_y_prev;
-            _spo2_reg_sxy += _spo2_reg_alpha * (dx * dy - _spo2_reg_sxy);
-            _spo2_reg_sxx += _spo2_reg_alpha * (dx * dx - _spo2_reg_sxx);
-            _spo2_reg_syy += _spo2_reg_alpha * (dy * dy - _spo2_reg_syy);
+            _spo2_blk_sxy += dx * dy;
+            _spo2_blk_sxx += dx * dx;
+            _spo2_blk_syy += dy * dy;
         }
         _spo2_reg_x_prev = x; _spo2_reg_y_prev = y;
         _spo2_reg_count++;
     }
 
-    // Skip during warmup (3·τ_var). Sample count comes from the EMA itself (ir_ema.count) —
-    // ir_ema/red_ema are always updated together above. Restarts after the reset above.
-    if (_spo2_ch_ir_ema.count < _spo2_warmup_samples) {
+    // Window update at the decimated cadence: the block sums enter the circular buffers and the
+    // O(1) running totals; between decimated samples every output keeps its last value (as PI) —
+    // except while the window is still filling, where "last value" must be NaN, never a stale or
+    // constructed 0 (output contract: sqi == 0 ⇒ spo2, R, r are NaN).
+    if (!_spo2_decim.step()) {
+        if (_spo2_buf_count < (uint32_t)_spo2_buf_n) {
+            _current_data.spo2        = NAN;
+            _current_data.spo2_r      = NAN;
+            _current_data.spo2_r_corr = NAN;
+            _current_data.spo2_sqi    = 0.0f;
+        }
+        return;
+    }
+    _spo2_sxy_sum    += _spo2_blk_sxy    - _spo2_sxy_buf[_spo2_buf_idx];
+    _spo2_sxx_sum    += _spo2_blk_sxx    - _spo2_sxx_buf[_spo2_buf_idx];
+    _spo2_syy_sum    += _spo2_blk_syy    - _spo2_syy_buf[_spo2_buf_idx];
+    _spo2_var_ir_sum += _spo2_blk_var_ir - _spo2_var_ir_buf[_spo2_buf_idx];
+    _spo2_var_red_sum+= _spo2_blk_var_red- _spo2_var_red_buf[_spo2_buf_idx];
+    _spo2_sxy_buf[_spo2_buf_idx]     = _spo2_blk_sxy;
+    _spo2_sxx_buf[_spo2_buf_idx]     = _spo2_blk_sxx;
+    _spo2_syy_buf[_spo2_buf_idx]     = _spo2_blk_syy;
+    _spo2_var_ir_buf[_spo2_buf_idx]  = _spo2_blk_var_ir;
+    _spo2_var_red_buf[_spo2_buf_idx] = _spo2_blk_var_red;
+    _spo2_blk_sxy = 0.0f; _spo2_blk_sxx = 0.0f; _spo2_blk_syy = 0.0f;
+    _spo2_blk_var_ir = 0.0f; _spo2_blk_var_red = 0.0f;
+    if (++_spo2_buf_idx >= _spo2_buf_n) {
+        // Wrap: rebuild the totals from the buffers so float32 add/subtract drift never
+        // accumulates (5·n adds once per window length — negligible at the 50 Hz cadence).
+        _spo2_buf_idx = 0;
+        float sxy = 0.0f, sxx = 0.0f, syy = 0.0f, vir = 0.0f, vred = 0.0f;
+        for (int i = 0; i < _spo2_buf_n; i++) {
+            sxy += _spo2_sxy_buf[i]; sxx += _spo2_sxx_buf[i]; syy += _spo2_syy_buf[i];
+            vir += _spo2_var_ir_buf[i]; vred += _spo2_var_red_buf[i];
+        }
+        _spo2_sxy_sum = sxy; _spo2_sxx_sum = sxx; _spo2_syy_sum = syy;
+        _spo2_var_ir_sum = vir; _spo2_var_red_sum = vred;
+    }
+    // The window IS the warm-up: no estimate until it is full (replaces spo2_warmup_s = 3·τ).
+    if (_spo2_buf_count < (uint32_t)_spo2_buf_n) {
+        _spo2_buf_count++;
         _current_data.spo2        = NAN;
         _current_data.spo2_r      = NAN;
         _current_data.spo2_r_corr = NAN;
@@ -2413,17 +2488,19 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     float R, r = NAN;
     bool  valid;
     if (_spo2_r_method == 2) {
-        // R = EMA(dx·dy)/EMA(dx²): the least-squares slope of dy on dx through the origin, i.e. of
-        // ln(I_red) on ln(I_ir) over the pulse — the Beer-Lambert ratio R-METHOD-1 approximates.
-        // r = EMA(dx·dy)/√(EMA(dx²)·EMA(dy²)) is that fit's correlation: ~0.99 with a pulse.
-        valid = _spo2_reg_sxx > spo2_reg_eps && _spo2_reg_syy > spo2_reg_eps;
-        R = valid ? _spo2_reg_sxy / _spo2_reg_sxx : NAN;
-        r = valid ? _spo2_reg_sxy / sqrtf(_spo2_reg_sxx * _spo2_reg_syy) : NAN;
+        // R = Σ(dx·dy)/Σ(dx²) over the window: the least-squares slope of dy on dx through the
+        // origin, i.e. of ln(I_red) on ln(I_ir) over the pulse — the Beer-Lambert ratio R-METHOD-1
+        // approximates. r = Σ(dx·dy)/√(Σ(dx²)·Σ(dy²)) is that fit's correlation: ~0.99 with a pulse.
+        // (Sums, not means: the common 1/N cancels in both ratios.)
+        valid = _spo2_sxx_sum > spo2_reg_eps && _spo2_syy_sum > spo2_reg_eps;
+        R = valid ? _spo2_sxy_sum / _spo2_sxx_sum : NAN;
+        r = valid ? _spo2_sxy_sum / sqrtf(_spo2_sxx_sum * _spo2_syy_sum) : NAN;
     } else {
         // R = (AC_red/DC_red)/(AC_ir/DC_ir) — ISO 80601-2-61:2026 "ratio of ratios"; each term is
-        // the channel's AC/DC. Guard is division-safety only (presence is probe_state's job).
-        const float ac_ir  = sqrtf(_spo2_ch_ir_ema.var);
-        const float ac_red = sqrtf(_spo2_ch_red_ema.var);
+        // the channel's AC/DC, AC = RMS of (x − mean) over the window (the common 1/N cancels).
+        // Guard is division-safety only (presence is probe_state's job).
+        const float ac_ir  = sqrtf(_spo2_var_ir_sum);
+        const float ac_red = sqrtf(_spo2_var_red_sum);
         valid = dc_red >= spo2_div_eps && ac_ir >= spo2_div_eps;
         R = valid ? (ac_red / dc_red) / (ac_ir / dc_ir) : NAN;
     }
@@ -2440,8 +2517,8 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // stay visible so the reason is on record.
     const bool r_ok = (_spo2_r_method != 2) || (r >= _spo2_r_corr_min);
     // PI is computed independently by _pi_update_sample() (v0.101, rationale §11) — NaN while its
-    // own 6 s window is still filling (shorter than SpO2's 18 s warmup, so this never actually
-    // binds in production: PI is already valid by the time this warmup gate above has passed).
+    // own window is still filling; since v0.102 the two windows are independent lengths, so a PI
+    // window longer than the SpO2 window makes this gate bind for the difference.
     // Checked explicitly rather than relied upon via fmaxf/fminf's NaN pass-through (which would
     // read a not-yet-valid PI as SQI=1, the opposite of correct) — defensive for any caller that
     // feeds SpO2 without PI, now that the two are independent functions. PI above spo2_pi_max is
@@ -2466,14 +2543,18 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 // sliding-window RMS update below is O(1) per decimated sample, cheap enough to commit
 // _current_data.pi directly here. probe_state gate lives here exactly as in
 // _hr2_update_sample()/_spo2_update(): while not applied, resets every sample (idempotent).
+void INCUNEST_AFE4490::_pi_window_reset() {
+    _pi_decim.reset();
+    _pi_buf_idx = 0; _pi_buf_count = 0;
+    _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_dc_block_sum = 0.0f;
+    memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
+    memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
+}
+
 void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
         _pi_bpf.reset();
-        _pi_decim.reset();
-        _pi_buf_idx = 0; _pi_buf_count = 0;
-        _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_dc_block_sum = 0.0f;
-        memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
-        memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
+        _pi_window_reset();
         _current_data.pi = NAN;
         return;
     }
@@ -2484,12 +2565,15 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     _pi_dc_block_sum += ot_ir;
     float filtered = _pi_bpf.process(ot_ir);
 
-    if (!_pi_decim.step()) return;   // not yet a decimated sample; pi keeps its last value
+    if (!_pi_decim.step()) {         // not yet a decimated sample: pi keeps its last value —
+        if (_pi_buf_count < (uint32_t)_pi_buf_n) _current_data.pi = NAN;   // which is NaN while filling
+        return;
+    }
 
     // O(1) sliding windows, one cadence: add the incoming decimated sample, subtract the one
-    // falling out of the pi_window_s (6 s) window, for AC² and for DC alike. True boxcars, not
+    // falling out of the pi_window_s window, for AC² and for DC alike. True boxcars, not
     // EMAs — PI settles EXACTLY at pi_window_s (contrast EMA's ~3·τ to reach ~95%) and its
-    // numerator and denominator always span the same 6 s.
+    // numerator and denominator always span the same seconds.
     const float sq = filtered * filtered;
     const float dc_block = _pi_dc_block_sum / (float)_pi_decim.factor;
     _pi_dc_block_sum = 0.0f;
@@ -2497,16 +2581,22 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     _pi_dc_sum += dc_block - _pi_dc_buf[_pi_buf_idx];
     _pi_ac_buf[_pi_buf_idx] = sq;
     _pi_dc_buf[_pi_buf_idx] = dc_block;
-    _pi_buf_idx = (_pi_buf_idx + 1) % pi_buf_len;
-    if (_pi_buf_count < (uint32_t)pi_buf_len) {
+    if (++_pi_buf_idx >= _pi_buf_n) {
+        // Wrap: rebuild the totals from the buffers (float32 drift guard, as the SpO2 window).
+        _pi_buf_idx = 0;
+        float ac = 0.0f, dc_acc = 0.0f;
+        for (int i = 0; i < _pi_buf_n; i++) { ac += _pi_ac_buf[i]; dc_acc += _pi_dc_buf[i]; }
+        _pi_ac_sum = ac; _pi_dc_sum = dc_acc;
+    }
+    if (_pi_buf_count < (uint32_t)_pi_buf_n) {
         _pi_buf_count++;
         _current_data.pi = NAN;   // window not full yet — no stale/partial estimate
         return;
     }
 
     // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp): AC_pp / DC × 100 [%].
-    const float dc    = _pi_dc_sum / (float)pi_buf_len;
-    const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / (float)pi_buf_len);
+    const float dc    = _pi_dc_sum / (float)_pi_buf_n;
+    const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / (float)_pi_buf_n);
     _current_data.pi = (dc > pi_div_eps) ? (ac_pp / dc) * 100.0f : NAN;
 }
 

@@ -44,6 +44,7 @@ the long one.
 > | §5 HR1 filter & detector | complete, every claim sourced (2026-09-04) |
 > | §5.4 SQI gate & the two reversals | complete, measured (2026-09-06) |
 > | §6 Sample-rate dependency audit | complete; the tests that replace it are in place |
+> | §12 Averaging: EMA → sliding window for R/SpO2 | complete, measured on HOSPNAV (2026-10-06/07) |
 >
 > ("PRELIMINARY" used to be in the title. It was moved here in favour of a status that says what is
 > actually unfinished: a title that reads like a throwaway draft discourages the very thing this
@@ -1019,6 +1020,105 @@ the one parameter to revisit — the decimation/buffer architecture does not nee
   SpO2 (same IR samples, same `probe_state`) precisely because SpO2's SQI still reads
   `AFE4490Data::pi` — the two are decoupled at the *algorithm* level, not at the *SQI-consumer*
   level; `spo2_sqi`'s dependency on PI is unchanged.
+
+---
+
+## 12. Averaging of R/SpO2 — from EMA to a sliding window; window lengths (2026-10-06 → 2026-10-07)
+
+**Question (Alex, 2026-10-06).** PI v0.101 (§11) already averages over a true 6 s window instead of
+an EMA, because the EMA's settling was too long. R-METHOD-1 (AC²) and R-METHOD-2 (Σdx·dy, Σdx², Σdy²)
+still used EMAs with τ = `spo2_ema_var_tau_s` = 6 s. Should R/SpO2 follow? Analysed in depth before
+deciding; the measurement scripts live in PulseNest
+`captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r_averager_test.py` and `r_averager_test2.py`
+(summaries `r_averager_summary*.txt`), built on `r_causal_test.py` (same causal chain as the
+library: 2nd-order band-pass 0.5–5 Hz forward only, DC = EMA 2 s, first differences; only the
+averager of the products changes).
+
+**Prior art first.** Manufacturers speak in windows: Masimo 2–16 s selectable, 8 s NICU default;
+Nellcor "Normal" 5–7 s; Renesas OB1203 a 4 s window plus a 5-point moving average. Nonin is the
+exception — exponential, but per beat (4 beats). The neonatal averaging-time studies (Ahmed 2010,
+Vagedes 2013/2014, McClure 2016, §4.5) reprocess with windows. An EMA's τ is not comparable with
+any of those numbers without conversion.
+
+**Theory, then confirmed.** For white noise an EMA with time constant τ has the noise-equivalent
+bandwidth of a rectangular window of length **2τ**, and its group delay at low frequency is τ,
+against T/2 for a window of length T. So "EMA τ = 6 s" ≡ "window 12 s" in both noise and delay;
+the only differences are the settling (EMA: 63 % at τ, 95 % at 3τ = 18 s, never exact; window:
+exact at T) and the memory shape (exponential tail vs. finite). Consequence: the library's declared
+6 s averaging was in effect 12 s — slower than the 8 s NICU default and *outside* the 6–10 s of ISO
+80601-2-61:2026 Annex JJ.2 d) the number had been taken from (§4.5). That, more than the settling,
+is the finding of this section.
+
+**Measured (3471 stationary pairs SUBJ08/09 against the ward monitor, curve 123.98 − 39.13·R).**
+
+| Averager | Scatter vs reference [pts] | Noise of R (SD in 8 s) [pts] | Signed lag vs monitor | Return to ±1 pt after a clean RF-step burst |
+|---|---|---|---|---|
+| EMA 6 s (v0.101) | 1.79 | 0.25 | −1.5 s | ~17 s |
+| window 12 s | 1.67 | 0.24 | −1.0 s | 7–8 s |
+| window 6 s | 1.71 | 0.34 | −3.5 s | 2–3 s |
+| EMA 3 s | 1.68 | 0.32 | −4.0 s | — |
+| window 4 s | 1.66 | 0.38 | −5.5 s | — |
+
+- Accuracy against the reference is identical for every averager (leave-one-subject-out too: median
+  |error| 1.0–1.4 points for all). The averager does not change what R measures.
+- Noise confirms the theory: EMA 6 s ≈ window 12 s (0.25 vs 0.24), window 6 s ≈ EMA 3 s (0.34 vs
+  0.32), the ×1.36 against the EMA of equal nominal length is the predicted √2.
+- Lag (our SpO2 leads the hospital monitor, which averages too): the 6 s window leads the 6 s EMA by
+  ~2 s (theory 3 s, 0.5 s resolution). Only sessions whose reference moved ≥ 6 points can resolve it.
+- Transients: the one clean HGAC RF step of SUBJ09 (session 1238, step 3) put a −9 point burst into
+  R; the 6 s window purged it in 2–3 s (the burst preceded the `cause=hgac` record by ~3 s), the 12 s
+  window in 7–8 s, the EMA decayed for ~17 s (3τ). Price of the window: a larger peak deviation
+  while the burst sits inside it (median of the maxima 6.6 vs 4.8 points) — the "boxcar edge" of
+  §11, accepted again. The other steps were useless for this: HGAC moves RF when the signal is
+  already moving and the post-step level is not a level.
+- The r gate (r < 0.8) never fired in these two recordings with any averager — it does not
+  discriminate here; measuring r without a pulse remains pending (memory, step-3 tasks).
+
+**Decision (Alex, 2026-10-07).** Sliding window for R-METHOD-2's three products and R-METHOD-1's
+AC² (so a method comparison compares estimators, not averagers), length `spo2_window_s` = **6 s**;
+PI stays at 6 s. The two lengths are **independent parameters** (`setSpO2WindowS()`,
+`setPIWindowS()`), runtime-settable, **clamped to 2–12 s**: 4–12 s is the recommended range for an
+incubator (8 s NICU default, literature pushing shorter, 12 s the longest outside the 16 s
+oxygen-target trials), and the 2 s floor keeps McClure 2016's "2 s + 15 s alarm delay"
+configuration reachable once the integrator has an alarm layer. `spo2_warmup_s` is removed: the
+window is the warm-up (first value when full, exact from then on; the 2 s DC EMA is seeded on the
+first sample and adds no step). `spo2_ema_var_tau_s` is removed with it; the SpO2 `EmaChannel`s
+keep only the mean.
+
+Why 6 s and not 8 or 12 (the options put to Alex): 12 s would have been "today without the hidden
+12 s" — identical noise and delay, exact settling, no behavioural change; 8 s the NICU default
+(+22 % noise, 4 s delay). 6 s was chosen for the neonatal focus of this library, for coherence with
+PI's existing 6 s, and because the range now makes the length an explicit, declared setting rather
+than a constant — the age-group profile planned for later (adult / neonate parameter sets) is the
+place to revisit it.
+
+**Implementation choices (and the alternatives rejected).**
+- *Block sums at the 50 Hz cadence, products at full rate* (chosen; the shape of PI's DC in §11):
+  dx·dy, dx², dy² and (x − mean)² are formed at the AFE rate and summed over each decimation block of
+  a new `_spo2_decim` chain; each block sum enters a circular buffer with an O(1) running total. A sum
+  of block sums is the full-rate sum — nothing is lost; the window edge moves in 20 ms steps and the
+  outputs refresh at that cadence (the rest of the system consumes algorithms every 20 ms anyway).
+  Rejected: a full-rate buffer (3 × 6 s × 500 Hz × 4 B = 36 KB, > 100 KB at 1600 Hz / 8 s, and a
+  buffer that must be re-sized with the PRF — the decimated one keeps meaning seconds), and
+  *decimating x, y before differencing* (ten times less CPU, but a 1.6 % attenuation of the derivative
+  at 5 Hz and the decimator's anti-alias filter inside the estimator: a change to what was validated).
+- *Drift guard:* float32 running add/subtract sums accumulate rounding; the totals are rebuilt from
+  the buffers every time the index wraps (5·N adds once per window length — negligible).
+- *Buffers sized for the maximum* (`alg_window_buf_len_max` = 600 = 12 s at 50 Hz; seven buffers ≈
+  17 KB static): no allocation, no re-sizing; the live length is `round(window_s · rate_hz)`, capped.
+- *A length change empties the window* (NaN for one length) rather than keeping the newest samples:
+  simpler, and a half-filled window of another length is not a valid estimate.
+- *Not done, deliberately:* a Hann/triangular window (same reason as §11: tapering the boxcar edge
+  costs the O(1) update for a benefit not yet observed); an EMA with τ = 3 s (noise-matched to the
+  6 s window but still 3τ to settle and an infinite tail); exposing the lengths as `$SET`/`$LCFG`
+  keys (firmware/lab work, a task of its own — the library version in `$CFG` identifies the
+  defaults in force).
+
+**Known costs.** +36 % noise of R at equal nominal length (0.34 vs 0.25 points median SD; p90 1.5 vs
+1.1); larger peak deviation during a burst (above); at 30 BPM a 4 s window holds two beats and a 2 s
+window one — R and r still come out, noisier; documented, not blocked (the age profile may couple
+window and HR range later). **Advantage only the window has, for later:** blocks flagged as artefact
+(motion, RF settling) can be *excluded* from the sums instead of frozen or waited out.
 
 ---
 

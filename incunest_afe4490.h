@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.101"
+#define INCUNEST_AFE4490_VERSION "0.102"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -693,9 +693,8 @@ struct AFE4490Config {
     float             spo2_r_curve_a;
     float             spo2_r_curve_b;
     // SpO2 algorithm parameters
-    float             spo2_warmup_s;             // warmup before reporting SpO2 [s]
     float             spo2_ema_mean_tau_s;         // EMA mean (DC) time constant [s]
-    float             spo2_ema_var_tau_s;          // EMA variance (AC²) time constant [s]
+    float             spo2_window_s;               // SpO2 averaging window [s] (v0.102; 2–12 s, setSpO2WindowS)
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
@@ -704,10 +703,11 @@ struct AFE4490Config {
     float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%]
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11):
-    // own band-pass (not an EMA subtraction) for the AC, AC and DC from the same 6 s sliding
-    // window (pi_window_s, fixed at compile time like hr2_buf_len — see _pi_update_sample()).
+    // own band-pass (not an EMA subtraction) for the AC, AC and DC from the same sliding window
+    // (pi_window_s, runtime since v0.102 — see _pi_update_sample()).
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
+    float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, setPIWindowS)
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
@@ -812,9 +812,14 @@ public:
     void setHR3Filter(float f_high_hz = 15.0f);
 
     // SpO2 algorithm setters (callable before or after begin())
-    void setSpO2WarmupS(float s);                              // warmup period before reporting SpO2
     void setSpO2EmaMeanTauS(float tau_s);                      // EMA mean (DC) time constant; triggers recalc
-    void setSpO2EmaVarTauS(float tau_s);                       // EMA variance (AC²) time constant; triggers recalc
+    // Averaging windows (v0.102, rationale §12): true sliding windows at the 50 Hz decimated cadence,
+    // one for SpO2 (R-METHOD-1's AC², R-METHOD-2's Sxy/Sxx/Syy) and one for PI (AC², DC),
+    // independent of each other. Clamped to [alg_window_s_min, alg_window_s_max] = [2, 12] s; the
+    // window IS the warm-up (the first value appears when it is full — there is no spo2_warmup_s
+    // any more). Changing a length empties that window (NaN for one window length).
+    void setSpO2WindowS(float window_s);
+    void setPIWindowS(float window_s);
     void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
     // PI-based SQI thresholds [%], in peak-to-peak units (v0.101, the industry's PI): SQI ramps 0→1
     // from lo to hi; above max_pct the PI is physiologically impossible (a DC transient, e.g. the
@@ -1065,7 +1070,7 @@ private:
             // var = 0, instead of ramping mean up from 0. Ramping from 0 would leave
             // d = x − mean ≈ x for the first ~3·τ, spuriously INFLATING var (the AC-power
             // estimate → PI). Seeding removes that start-up bias. It does NOT shorten
-            // the ~3·τ_var that var still needs to become representative (see spo2_warmup_s).
+            // the ~3·τ_var that var would need to become representative where var is read.
             if (count == 0) { mean = x; var = 0.0f; count = 1; return; }
             mean += _mean_alpha * (x - mean);
             float d = x - mean;
@@ -1405,7 +1410,6 @@ private:
     // guarantees up to the 3rd harmonic of 260 BPM, which its HPS multiplies).
     Decimator         _hr2_decim;   // BP 0.5-5 Hz  → HR2_ACF (+ future MPM/YIN)
     Decimator         _hr3_decim;   // LP 15 Hz     → HR3
-    uint32_t          _spo2_warmup_samples;
     // Blind window after an accepted beat, in samples: ignores further threshold crossings so
     // the dicrotic notch is not counted as a second beat. Derived from hr1_refractory_s —
     // see there for why 0.185 s and why a FIXED value cannot protect bradycardia.
@@ -1420,30 +1424,58 @@ private:
     //   mean  = DC component (slow IIR low-pass of x)
     //           α_mean = 1 − exp(−1/(τ_mean·fs)),  τ_mean = spo2_ema_mean_tau_s (default 2.0 s)
     //           NOTE: future alternative — bandpass filter for DC tracking
-    //   var   = AC power estimate = E[(x − mean)²] = EMA of AC²
-    //           α_var  = 1 − exp(−1/(τ_var·fs)),   τ_var  = spo2_ema_var_tau_s  (default 6.0 s)
-    //           6.0 s is not a free choice: ISO 80601-2-61:2026 Annex JJ.2 d) mandates >= 6 s
-    //           averaging for the SpO2 transfer standard reference.
-    //           NOTE: future alternative — bandpass-filtered AC² instead of DC-subtraction AC²
-    //   count = sample count used directly for warmup (ir_ema/red_ema always updated
-    //           together, so either's count works — no separate _spo2_sample_count needed).
-    //           Naturally restarts warmup after a reset (see _spo2_update() in the .cpp).
+    //   var   = unused since v0.102 (var_tau = mean_tau, as HGAC's EMAs): R-METHOD-1's AC² is the
+    //           sliding-window mean of (x − mean)² below, no longer an EMA.
+    //   count = seeds the mean on the first sample after a reset (EmaChannel::update).
     //   PI is computed independently — see the PI state block below (v0.101, rationale §11).
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
+    // Averaging windows (v0.102): runtime length in [alg_window_s_min, alg_window_s_max] for SpO2
+    // and for PI independently; the buffers are sized for the maximum at the 50 Hz block cadence.
+    // 2 s keeps the neonatal "short window + alarm delay" configuration reachable (McClure 2016,
+    // rationale §4.5); 12 s is the longest anyone in the evidence base uses outside oxygen-target
+    // trials (16 s). RAM: 7 buffers × 600 × 4 B ≈ 17 KB.
+    static constexpr float alg_window_s_min = 2.0f;
+    static constexpr float alg_window_s_max = 12.0f;
+    static constexpr int   alg_window_buf_len_max = 600;   // 12 s at 50 Hz
+    static int _window_len(float window_s, float rate_hz);  // decimated samples, capped by the buffer
     // R-METHOD-2 (v0.100): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red with the one-biquad band-pass
     // spo2_bp_f_low_hz–spo2_bp_f_high_hz and the EmaChannel means as DC; then, on the first
-    // differences dx, dy: R = EMA(dx·dy)/EMA(dx²), r = EMA(dx·dy)/√(EMA(dx²)·EMA(dy²)), all three
-    // EMAs with τ = spo2_ema_var_tau_s (the averaging time, shared with R-METHOD-1's AC²). The
-    // derivative weights the systolic upstroke, where the two channels move together, over the
+    // differences dx, dy: R = Σ(dx·dy)/Σ(dx²), r = Σ(dx·dy)/√(Σ(dx²)·Σ(dy²)) over the SpO2 window.
+    // The derivative weights the systolic upstroke, where the two channels move together, over the
     // slow venous/motion components; the band-pass removes the out-of-band power that inflates
     // R-METHOD-1's red RMS more than its IR RMS. Design rationale §9–§10.
+    //
+    // Averaging (v0.102, rationale §12): the products dx·dy, dx², dy² and R-METHOD-1's (x − mean)²
+    // are formed at the full AFE rate and summed over each decimation block (_spo2_decim, target
+    // 50 Hz, the HR2/HR3/PI family — §5.3.1); every block sum enters a circular buffer with an O(1)
+    // running total over the newest spo2_window_s seconds. A sum of block sums IS the full-rate
+    // sum, so nothing is decimated away: only the window edge moves in 20 ms steps. Replaces the
+    // EMAs with τ = 6 s, which were equivalent to a 12 s window in noise and delay and needed 3·τ
+    // = 18 s to be considered settled; a window settles exactly when full. Measured equal in
+    // accuracy against the HOSPNAV reference (rationale §12). The running totals are rebuilt from
+    // the buffers each time the index wraps, so float32 add/subtract drift cannot accumulate.
     BiquadFilter _spo2_bp_ir;
     BiquadFilter _spo2_bp_red;
     float    _spo2_reg_x_prev, _spo2_reg_y_prev;
-    float    _spo2_reg_sxy, _spo2_reg_sxx, _spo2_reg_syy;
-    float    _spo2_reg_alpha;                              // 1 − exp(−1/(τ_var·fs))
     uint32_t _spo2_reg_count;                              // samples since reset (0 → no difference yet)
+    Decimator _spo2_decim;
+    static constexpr float spo2_decim_target_rate_hz = 50.0f;   // Hz — block cadence of the windows (§5.3.1)
+    // Block accumulators (full rate, cleared every decimated sample):
+    float    _spo2_blk_sxy, _spo2_blk_sxx, _spo2_blk_syy;   // R-METHOD-2
+    float    _spo2_blk_var_ir, _spo2_blk_var_red;           // R-METHOD-1: (x − mean)² per channel
+    // Circular buffers of block sums, sized for alg_window_s_max at the decimated rate; the live
+    // length is _spo2_buf_n = round(spo2_window_s · _spo2_decim.rate_hz).
+    float    _spo2_sxy_buf[alg_window_buf_len_max];
+    float    _spo2_sxx_buf[alg_window_buf_len_max];
+    float    _spo2_syy_buf[alg_window_buf_len_max];
+    float    _spo2_var_ir_buf[alg_window_buf_len_max];
+    float    _spo2_var_red_buf[alg_window_buf_len_max];
+    float    _spo2_sxy_sum, _spo2_sxx_sum, _spo2_syy_sum, _spo2_var_ir_sum, _spo2_var_red_sum;
+    int      _spo2_buf_n;                                  // live window length [decimated samples]
+    int      _spo2_buf_idx;                                // shared by the five buffers (same cadence)
+    uint32_t _spo2_buf_count;                              // filled slots (capped at _spo2_buf_n)
+    void _spo2_window_reset();                             // empties the window (block sums, buffers, totals)
     char     _spo2_r_curve_id[SPO2_R_ID_LEN];            // R curve in use (setSpO2RCurve)
     char     _spo2_r_curve_r_method_id[SPO2_R_ID_LEN];   // R method that curve was fitted with
     float    _spo2_r_curve_a;
@@ -1453,7 +1485,7 @@ private:
         return _spo2_r_method == 1 ? SPO2_R_METHOD_1_ID : SPO2_R_METHOD_2_ID;
     }
     void _spo2_warn_if_curve_mismatch() const;
-    void _spo2_reset_state();                                   // EMAs, band-passes, regression
+    void _spo2_reset_state();                                   // EMAs, band-passes, regression, window
 
     // ── PI (Perfusion Index) state ───────────────────────────────────────────
     // Decoupled from SpO2 (v0.101, rationale §11): the old PI lived inside _spo2_update(),
@@ -1471,7 +1503,8 @@ private:
     //     decimated rate, one of squared band-passed samples (AC²) and one of block means of the
     //     raw OT (DC — the mean of the 10 raw samples behind each decimated one, so no aliasing),
     //     each with an O(1) running sum. Numerator and denominator share the window, so PI
-    //     settles EXACTLY at pi_window_s (6 s) with no EMA, no seed and no lead/lag between the
+    //     settles EXACTLY at pi_window_s (default 6 s; runtime 2–12 s since v0.102, independent of
+    //     the SpO2 window) with no EMA, no seed and no lead/lag between the
     //     two — Masimo's "λDC = average value of the signal" over the same span as the AC. (A 2 s
     //     EMA measured within ±0.25 % of this window mean on HOSPNAV; the choice is structural,
     //     not numerical — rationale §11.) No slow/async Task is needed (unlike HR2/HR3's
@@ -1482,15 +1515,16 @@ private:
     BiquadFilter _pi_bpf;
     Decimator    _pi_decim;
     static constexpr float pi_decim_target_rate_hz = 50.0f;   // Hz — same target-rate family as HR2/HR3 (§5.3.1)
-    static constexpr int   pi_buf_len = 300;   // 6 s at PI's decimated rate (50 Hz) — pi_window_s
-    float    _pi_ac_buf[pi_buf_len];  // circular buffer of decimated band-passed samples, SQUARED
-    float    _pi_dc_buf[pi_buf_len];  // circular buffer of raw-OT block means (one per decimated sample)
+    float    _pi_ac_buf[alg_window_buf_len_max];  // circular buffer of decimated band-passed samples, SQUARED
+    float    _pi_dc_buf[alg_window_buf_len_max];  // circular buffer of raw-OT block means (one per decimated sample)
     float    _pi_ac_sum;              // running sum of _pi_ac_buf — O(1) sliding-window update
     float    _pi_dc_sum;              // running sum of _pi_dc_buf
     float    _pi_dc_block_sum;        // raw OT accumulated over the current decimation block
+    int      _pi_buf_n;               // live window length [decimated samples] = round(pi_window_s · rate)
     int      _pi_buf_idx;             // shared by both buffers (same cadence)
     uint32_t _pi_buf_count;
     void _pi_update_sample(float ot_ir, ProbeState probe_state);
+    void _pi_window_reset();          // empties the window (block sum, buffers, totals)
 
     // ── HR1 state ──
     float    _hr1_dc;
@@ -1594,9 +1628,9 @@ private:
     uint32_t _hr3_update_counter;              // decimated samples since last FFT computation
 
     // ── Algorithm tuning parameters (runtime-configurable) ──────────────────
-    float    _spo2_warmup_s;
     float    _spo2_ema_mean_tau_s;
-    float    _spo2_ema_var_tau_s;
+    float    _spo2_window_s;
+    float    _pi_window_s;
     float    _spo2_min;
     float    _spo2_max;
     float    _spo2_pi_sqi_lo;
@@ -1738,7 +1772,9 @@ public:
     uint32_t test_hr1_ma_len() const         { return _hr1_ma_len; }
     // Every time-valued derived parameter, so a test can assert its value in SECONDS is held
     // across the whole PRF catalogue (see test_time_parameters_hold_across_catalogue).
-    uint32_t test_spo2_warmup_samples() const      { return _spo2_warmup_samples; }
+    int      test_spo2_buf_n() const               { return _spo2_buf_n; }
+    uint32_t test_spo2_buf_count() const           { return _spo2_buf_count; }
+    float    test_spo2_decim_rate_hz() const       { return _spo2_decim.rate_hz; }
     uint32_t test_hr1_refractory_samples() const   { return _hr1_refractory_samples; }
     uint32_t test_rsqm_probe_min_samples() const   { return _rsqm_probe_state_min_samples; }
     float    test_hr1_dc_alpha() const             { return _hr1_dc_alpha; }
@@ -1765,6 +1801,7 @@ public:
     // _pi_update_sample() IS the production function; no separate "_for_test" wrapper needed.
     void     test_feed_pi(float ot_ir, ProbeState probe_state) { _pi_update_sample(ot_ir, probe_state); }
     uint32_t test_pi_buf_count() const { return _pi_buf_count; }
+    int      test_pi_buf_n() const     { return _pi_buf_n; }
     uint16_t test_pi_decim_factor()  const { return _pi_decim.factor; }
     float    test_pi_decim_rate_hz() const { return _pi_decim.rate_hz; }
 #endif
