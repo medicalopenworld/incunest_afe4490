@@ -1,6 +1,6 @@
 {
   "name": "incunest_afe4490",
-  "version": "0.100.0",
+  "version": "0.101.0",
   "description": "AFE4490 PPG/SpO2 driver for ESP32-S3 (Arduino-ESP32 or ESP-IDF, FreeRTOS) — Medical Open World",
   "keywords": ["AFE4490", "PPG", "SpO2", "heart rate", "pulse oximeter", "FreeRTOS", "ESP32"],
   "repository": {

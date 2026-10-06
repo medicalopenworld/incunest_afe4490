@@ -278,6 +278,10 @@ struct AFE4490Config {
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
     float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
+    float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%] (v0.101)
+    // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11)
+    float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
+    float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
@@ -956,20 +960,54 @@ accumulating during warmup and consumers that don't care (SpO2, `warmup_s = 0` �
 are unaffected. HGAC uses it (3·τ per EMA) to skip decisions until an estimator has matured after
 a gain-change reset — the check `ema.valid() && ema.mean >= thr` short-circuits with no action.
 
-**Perfusion Index (PI):**
+**Perfusion Index (PI) — decoupled from SpO2 (v0.101, rationale §11):**
+
+PI used to share SpO2's `EmaChannel` (mean τ 2 s, var τ 6 s), inheriting that EMA's asymptotic
+settling (~3×6 s = 18 s to reach ~95 %) and a DC estimator it could not tune independently. Since
+v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own state:
+
+- **AC waveform:** a private band-pass (`pi_bp_f_low_hz`–`pi_bp_f_high_hz`, default **0.5–15 Hz**,
+  `setPIFilter()`), not an EMA subtraction. The floor is the HR floor, as HR2/R-METHOD-2; a
+  biquad's steeper roll-off passes the slowest accepted heart rate (30 BPM = 0.5 Hz) more
+  faithfully than a first-order EMA at an equivalent nominal corner, which would start tracking —
+  and partially cancelling — the pulse itself near bradycardia. The ceiling is HR3's, not
+  R-METHOD-2's 5 Hz: PI is a magnitude and needs the harmonics — on the MS100 at constant
+  modulation a 5 Hz ceiling read PI 25 % lower at 220 BPM than at 60 BPM; 15 Hz removes the HR
+  dependence and admits no measurable noise (rationale §11). R keeps 5 Hz: there the same filter
+  sits on both channels and cancels.
+- **AC and DC from the same 6 s sliding window** (fixed at compile time like `hr2_buf_len`), not
+  EMAs: two circular buffers at the decimated rate — squared band-passed samples (AC²) and block
+  means of the raw OT (DC: the mean of the raw samples behind each decimated one, so no
+  aliasing) — each with an O(1) running sum. Numerator and denominator always span the same 6 s;
+  PI settles EXACTLY at 6 s instead of asymptotically, with no EMA and no seed. (A 2 s EMA
+  measured within ±0.25 % of the window mean on HOSPNAV; the choice is structural.) No slow/async
+  Task is needed (unlike HR2/HR3's autocorrelation/FFT).
+- **Peak-to-peak units** — the industry's PI (Nellcor Max−Min per pulse, Masimo λmax−λmin; ISO
+  80601-2-61:2026 §201.3.245 *%mod* ≈ AC/DC×100, with Annex II.2.1 naming *%mod*, *pulse
+  amplitude* and *PI* as synonyms, and every published neonatal threshold): `AC_pp = 2√2 · RMS`,
+  exact for a sinusoid. The band-passed neonatal PPG measured pp/RMS = 2.8–3.2 (rationale §11), so
+  this under-reads a per-beat Max−Min by 0–12 %; the library's PI was RMS-based (÷2.8–3.2) until
+  v0.101.
 
 ```
-PI = sqrt(EmaChannel.var) / EmaChannel.mean × 100  [%]
-   = RMS_AC / DC × 100
+PI = 2√2 · sqrt(Σ AC² / N) / (Σ DC_block / N) × 100  [%]      N = 300 (6 s @ 50 Hz)
+   = AC_pp / DC × 100
 ```
+
+PI is `NaN` while its own 6 s window is still filling or while `probe_state != PROBE_APPLIED`
+(reset every sample while not applied, same contract as every other algorithm). This is shorter
+than SpO2's 18 s warmup, so in continuous operation PI is already valid by the time SpO2's own
+warmup gate clears — `_spo2_update()` still reads `AFE4490Data::pi` for its SQI (below) and
+explicitly guards against a not-yet-valid (`NaN`) PI rather than relying on `fmaxf`/`fminf`'s
+NaN pass-through.
 
 `spo2_sqi` is a continuous [0–1] quality metric based on PI:
 
 ```
-sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)
+sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %) → SpO2 invalid, SQI = 0
 ```
 
-PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference. SQI is forced to 0, with SpO2 = NaN, when SpO2 falls outside the valid range [70–100 %] and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
+PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when SpO2 falls outside the valid range [70–100 %] and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
 #### R methods and R curves (v0.98)
 
@@ -2742,6 +2780,20 @@ See §5.1 for algorithm description.
 
 ---
 
+### 10.3b PI (Perfusion Index) parameters — decoupled from SpO2 (v0.101)
+
+See §5.1, *Perfusion Index (PI)* and rationale §11.
+
+| Parameter | Constant | Value | Justification | Effect |
+|---|---|---|---|---|
+| Band-pass lower cutoff | `pi_bp_f_low_hz` | 0.5 Hz | Same 30 BPM floor as `hr2_f_low_hz`/`spo2_bp_f_low_hz`, through PI's own private `BiquadFilter` instance ("paths share nothing", §5.3.1) | AC waveform extraction — replaces the old EMA subtraction |
+| Band-pass upper cutoff | `pi_bp_f_high_hz` | 15.0 Hz | HR3's ceiling (3rd harmonic of 260 BPM = 13 Hz): a magnitude needs the harmonics — 5 Hz read −25 % at 220 vs 60 BPM on the MS100; noise above 10 Hz unmeasurable in the lowest-PI decile of a neonate (rationale §11) | HR-independence of PI |
+| Sliding-window length | `pi_window_s` (compile-time, `pi_buf_len` = 300 samples @ 50 Hz) | 6 s | Shared by AC and DC; matches SpO2's old AC² averaging time while settling exactly instead of asymptotically; no setter, same treatment as `hr2_buf_len` | PI settling time |
+| RMS → peak-to-peak | `pi_rms_to_pp` | 2√2 | Exact for a sinusoid; band-passed PPG measured 2.79/2.92 (neonates), 3.0–3.2 (MS100) → under-reads a per-beat Max−Min by 0–12 %. Per-beat peaks (Masimo/Nellcor exact) need a beat detector: PILAB option, not library | PI in the industry's units |
+| PI upper bound | `spo2_pi_max` | 20 % | Top of the displayed range of Masimo (0.02–20), Mindray (0.05–20), Nellcor (0.03–20); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2PiSqiThresholds(lo, hi, max)`) |
+
+---
+
 ### 10.4 HR1 parameters
 
 See §5.2 for algorithm description.
@@ -3090,6 +3142,26 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.101  | **PI (Perfusion Index) decoupled from SpO2 and redefined in the industry's   |
+|         | units (§5.1, §10.3b, rationale §11).** `_pi_update_sample()` replaces the    |
+|         | `sqrt(EmaChannel.var)/EmaChannel.mean` computed inside `_spo2_update()`.     |
+|         | AC from a private band-pass 0.5–15 Hz (`pi_bp_f_low_hz`/`_high_hz`,          |
+|         | `setPIFilter()`; the HR3 ceiling, since a 5 Hz one made PI fall 25 % from 60 |
+|         | to 220 BPM), not an EMA subtraction. AC² and DC (block means of the raw OT)  |
+|         | from the SAME 6 s sliding window (`pi_buf_len` = 300 @ 50 Hz, O(1) running   |
+|         | sums): settles EXACTLY at 6 s, no EMA, no seed, no lead/lag between          |
+|         | numerator and denominator. **PI is now peak-to-peak** (`2√2·RMS`, Nellcor/   |
+|         | Masimo's definition, ISO *%mod*): the old RMS-based PI was ÷2.8–3.2 of it,   |
+|         | so `spo2_pi_sqi_lo/hi` (0.5/2.0, copied from those manufacturers) fired ~3×  |
+|         | too early — HOSPNAV SUBJ08 scored SQI 0.08 at a normal 1.8 % (pp). **PI      |
+|         | upper bound** `spo2_pi_max` = 20 % (third parameter of                        |
+|         | `setSpO2PiSqiThresholds()`, `AFE4490Config::spo2_pi_max`): above it SpO2 is  |
+|         | withheld — the ramp's output-only clamp used to publish SQI = 1 on the DC    |
+|         | transient of a probe coming off (closes the 2026-08-22 finding). `_spo2_     |
+|         | update()`'s SQI also guards a not-yet-valid (`NaN`) PI explicitly instead of |
+|         | relying on `fmaxf`/`fminf`'s NaN pass-through. New suite `test_pi` (6);      |
+|         | `test_spo2` feeds PI in lockstep, amplitudes halved to keep PI under the new |
+|         | bound, `test_spo2_pi_above_max_invalidates` added (14).                      |
 | v0.100  | **R-METHOD-2 in the library, default (§5.1).** `setSpO2RMethod(1|2)`: 2 = causal    |
 |         | regression on the first differences of the band-passed (0.5–5 Hz, one biquad),  |
 |         | DC-normalised OT, R = EMA(dx·dy)/EMA(dx²), with its correlation r as validity  |

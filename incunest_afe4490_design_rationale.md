@@ -808,6 +808,220 @@ same ~3 % (RF tolerance), only 16 ms earlier.
 
 ---
 
+## 11. PI (Perfusion Index) — decoupling from SpO2 and the sliding-window AC estimator (2026-10-05)
+
+### Why decouple
+
+PI lived inside `_spo2_update()`, sharing `_spo2_ch_ir_ema` — the same `EmaChannel` (mean τ 2 s,
+var τ 6 s) R-METHOD-1 used for its own AC/DC. Alex noticed, comparing PILAB's STEP1 options, that
+a 0.5–2.0 Hz band-pass looks like "EMA subtract" at τ 0.5 s but not at τ 2 s — correct: a
+first-order EMA subtraction is a high-pass with f_c = 1/(2π·τ), 0.08 Hz at τ 2 s vs 0.32 Hz at
+τ 0.5 s, and only the latter sits close to the band-pass's 0.5 Hz edge. That observation reopened
+a question settled for a *different* reason on 2026-10-03 (§10): that session kept the DC EMA at
+τ 2 s for R-METHOD-2's **DC_R** role (normalising denominator only), where a runner experiment
+found no accuracy gain from a faster estimator and a real cost (biquad float32 DC-gain loss at
+that corner). It said nothing about **DC_sub** — the role of subtracting that same EMA to
+*extract* the AC waveform, which R-METHOD-1 and PI both still used. These are different jobs with
+different constraints (tracked as a pending DC_sub/DC_R split task, previously only in Claude's
+working memory, not in this repo), currently sharing one number only because the split was never
+implemented. Shortening DC_sub's τ to make STEP1 "look like" the
+band-pass would have fixed a cosmetic mismatch while reintroducing a real risk: at τ 0.5 s
+(f_c ≈ 0.32 Hz), the EMA sits less than an octave below the slowest accepted heart rate (30 BPM =
+0.5 Hz), so during bradycardia the "DC" would start tracking the pulse itself, and subtracting it
+would partially cancel the very AC amplitude PI exists to measure — in exactly the clinical
+scenario (bradycardia, often with desaturation) where an accurate PI matters most.
+
+R-METHOD-1 is deprioritised (kept only for comparative analysis, per Alex), so the AC/DC split
+task's R-METHOD-1 motivation no longer applies to it specifically — but PI is very much still
+live, and used independently of either R method. So: implement PI as its own function with its
+own state, free to pick an AC-extraction mechanism that does not carry the bradycardia risk at
+all, instead of just re-tuning the shared EMA's τ.
+
+### Why a private band-pass instead of an EMA (STEP1)
+
+Two options were on the table: shorten DC_sub's τ, or replace the EMA subtraction with a
+band-pass (Alex proposed 0.5–20 Hz). Neither "repair the EMA" option was taken. A band-pass
+(biquad, 2nd order) has a steeper roll-off than a first-order EMA at an equivalent nominal
+corner, so it can sit at 0.5 Hz and still pass 30 BPM faithfully without the EMA's "starts
+tracking the pulse near its own corner" failure mode — the problem above is specific to using a
+single real pole as a high-pass, not to the 0.5 Hz number itself.
+
+**Upper corner: 15 Hz, not 5 Hz — a correction.** The first cut (morning of 2026-10-05) kept
+R-METHOD-2's 0.5–5 Hz and argued that widening to 20 Hz "would only admit noise, not signal". The
+measurement below proved that wrong for PI: on the MS100 at constant modulation, the 0.5–5 Hz
+PI read 1.70 % at 60 BPM and 1.27 % at 220 BPM (−25 %), because the second harmonic (7.3 Hz)
+leaves the band; with 0.5–10 Hz the drop is −6 %, with 0.5–15 Hz it is gone; on SUBJ08 (HR 166)
+widening from 5 to 10 Hz adds +4 % and nothing beyond, and the noise admitted above 10 Hz was
+unmeasurable even in the lowest-PI decile. The distinction that matters: R is a *ratio* with the
+same filter on both channels, so a harmonic the filter drops is dropped in both and cancels; PI is
+a *magnitude*, so a dropped harmonic is missing amplitude. 15 Hz is HR3's ceiling and its
+derivation (`hr_max_bpm` = 260 → 4.33 Hz → 3rd harmonic 13 Hz, 1.15× margin) applies unchanged.
+The floor stays the HR floor, 0.5 Hz, as HR2/R-METHOD-2 — reusing the *number*, not the *instance*:
+PI gets its own private `BiquadFilter`
+(`_pi_bpf`), following the library's existing "paths share nothing" rule for HR2 vs HR3 (spec
+§5.3.1: separate filter, buffer and phase counter per analysis path, specifically so one path's
+reset/reconfiguration can never perturb another's). Reusing `_spo2_bp_ir`'s instance directly was
+considered and rejected: that filter's internal state (`_v1`/`_v2`) is only valid if `process()`
+is called exactly once per sample from exactly one call site: sharing it between `_spo2_update()`
+and a separately-timed PI function would mean either double-processing the same filter state
+(corrupting it) or an ordering dependency between two functions that the whole point of
+decoupling PI was to remove. A second, independent biquad instance costs a handful of floats and
+a few multiply-adds per sample — the library already pays this exact price twice over for HR2 and
+HR3 (same corner family, each with its own instance), so a third instance for PI is consistent,
+not novel.
+
+### The DC: the same window as the AC, not an EMA (STEP3)
+
+The first cut gave PI a private 2 s DC EMA (denominator only, never subtracted, so none of the
+bradycardia risk; the DC_R role of §10, where a faster estimator bought nothing). Alex asked why
+the DC was not simply the mean of a buffer like the AC's, without the squaring — and asked for a
+study of both the DC and the AC method against the manufacturers, the standard and the
+literature. The study (2026-10-05, scripts in the session scratchpad, data below) settled it:
+
+**DC, measured.** On HOSPNAV SUBJ08 (56 min, HR ≈ 166, 489 windows of 6 s inside PROBE_APPLIED)
+the 2 s EMA differs from the 6 s window mean by a median of 0 % (IQR ±0.25 %, p5/p95 ±1.5 %);
+Nellcor's per-beat (Max+Min)/2 by +0.2 %; SUBJ09 and the MS100 at 60–220 BPM agree (±0.2 %).
+**The DC estimator is numerically irrelevant to PI** — the AC definition (×2.8–3.2, next section)
+and the window-to-window variability (28–43 % on a moving neonate) dwarf it. So the choice is
+structural, and there the window wins: numerator and denominator span the same 6 s (no lead/lag
+when the level moves — probe pressure, an RF step), PI has no EMA, no seed and no warm-up concept
+at all beyond "window full", and it is literally Masimo's "λDC = average value of the signal"
+and ISO's "baseline (non-modulated) portion". Cost: a second 300-float ring and a running sum.
+Implementation detail that matters: the DC sample pushed at each decimated step is the **mean of
+the raw OT over the decimation block** (accumulated at the AFE rate), not every 10th raw sample —
+anti-aliasing for free, at one addition per sample.
+
+**What the DC does not fix — a finding to carry forward.** Around the 10 HGAC RF changes in the
+SUBJ09 parts, PI deviates 25–250 % from its pre-step median for 6–14 s with *either* DC (EMA vs
+window differ by 3–7 points of that). The transient is the numerator's: the 1–4 % OT step (RF
+tolerance, §10 side finding) rings through the band-pass and sits in the 6 s RMS window. Same
+conclusion §10 reached for R. The remedy is upstream of the DC — blank PI for one window after an
+RF move, or compensate the filter state — and is logged as a pending task, not done here.
+
+### The AC: peak-to-peak units, 2√2·RMS (the 2026-10-05 study)
+
+**What the standard says.** ISO 80601-2-61:2026 §201.3.245 defines *percent modulation, %mod* as
+"indicator of pulsatile signal strength resulting only from tissue arterial blood content changes
+at the probe site over the cardiac cycle"; Note 1: "may be approximated as AC/DC of the detected
+light signal multiplied by 100, where AC refers to the modulated signal portion and DC refers to
+the baseline (non-modulated) signal portion"; Note 3: the infrared signal as the primary factor.
+Annex II.2.1: *%mod* is "sometimes referred to as percent modulation, pulse amplitude, Perfusion
+Index, or PI", normal 1–8 %. Formula EE.1 writes R with per-pulse max/min. **The standard fixes
+neither peak-to-peak vs RMS nor a window**; it requires %mod to be disclosed in low-perfusion
+claims (201.12.1.103) and per data point in the study report (201.12.1.105).
+
+**What the manufacturers do.** Nellcor (US 6,675,031): Mod % = 100·AC/DC with **AC = Max − Min per
+pulse, DC = (Max + Min)/2**. Masimo (US 8,280,473, US 11,006,867): **PI = (λmax − λmin)/λDC, λDC the
+average of the signal**, per pulse; the "smoother" keeps a baseline PI from good-quality epochs and,
+under motion, publishes the lower of the two ("motion noise tends to increase PI"). Masimo's
+whitepaper: IR 940 nm, pulsatile over non-pulsatile. Literature: PI is not standardised and not
+comparable across brands (7.07 / 5.80 / 6.80 % on the same subject with three devices;
+NCT06635018 is measuring exactly this). **Every published neonatal threshold is Masimo, i.e.
+peak-to-peak:** Granelli & Östman-Smith 2007 p5 = 0.70, p1 = 0.50, p95 = 4.50 (10 000 newborns);
+De Felice 2002 high illness severity ≤ 1.24 (0.86 vs 2.02); Hakan 2013 term day-1 preductal
+1.35 (1.02–1.91), postductal 0.88, preterm 0.88 / 0.61; Masimo "low perfusion" < 0.25; Philips
+"ideally > 1.0". PILAB's S2_PEAKPK, for the record, is (max − min)/2 — half of all of these.
+
+**What our data say** (6 s windows, same 0.5–5 Hz band-pass as the first cut):
+
+| | SUBJ08 (HR 166) | SUBJ09 1238 p01 (HR 160) | MS100 60 / 100 / 140 / 220 BPM |
+|---|---|---|---|
+| pp/RMS of the band-passed PPG (sinusoid 2.83) | 2.79 (IQR 2.21–2.89) | 2.92 | 3.17 / 3.20 / 3.18 / 3.01 |
+| PI v0.100 (EMA var / EMA mean), median | 1.66 | 1.35 | 1.71 |
+| PI first cut of v0.101 (RMS of band / EMA) | 1.06 (−36 %) | 1.13 (−16 %) | 1.69 → 1.27 at 220 |
+| PI peak-to-peak / window DC (Masimo-like) | 2.49 | 3.20 | 5.4 → 3.8 at 220 |
+| Window-to-window variability, RMS vs per-beat pp median | 42 % vs 28 % | 4.5 % vs 8.7 % | — |
+
+Two consequences the first cut had not seen. (1) **The decoupling had silently changed PI's
+scale**: the EMA subtraction let through the < 0.5 Hz and > 5 Hz content, worth 16–36 % of the
+AC. With `spo2_pi_sqi_lo/hi` = 0.5/2.0 unchanged, SUBJ08 went from the board's mean SQI 0.61 to
+10.8 % of windows at SQI 0 and only 9.6 % at SQI 1. (2) **Those thresholds were copied from
+Nellcor/Masimo, whose PI is peak-to-peak, while the library's had always been RMS — ÷2.8–3.2.**
+In peak-to-peak units the same SUBJ08 windows give 0 % below 0.5, 61 % at or above 2.0 and 0.2 %
+below Granelli's p5; the capture's first rows show the problem in one line: PI 0.62 (≈ 1.8 in
+Masimo units, a normal neonate) with SQI 0.08.
+
+**Decisions (Alex, "adelante" to all four).** (a) DC = the window mean above. (b) **PI in
+peak-to-peak units, as `2√2 · RMS` of the band-passed signal** (`pi_rms_to_pp`): exact for a
+sinusoid, which the band-passed PPG nearly is (2.8–3.2 measured), so it under-reads a per-beat
+Max − Min by 0–12 %; it needs no beat detector and is the smoother of the two on a quiet subject
+(SUBJ09: 4.5 % vs 8.7 %). The per-beat median (Masimo/Nellcor exactly; more robust on a moving
+subject, SUBJ08 28 % vs 42 %) is kept as a PILAB experiment — it would ride on HR1's detector.
+(c) Band-pass 0.5–15 Hz (previous section). (d) `spo2_pi_sqi_lo/hi` stay 0.5/2.0, now in the
+units they were quoted in, and **`spo2_pi_max` = 20 %** (the top of every manufacturer's displayed
+range: Masimo 0.02–20, Mindray 0.05–20, Nellcor 0.03–20) withholds SpO2 above it — closing the
+2026-08-22 finding that the SQI ramp clamped its *output* only, so a 147 % "PI" during the DC
+transient of a probe coming off scored SQI = 1 and published a plausible SpO2.
+
+### Why a sliding window instead of an EMA (STEP2)
+
+The actual complaint motivating this whole change was PI's settling time: an EMA never truly
+finishes converging (63 % at 1τ, 95 % at 3τ, 99 % at 5τ), which is why SpO2's warmup is 3×6 s =
+18 s and even that is an approximation, not an exact bound. Alex asked for proposals, specifically
+mentioning "replace EMA-6s with a 6s window of memory" as an example. Two shapes were considered:
+
+- **A full-rate circular buffer** (6 s × sample rate, e.g. 3000 samples at 500 Hz, per channel) —
+  rejected on RAM: 12 KB per channel is a real cost on an ESP32-S3 for no behavioural gain over
+  the decimated version below, since PI's AC envelope changes on a timescale of seconds, far
+  slower than the sample rate.
+- **A decimated circular buffer with an O(1) running sum of squares** (chosen): the library
+  already has exactly this shape for HR2/HR3 — band-pass → `Decimator` (target 50 Hz, §5.3.1) →
+  circular buffer — the only difference being that HR2/HR3 need a slow/async Task (Task B/C) to
+  run their O(N·lags) autocorrelation or FFT on that buffer, whereas PI's "AC RMS" is just
+  `sqrt(sum_of_squares / N)`: updating the running sum when one decimated sample enters and
+  another leaves is O(1), so PI needs no Task at all — the fast path commits `AFE4490Data::pi`
+  directly. Buffer: 300 floats (6 s @ 50 Hz) ≈ 1.2 KB for one channel (PI only needs IR, per
+  existing clinical convention — unlike R, it is not a ratio of two channels). This settles
+  EXACTLY at 6 s (the window is either full or it is not — no asymptotic tail) instead of needing
+  ~18 s for an EMA with the same nominal averaging time to be considered converged.
+
+**Known trade-off, accepted, not mitigated.** A true (rectangular) sliding window has a
+"boxcar edge" artefact an EMA does not: when a single large sample (a motion artefact) exits the
+window, PI can show a small instantaneous step rather than a smooth decay. Considered but not
+built: a Hann/triangular-weighted window (same technique HR3 already uses spectrally) would
+taper this, at the cost of a more complex incremental update (no longer a plain `sum += in − out`)
+for a benefit that has not been observed to matter in practice. If it does, the window shape is
+the one parameter to revisit — the decimation/buffer architecture does not need to change.
+
+### Scope boundaries, by design (not oversights)
+
+- **No `$SET`/`$LCFG` exposure yet.** `setPIFilter()` (mirroring `setHR2Filter()`) and the third
+  parameter of `setSpO2PiSqiThresholds()` exist and `getConfig()` reports `pi_bp_f_low_hz`,
+  `pi_bp_f_high_hz` and `spo2_pi_max`, but wiring them into the firmware's `$SET`/`$LCFG`
+  commands and `pulsenest_lab.py`'s LIB CONFIG window is a separate, cross-repo task (PulseNest
+  fw + spec), out of scope here.
+- **No dedicated `TimingStat` for PI.** `_pi_update_sample()` is cheap (O(1) per sample, same
+  order as the EMA it replaces) and is not instrumented under `INCUNEST_TIMING_STATS` the way
+  SpO2/HR1/HR2/HR3 are; add one if PI's cost is ever in question.
+- **The reset while the probe is not applied stays unconditional (PI, HR2, HR3).** Alex asked
+  whether the per-sample `memset` of the PI buffers (now 2 × 1.2 KB) was negligible and, if not,
+  proposed gating it on the previous `probe_state`. Estimate: ~300 32-bit stores per buffer,
+  2–3 µs each on the ESP32-S3; HR2 (1.6 KB) and HR3 (2 KB) already do the same, so the three
+  together cost ~10 µs of the 2000 µs sample budget at 500 Hz (0.5 %; 1.5 % at 1600 Hz), only in
+  the no-probe state, and HR2/HR3's share is already visible in `$TIMING` through `_ts_hr2`/
+  `_ts_hr3`, where it has never stood out. Decision (delegated to the session): **no guard**. An
+  exact one exists without storing any previous state — `buf_count == 0 && decim.phase == 0`
+  ⟺ nothing processed since the last reset — but it is an implicit invariant that a future member
+  added to the state and not to the condition would break silently, leaving stale state across a
+  disconnection. The unconditional reset is trivially correct; 0.5 % of idle CPU does not buy a
+  new way to be wrong in a medical device. If `$TIMING` ever says otherwise, the guard is one line.
+- **The window length (`pi_window_s` = 6 s, `pi_buf_len` = 300) has no runtime setter**, same
+  treatment as `hr2_buf_len` (8 s) — a fixed buffer capacity, not a tunable in the current design.
+- **SpO2's SQI formula gained an explicit `isnan(pi)` guard.** Previously `fmaxf`/`fminf` happened
+  to never see a NaN `pi` (the old EMA-based PI was effectively always a finite number once a
+  probe was applied, even before SpO2's own warmup cleared). Decoupling makes PI's own 6 s
+  warm-up externally observable as NaN, and `fmaxf`/`fminf`'s NaN-passthrough behaviour would read
+  that as SQI = 1 (the opposite of correct) rather than SQI = 0 — fixed with an explicit check.
+  In production this window never actually triggers the guard (PI's 6 s is shorter than SpO2's
+  18 s, so PI is already valid by the time SpO2's own gate opens), but the guard protects any
+  caller that feeds the two functions out of lockstep, which decoupling now makes possible for
+  the first time. Existing tests in `test_spo2.cpp` had to be updated to feed PI in lockstep with
+  SpO2 (same IR samples, same `probe_state`) precisely because SpO2's SQI still reads
+  `AFE4490Data::pi` — the two are decoupled at the *algorithm* level, not at the *SQI-consumer*
+  level; `spo2_sqi`'s dependency on PI is unchanged.
+
+---
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

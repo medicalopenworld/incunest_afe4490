@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.99 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.101 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.100"
+#define INCUNEST_AFE4490_VERSION "0.101"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -702,6 +702,12 @@ struct AFE4490Config {
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
     float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
+    float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%]
+    // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11):
+    // own band-pass (not an EMA subtraction) for the AC, AC and DC from the same 6 s sliding
+    // window (pi_window_s, fixed at compile time like hr2_buf_len — see _pi_update_sample()).
+    float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
+    float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
@@ -810,11 +816,19 @@ public:
     void setSpO2EmaMeanTauS(float tau_s);                      // EMA mean (DC) time constant; triggers recalc
     void setSpO2EmaVarTauS(float tau_s);                       // EMA variance (AC²) time constant; triggers recalc
     void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
-    void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+    // PI-based SQI thresholds [%], in peak-to-peak units (v0.101, the industry's PI): SQI ramps 0→1
+    // from lo to hi; above max_pct the PI is physiologically impossible (a DC transient, e.g. the
+    // probe coming off before probe_state notices) and SpO2 is withheld.
+    void setSpO2PiSqiThresholds(float lo_pct, float hi_pct, float max_pct = 20.0f);
     // R method in force (v0.100): 1 = RMS ratio, 2 = regression on derivatives (default). Both
     // run on every sample, so switching is immediate; anything else is rejected and logged.
     void setSpO2RMethod(uint8_t method);
     void setSpO2RCorrMin(float r);                              // R-METHOD-2 validity gate on r
+
+    // PI (Perfusion Index) algorithm setter — decoupled from SpO2 (v0.101); callable before or
+    // after begin(). Band-pass 0.5–15 Hz by default: the same floor as HR2/R-METHOD-2, but the
+    // HR3 ceiling, because PI is a magnitude and needs the harmonics (rationale §11).
+    void setPIFilter(float f_low_hz = 0.5f, float f_high_hz = 15.0f);
 
     // HR1 algorithm setters
     void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant; triggers recalc
@@ -1414,7 +1428,7 @@ private:
     //   count = sample count used directly for warmup (ir_ema/red_ema always updated
     //           together, so either's count works — no separate _spo2_sample_count needed).
     //           Naturally restarts warmup after a reset (see _spo2_update() in the .cpp).
-    //   PI    = sqrt(var) / mean × 100  [%]  (Perfusion Index = RMS_AC / DC)
+    //   PI is computed independently — see the PI state block below (v0.101, rationale §11).
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
     // R-METHOD-2 (v0.100): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red with the one-biquad band-pass
@@ -1440,6 +1454,43 @@ private:
     }
     void _spo2_warn_if_curve_mismatch() const;
     void _spo2_reset_state();                                   // EMAs, band-passes, regression
+
+    // ── PI (Perfusion Index) state ───────────────────────────────────────────
+    // Decoupled from SpO2 (v0.101, rationale §11): the old PI lived inside _spo2_update(),
+    // sharing _spo2_ch_ir_ema — the same EMA(mean, 2s)/EMA(var, 6s) pair R-METHOD-1 used for its
+    // AC/DC. That coupling made PI inherit asymptotic EMA settling (~3×6s = 18s to ~95%) it did
+    // not need and could not tune on its own. PI now has:
+    //   - its own band-pass (_pi_bpf, default 0.5–15 Hz — the HR floor as HR2/R-METHOD-2, the HR3
+    //     ceiling because a magnitude needs the harmonics; a private instance: "paths share
+    //     nothing", §5.3.1) for the AC waveform, instead of subtracting an EMA mean. A biquad's
+    //     steeper roll-off passes the slowest accepted heart
+    //     rate (30 BPM = 0.5 Hz) more faithfully than a first-order EMA at an equivalent nominal
+    //     corner, which starts tracking — and partially cancelling — the pulse itself near
+    //     bradycardia, exactly where PI most needs to stay accurate.
+    //   - AC and DC from the SAME true sliding window (not EMAs): two circular buffers at the
+    //     decimated rate, one of squared band-passed samples (AC²) and one of block means of the
+    //     raw OT (DC — the mean of the 10 raw samples behind each decimated one, so no aliasing),
+    //     each with an O(1) running sum. Numerator and denominator share the window, so PI
+    //     settles EXACTLY at pi_window_s (6 s) with no EMA, no seed and no lead/lag between the
+    //     two — Masimo's "λDC = average value of the signal" over the same span as the AC. (A 2 s
+    //     EMA measured within ±0.25 % of this window mean on HOSPNAV; the choice is structural,
+    //     not numerical — rationale §11.) No slow/async Task is needed (unlike HR2/HR3's
+    //     autocorrelation/FFT): the running-sum updates are O(1) — see _pi_update_sample().
+    //   - PI reported in PEAK-TO-PEAK units, the industry's definition (Nellcor Max−Min, Masimo
+    //     λmax−λmin; every published neonatal threshold): pp = 2√2·RMS of the band-passed signal,
+    //     exact for a sinusoid; the band-passed PPG measured 2.8–3.2 (rationale §11).
+    BiquadFilter _pi_bpf;
+    Decimator    _pi_decim;
+    static constexpr float pi_decim_target_rate_hz = 50.0f;   // Hz — same target-rate family as HR2/HR3 (§5.3.1)
+    static constexpr int   pi_buf_len = 300;   // 6 s at PI's decimated rate (50 Hz) — pi_window_s
+    float    _pi_ac_buf[pi_buf_len];  // circular buffer of decimated band-passed samples, SQUARED
+    float    _pi_dc_buf[pi_buf_len];  // circular buffer of raw-OT block means (one per decimated sample)
+    float    _pi_ac_sum;              // running sum of _pi_ac_buf — O(1) sliding-window update
+    float    _pi_dc_sum;              // running sum of _pi_dc_buf
+    float    _pi_dc_block_sum;        // raw OT accumulated over the current decimation block
+    int      _pi_buf_idx;             // shared by both buffers (same cadence)
+    uint32_t _pi_buf_count;
+    void _pi_update_sample(float ot_ir, ProbeState probe_state);
 
     // ── HR1 state ──
     float    _hr1_dc;
@@ -1550,6 +1601,7 @@ private:
     float    _spo2_max;
     float    _spo2_pi_sqi_lo;
     float    _spo2_pi_sqi_hi;
+    float    _spo2_pi_max;
     uint8_t  _spo2_r_method;
     float    _spo2_r_corr_min;
     float    _hr1_dc_tau_s;
@@ -1708,5 +1760,12 @@ public:
     float      test_last_ot_led2() const { return _last_valid_analog_state.ot_led2; }
     ProbeState test_probe_state()  const { return _current_data.probe_state; }
     float      test_pi()           const { return _current_data.pi; }
+
+    // PI (Perfusion Index) — decoupled from SpO2 (v0.101). No slow/async path, so
+    // _pi_update_sample() IS the production function; no separate "_for_test" wrapper needed.
+    void     test_feed_pi(float ot_ir, ProbeState probe_state) { _pi_update_sample(ot_ir, probe_state); }
+    uint32_t test_pi_buf_count() const { return _pi_buf_count; }
+    uint16_t test_pi_decim_factor()  const { return _pi_decim.factor; }
+    float    test_pi_decim_rate_hz() const { return _pi_decim.rate_hz; }
 #endif
 };

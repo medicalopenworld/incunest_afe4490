@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2)
-// Library version: v0.99 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.101 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -66,6 +66,12 @@ namespace {
     // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
     constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
     constexpr float    spo2_pi_sqi_hi      = 2.0f;     // % — PI above this → SQI = 1
+    // Both in PEAK-TO-PEAK units since v0.101 (the units Nellcor/Masimo quote them in; the library's
+    // PI was RMS-based until then, i.e. ÷2.8–3.2, so these gates fired ~3× too early — rationale §11).
+    // Upper bound: the industry's displayed range tops at 20 % (Masimo 0.02–20, Mindray 0.05–20,
+    // Nellcor 0.03–20). Above it the "PI" is a DC transient (probe coming off before probe_state
+    // notices, an RF step), not perfusion: SpO2 is withheld instead of reported with SQI = 1.
+    constexpr float    spo2_pi_max         = 20.0f;    // % — PI above this → SpO2 invalid, SQI = 0
     // R-METHOD-2 (v0.100, design rationale §9–§10). Band-pass = the pulse band HR2 uses, one
     // biquad: 0.3/0.7–4/8 Hz and 2 vs 4 poles measured equal for R on HOSPNAV (scatter 1.63 vs
     // 1.62 points), so no new filter type enters the library for it. r below spo2_r_corr_min
@@ -76,6 +82,23 @@ namespace {
     constexpr float    spo2_bp_f_low_hz      = 0.5f;    // Hz — 30 BPM, the HR floor (§8)
     constexpr float    spo2_bp_f_high_hz     = 5.0f;    // Hz — R does not depend on the cut (MS100 40–250 BPM)
     constexpr float    spo2_reg_eps          = 1e-30f;  // EMA(dx²)/EMA(dy²) at or below this: no slope yet
+
+    // ── PI (Perfusion Index) ─────────────────────────────────────────────────
+    // Decoupled from SpO2 (v0.101) — see the PI state block in the header and design rationale
+    // §11. Own private BiquadFilter instance ("paths share nothing", §5.3.1). Floor = the HR floor,
+    // as HR2/R-METHOD-2; ceiling = HR3's 15 Hz, NOT R-METHOD-2's 5 Hz: PI is a magnitude, so the
+    // harmonics count — measured on the MS100 at constant modulation, a 5 Hz ceiling read PI 25 %
+    // lower at 220 BPM than at 60 BPM (the 2nd harmonic leaves the band); 15 Hz removes the HR
+    // dependence, and the noise it admits was unmeasurable even in the lowest-PI decile of a
+    // neonatal capture. R keeps 5 Hz because there the same filter sits on both channels and cancels.
+    constexpr float    pi_bp_f_low_hz        = 0.5f;    // Hz — 30 BPM floor, same reasoning as spo2_bp_f_low_hz
+    constexpr float    pi_bp_f_high_hz       = 15.0f;   // Hz — 3rd harmonic of hr_max_bpm (13 Hz) with margin, as HR3
+    constexpr float    pi_window_s           = 6.0f;    // s — sliding-window length; see pi_buf_len in the header
+    // RMS → peak-to-peak, exact for a sinusoid. The band-passed PPG measured 2.79/2.92 on two
+    // neonates and 3.0–3.2 on the MS100, so this under-reads a per-beat Max−Min by 0–12 %; the
+    // alternative (per-beat peaks) needs a beat detector and is kept for PILAB (rationale §11).
+    constexpr float    pi_rms_to_pp          = 2.8284271f;   // 2·√2
+    constexpr float    pi_div_eps            = 1e-9f;   // A/A — division-safety guard only (mirrors spo2_div_eps)
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
     constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
@@ -370,6 +393,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_reg_sxy(0.0f), _spo2_reg_sxx(0.0f), _spo2_reg_syy(0.0f),
       _spo2_reg_alpha(0.0f), _spo2_reg_count(0),
       _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
+      _pi_bpf(), _pi_decim(),
+      _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_dc_block_sum(0.0f), _pi_buf_idx(0), _pi_buf_count(0),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
@@ -385,6 +410,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_max(spo2_max),
       _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
+      _spo2_pi_max(spo2_pi_max),
       _spo2_r_method(spo2_r_method_default),
       _spo2_r_corr_min(spo2_r_corr_min),
       _hr1_dc_tau_s(hr1_dc_tau_s),
@@ -410,9 +436,12 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
+    memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
+    memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
     _current_data = AFE4490Data{};
     _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
+    _pi_bpf.f_low      = pi_bp_f_low_hz;  _pi_bpf.f_high = pi_bp_f_high_hz;
     _hr3_lp.f_high     = 15.0f;   // low-pass only (v0.83); 4th order since v0.97
     _copy_spo2_r_id(_spo2_r_curve_id, spo2_r_curve_id_default);
     _copy_spo2_r_id(_spo2_r_curve_r_method_id, spo2_r_curve_r_method_id_default);
@@ -848,6 +877,13 @@ void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+void INCUNEST_AFE4490::setPIFilter(float f_low_hz, float f_high_hz) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _pi_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
+    _pi_bpf.reset();
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 void INCUNEST_AFE4490::setHR3Filter(float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _hr3_lp.init(f_high_hz, (float)_afe_sample_rate_hz);
@@ -927,10 +963,11 @@ void INCUNEST_AFE4490::setSpO2Range(float min_pct, float max_pct) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2PiSqiThresholds(float lo_pct, float hi_pct) {
+void INCUNEST_AFE4490::setSpO2PiSqiThresholds(float lo_pct, float hi_pct, float max_pct) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _spo2_pi_sqi_lo = lo_pct;
     _spo2_pi_sqi_hi = hi_pct;
+    _spo2_pi_max    = max_pct;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1122,6 +1159,9 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_max              = _spo2_max;
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
     cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
+    cfg.spo2_pi_max           = _spo2_pi_max;
+    cfg.pi_bp_f_low_hz        = _pi_bpf.f_low;
+    cfg.pi_bp_f_high_hz       = _pi_bpf.f_high;
     cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
     cfg.hr1_lp_cutoff_hz      = _hr1_lp_cutoff_hz;
     cfg.hr1_max_decay_tau_s   = _hr1_max_decay_tau_s;
@@ -1268,6 +1308,12 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr3_buf_idx = 0; _hr3_buf_count = 0;
     _hr3_decim.reset(); _hr3_update_counter = 0;
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
+    _pi_bpf.reset();
+    _pi_decim.reset();
+    _pi_buf_idx = 0; _pi_buf_count = 0;
+    _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_dc_block_sum = 0.0f;
+    memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
+    memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
     _hr2_computing = false;  _hr3_computing = false;
     _hr2_result = 0.0f; _hr2_result_sqi = 0.0f;
     _hr3_result = 0.0f; _hr3_result_sqi = 0.0f;
@@ -1827,6 +1873,9 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _spo2_bp_ir.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
     _spo2_bp_red.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
     _spo2_reg_alpha = 1.0f - expf(-1.0f / (_spo2_ema_var_tau_s * sample_rate_hz));
+    // PI (v0.101): own decimation chain (same target-rate family as HR2/HR3, §5.3.1), own band-pass.
+    _pi_decim.configure(sample_rate_hz, pi_decim_target_rate_hz);
+    _pi_bpf.init_bp(_pi_bpf.f_low, _pi_bpf.f_high, sample_rate_hz);
     // HGAC EMAs: var unused (only mean is read), so var_tau = mean_tau; warmup = 3·τ (fail-safe
     // via valid() → NaN-free: _hgac_track() skips checks until the EMA has matured after a reset).
     _hgac_ema_fast_led1.init(hgac_ema_fast_tau_s, hgac_ema_fast_tau_s, sample_rate_hz, 3.0f * hgac_ema_fast_tau_s);
@@ -2153,10 +2202,13 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // the raw ambient-corrected adc_code (led1_sub) used before this experiment.
     // HR1 runs fully in this task. HR2/HR3 fast paths run here; slow computation in Task B/C.
 #if INCUNEST_TIMING_STATS
+    // PI (v0.101): no dedicated TimingStat yet — see rationale §11 for the scope note.
+    _pi_update_sample(as.ot_led1, _rsqm_probe_state);
     { uint64_t _t = esp_timer_get_time(); _spo2_update(as.ot_led1, as.ot_led2, _rsqm_probe_state); _ts_spo2.update(esp_timer_get_time() - _t); }
     { uint64_t _t = esp_timer_get_time(); _hr1_update(as.ot_led1, _rsqm_probe_state);            _ts_hr1.update(esp_timer_get_time() - _t); }
     uint64_t _t_hr2 = esp_timer_get_time();
 #else
+    _pi_update_sample(as.ot_led1, _rsqm_probe_state);
     _spo2_update(as.ot_led1, as.ot_led2, _rsqm_probe_state);
     _hr1_update(as.ot_led1, _rsqm_probe_state);
 #endif
@@ -2315,7 +2367,6 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         // probe_state" needed): the state is already clean the instant probe_state returns
         // to APPLIED, so warmup restarts naturally via ir_ema.count below.
         _spo2_reset_state();
-        _current_data.pi          = NAN;
         _current_data.spo2        = NAN;
         _current_data.spo2_r      = NAN;
         _current_data.spo2_r_corr = NAN;
@@ -2326,15 +2377,12 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // DC + AC² power via EmaChannel (one per channel):
     //   mean += α_mean × (x − mean)   slow IIR low-pass, τ = spo2_ema_mean_tau_s (2.0 s) — the DC
     //   var  += α_var  × (d² − var)    EMA of (x − mean)², τ = spo2_ema_var_tau_s (6.0 s)
-    // The mean is the DC of both R methods and of PI; var is PI's AC² and R-METHOD-1's.
+    // The mean is the DC of both R methods; var is R-METHOD-1's AC². PI is computed independently
+    // by _pi_update_sample() since v0.101 (rationale §11) — it no longer reads this EMA.
     _spo2_ch_ir_ema.update(ot_ir);
     _spo2_ch_red_ema.update(ot_red);
     const float dc_ir  = _spo2_ch_ir_ema.mean;
     const float dc_red = _spo2_ch_red_ema.mean;
-
-    // Perfusion Index: RMS_AC / DC × 100  [%]  (always updated, independent of SpO2 warmup).
-    // A pure ratio, identical in OT or in raw counts. Guard is division-safety only.
-    _current_data.pi = (dc_ir > spo2_div_eps) ? (sqrtf(_spo2_ch_ir_ema.var) / dc_ir) * 100.0f : NAN;
 
     // R-METHOD-2 state advances on every applied sample whichever method is selected, so a
     // switch costs no warm-up. x, y: band-passed OT normalised by its DC; the regression runs
@@ -2391,7 +2439,16 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // R-METHOD-2's validity gate: a fit that does not describe the data gives no SpO2. R and r
     // stay visible so the reason is on record.
     const bool r_ok = (_spo2_r_method != 2) || (r >= _spo2_r_corr_min);
-    if (r_ok && spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
+    // PI is computed independently by _pi_update_sample() (v0.101, rationale §11) — NaN while its
+    // own 6 s window is still filling (shorter than SpO2's 18 s warmup, so this never actually
+    // binds in production: PI is already valid by the time this warmup gate above has passed).
+    // Checked explicitly rather than relied upon via fmaxf/fminf's NaN pass-through (which would
+    // read a not-yet-valid PI as SQI=1, the opposite of correct) — defensive for any caller that
+    // feeds SpO2 without PI, now that the two are independent functions. PI above spo2_pi_max is
+    // a DC transient, not perfusion: it used to map to SQI = 1 (output clamped, input not) and
+    // publish a plausible-looking SpO2 while the probe was coming off.
+    const bool pi_ok = !isnan(_current_data.pi) && _current_data.pi <= _spo2_pi_max;
+    if (r_ok && pi_ok && spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
         _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
         // PI < spo2_pi_sqi_lo → SQI = 0 (very weak signal). PI ≥ spo2_pi_sqi_hi → SQI = 1
@@ -2402,6 +2459,55 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
     }
+}
+
+// ── PI (Perfusion Index) algorithm — decoupled from SpO2 (v0.101, rationale §11) ─────────────
+// Fast path only: no slow/async computation needed, unlike HR2/HR3's O(N·lags)/FFT — the
+// sliding-window RMS update below is O(1) per decimated sample, cheap enough to commit
+// _current_data.pi directly here. probe_state gate lives here exactly as in
+// _hr2_update_sample()/_spo2_update(): while not applied, resets every sample (idempotent).
+void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        _pi_bpf.reset();
+        _pi_decim.reset();
+        _pi_buf_idx = 0; _pi_buf_count = 0;
+        _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_dc_block_sum = 0.0f;
+        memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
+        memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
+        _current_data.pi = NAN;
+        return;
+    }
+
+    // DC accumulates the RAW OT over the decimation block (its mean is one anti-aliased decimated
+    // DC sample); the AC comes from the band-pass. Denominator only, never subtracted — carries
+    // none of the bradycardia-tracking risk an AC-extraction EMA would (header, PI state block).
+    _pi_dc_block_sum += ot_ir;
+    float filtered = _pi_bpf.process(ot_ir);
+
+    if (!_pi_decim.step()) return;   // not yet a decimated sample; pi keeps its last value
+
+    // O(1) sliding windows, one cadence: add the incoming decimated sample, subtract the one
+    // falling out of the pi_window_s (6 s) window, for AC² and for DC alike. True boxcars, not
+    // EMAs — PI settles EXACTLY at pi_window_s (contrast EMA's ~3·τ to reach ~95%) and its
+    // numerator and denominator always span the same 6 s.
+    const float sq = filtered * filtered;
+    const float dc_block = _pi_dc_block_sum / (float)_pi_decim.factor;
+    _pi_dc_block_sum = 0.0f;
+    _pi_ac_sum += sq - _pi_ac_buf[_pi_buf_idx];
+    _pi_dc_sum += dc_block - _pi_dc_buf[_pi_buf_idx];
+    _pi_ac_buf[_pi_buf_idx] = sq;
+    _pi_dc_buf[_pi_buf_idx] = dc_block;
+    _pi_buf_idx = (_pi_buf_idx + 1) % pi_buf_len;
+    if (_pi_buf_count < (uint32_t)pi_buf_len) {
+        _pi_buf_count++;
+        _current_data.pi = NAN;   // window not full yet — no stale/partial estimate
+        return;
+    }
+
+    // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp): AC_pp / DC × 100 [%].
+    const float dc    = _pi_dc_sum / (float)pi_buf_len;
+    const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / (float)pi_buf_len);
+    _current_data.pi = (dc > pi_div_eps) ? (ac_pp / dc) * 100.0f : NAN;
 }
 
 // ── HR algorithm ──────────────────────────────────────────────────────────────
