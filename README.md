@@ -1,6 +1,6 @@
 # incunest_afe4490
 
-AFE4490 PPG/SpO2 driver for ESP32-S3 (Arduino-ESP32 or ESP-IDF, FreeRTOS) — [Medical Open World](http://medicalopenworld.org)
+AFE4490 PPG/SpO2/PI driver for ESP32-S3 (Arduino-ESP32 or ESP-IDF, FreeRTOS) — [Medical Open World](http://medicalopenworld.org)
 
 Part of the [IncuNest](https://github.com/medicalopenworld/IncuNest) neonatal incubator project.
 
