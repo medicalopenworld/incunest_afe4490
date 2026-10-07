@@ -2537,8 +2537,10 @@ values (max 5.0·10⁻⁵, i.e. the rounding); the one flagged, `SUBJ01_RESTING`
 header `$CFG` with RF1 = 100 kΩ while its `FW_RF1_OHM` column says 50 kΩ on every row — the HGAC
 had moved before recording started and that capture predates the `afe:` records.
 
-**`--input ot` (runner v0.25):** the algorithms — SpO2, HR1, HR2, HR3 and the R candidates — are fed
-the **recorded** OT and the **recorded** ProbeState through `test_feed_spo2`/`test_feed_hr1..3`, in
+**`--input ot` (runner v0.25):** the algorithms — PI (runner v0.26, 2026-10-07: it was missing, so
+every OT replay printed PI = 0 and SpO2_SQI = 0 with a valid SpO2), SpO2, HR1, HR2, HR3 and the R
+candidates — are fed the **recorded** OT and the **recorded** ProbeState through
+`test_feed_pi`/`test_feed_spo2`/`test_feed_hr1..3`, in
 the production order, bypassing the analog reconstruction, RSQM and HGAC: for algorithm
 experiments whose input must be exactly what the board computed. Of the `afe:` records only a PRF
 change is applied. A row without a recorded OT is fed as not applied (the algorithms reset). It
