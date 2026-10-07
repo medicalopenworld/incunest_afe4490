@@ -1183,6 +1183,48 @@ SD 0.0006 (max 0.006, the window edge now moving in 100 ms steps), r SD 0.0002, 
 comes one block after the window is full: 6.1 s instead of 6.02 s. Host suites 10/10; the lab
 mirror (`SpO2TestCalc`, lab v1.87) agrees with the library to R 8e-6, PI 5e-3, identical validity.
 
+### What an RF change does to the window — measured (2026-10-08)
+
+**The question (Alex).** The block-cadence argument above said that "after an HGAC RF step the 2 s DC
+EMA contaminates R for several seconds". OT_LED was designed to be gain-invariant, so why would an RF
+step show at all? Measured rather than argued, on the MS100 simulator (board 82:5C, lib v0.103,
+HGAC off, `$SET tiagain1/tiagain2` 50K → 25K → 50K → 10K → 50K per colour, 30 s per step; the
+scripts `rf_step_bench.py` / `rf_step_analyze.py` live in the session scratchpad, the numbers here).
+
+**OT is gain-invariant up to the real RF tolerance.** The level step of the stepped colour's OT is
+−0.9 / +0.8 % (IR) and −1.0 / +0.9 % (RED) between 50K and 25K, −4.4 / +4.5 % (IR) and −4.5 / +4.7 %
+(RED) between 50K and 10K; the other colour moves < 0.2 %. That is the ±7 % feedback-resistor
+tolerance of the datasheet (§2, `reference_rf_tolerance_ot_dc_shift`), tap by tap: one HGAC move is
+one tap, so the operational case is ≈ 1 % on this chip (other tap pairs may differ, up to the
+datasheet bound).
+
+**The mechanism is the band-pass, not the DC EMA — and the duration is the window.** The
+switched-RC settling freeze (~20 ms) holds the input flat while the front-end settles, but cannot
+remove the level step that follows it. The 0.5–5 Hz band-pass turns that step into a ~1 s transient
+whose amplitude is comparable to the pulsatile AC (PI 4.7 % on the simulator); its first differences
+weigh in Sxx/Sxy for exactly as long as their blocks stay in the 6 s window and then drop out at once:
+at 8 s after the step nothing is left (R within 0.007 of the baseline). The 2 s DC EMA only
+normalises x and y and plays no part in the duration. The sentence above was therefore wrong about
+the mechanism; the "several seconds" is the window length.
+
+**Magnitude (MS100, R ≈ 0.61, SpO2 ≈ 100, Medle curve slope 39 points per unit R):**
+
+| Step | OT step | ΔR (6 s) | Δr | ΔSpO2 (6 s) | ΔPI |
+|---|---|---|---|---|---|
+| one tap (50K ↔ 25K) | ≈ 1 % | 0.005 – 0.013 | −0.003 … −0.009 | −0.2 … −0.5 pt (clamp at 100 hides the other sign) | within noise (±0.2 %) |
+| two taps (50K ↔ 10K) | ≈ 4.5 % | 0.03 – 0.09 | −0.05 … −0.15 | −2.2 pt, or invalid for 6 s (curve > 103, `spo2_clamp_margin`) | +0.6 … +0.75 % |
+
+The effect scales with the step-to-AC ratio: with a 1 % PI (a neonate) the same one-tap step is
+~4.7× larger relative to the pulse, ΔR ≈ 0.05 ≈ 2 points for 6 s. A synthetic step through the lab
+mirror (`rf_step_model.py`, PI 2 %) reproduces the shape: 1 % → ΔR 0.04, 7 % → 0.35, 6 s flat then
+gone.
+
+**Not mitigated yet.** Two candidates, Alex's decision pending: (a) exclude from the window the
+~1 s of blocks that follow an RF change — the 100 ms block granularity chosen above exists for
+exactly this; (b) rescale the band-pass and DC state by the step factor in `_hgac_change_rf()`
+(exact for RF, §2 / the O8.3 compensation). PI's jump after an HGAC move (§11, pending) has the same
+cause.
+
 ---
 
 ## Appendix — source rationale (to distill at consolidation)
