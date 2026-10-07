@@ -966,7 +966,8 @@ mentioning "replace EMA-6s with a 6s window of memory" as an example. Two shapes
   the decimated version below, since PI's AC envelope changes on a timescale of seconds, far
   slower than the sample rate.
 - **A decimated circular buffer with an O(1) running sum of squares** (chosen): the library
-  already has exactly this shape for HR2/HR3 — band-pass → `Decimator` (target 50 Hz, §5.3.1) →
+  already has exactly this shape for HR2/HR3 — band-pass → `Decimator` (target 50 Hz, §5.3.1;
+  since v0.103 a 100 ms `WindowBlock` summing AC² at the full rate — §12 below) →
   circular buffer — the only difference being that HR2/HR3 need a slow/async Task (Task B/C) to
   run their O(N·lags) autocorrelation or FFT on that buffer, whereas PI's "AC RMS" is just
   `sqrt(sum_of_squares / N)`: updating the running sum when one decimated sample enters and
@@ -1093,7 +1094,8 @@ than a constant — the age-group profile planned for later (adult / neonate par
 place to revisit it.
 
 **Implementation choices (and the alternatives rejected).**
-- *Block sums at the 50 Hz cadence, products at full rate* (chosen; the shape of PI's DC in §11):
+- *Block sums at the 50 Hz cadence, products at full rate* (chosen; the shape of PI's DC in §11;
+  the cadence itself was revisited the next day — see "Block cadence" below):
   dx·dy, dx², dy² and (x − mean)² are formed at the AFE rate and summed over each decimation block of
   a new `_spo2_decim` chain; each block sum enters a circular buffer with an O(1) running total. A sum
   of block sums is the full-rate sum — nothing is lost; the window edge moves in 20 ms steps and the
@@ -1105,7 +1107,8 @@ place to revisit it.
 - *Drift guard:* float32 running add/subtract sums accumulate rounding; the totals are rebuilt from
   the buffers every time the index wraps (5·N adds once per window length — negligible).
 - *Buffers sized for the maximum* (`alg_window_buf_len_max` = 600 = 12 s at 50 Hz; seven buffers ≈
-  17 KB static): no allocation, no re-sizing; the live length is `round(window_s · rate_hz)`, capped.
+  17 KB static — 120 and ≈ 3.4 KB since v0.103): no allocation, no re-sizing; the live length is
+  `round(window_s · rate_hz)`, capped.
 - *A length change empties the window* (NaN for one length) rather than keeping the newest samples:
   simpler, and a half-filled window of another length is not a valid estimate.
 - *Not done, deliberately:* a Hann/triangular window (same reason as §11: tapering the boxcar edge
@@ -1119,6 +1122,66 @@ place to revisit it.
 window one — R and r still come out, noisier; documented, not blocked (the age profile may couple
 window and HR range later). **Advantage only the window has, for later:** blocks flagged as artefact
 (motion, RF settling) can be *excluded* from the sums instead of frozen or waited out.
+
+### Block cadence: 50 Hz → 100 ms blocks (v0.103, 2026-10-08)
+
+**The question (Alex).** Why do the SpO2 and PI windows use 50 Hz and not another cadence?
+
+**The honest answer: 50 Hz was inherited, not derived.** PI (v0.101) copied the block structure of
+HR2/HR3's `Decimator`s, and the SpO2 window (v0.102) copied PI's. In HR2/HR3 the 50 Hz has real
+signal-processing reasons (spec §5.3.1: Nyquist of the 15 Hz low-pass, FFT resolution, the GCD of
+the PRF grid) because the decimator sits in the signal path and discards samples. In the windows
+nothing is discarded: the products are summed at the full rate and the clock only decides how often
+a block sum enters the buffer. None of §5.3.1's arguments apply, yet the spec and the header cited
+it — and using the same `Decimator` at the same rate suggested a functional relation between the
+windows and the HR chains that never existed. The cadence had to be chosen on its own merits and
+named for what it is.
+
+**What the cadence really determines**, and what each criterion says:
+
+- *Divisibility of the PRF grid* — the block is a whole number of samples, so for the window to mean
+  exact seconds at every PRF of the validated grid {500, 800, 1000, 1250, 1600} the block rate must
+  divide their GCD, 50 Hz: {50, 25, 10, 5, 2, 1} Hz. A ceiling, not a value.
+- *RAM* — buffers = window max × rate: 17 KB at 50 Hz, 8.4 KB at 25 Hz, 3.4 KB at 10 Hz. 50 Hz is the
+  most expensive member of the allowed set; none of them is a problem on the ESP32-S3.
+- *Output refresh and window-length resolution* — 20 ms vs 100 ms on a 6 s window: indistinguishable
+  clinically and in our measurements (the consumer drains every 20 ms, SpO2 moves on seconds).
+- *Granularity of a future block exclusion* — the only criterion that speaks about what the window
+  will do with its blocks, so it is the one that fixes the value (Alex, 2026-10-08). But applied as
+  "the finer the better" it lands back on 50 Hz, the ceiling. The usable form is **the coarsest
+  block whose edge loss on an excision is negligible**: excising an artefact discards at most two
+  partial blocks of good signal, 2·block/window.
+
+| Block rate | Block | Loss, 6 s window | Loss, 2 s window | RAM (7 buffers) |
+|---|---|---|---|---|
+| 50 Hz | 20 ms | 0.7 % | 2 % | 17 KB |
+| 25 Hz | 40 ms | 1.3 % | 4 % | 8.4 KB |
+| **10 Hz** | **100 ms** | **3.3 %** | **10 %** | **3.4 KB** |
+| 5 Hz | 200 ms | 6.7 % | 20 % | 1.7 KB |
+
+Two physical anchors: the shortest cardiac cycle of interest is 250 ms (240 BPM neonatal), and the
+block should stay clearly below it so an exclusion is not quantised to beats — 100 ms does, 200 ms
+does not; and real exclusions will last seconds, not tens of ms (after an HGAC RF step the 2 s DC
+EMA contaminates R for several seconds; a motion artefact lasts 0.3–2 s), so 100 ms granularity is
+invisible and 20 ms is precision nothing will use. **Chosen: 100 ms (10 Hz), the same constant for
+SpO2 and PI** (`alg_window_block_s`). 25 Hz was the alternative if margin on the 2 s minimum window
+mattered; below 10 Hz the sub-beat scale is lost.
+
+**Consequence for PI.** PI's AC² buffer held ONE band-passed sample per 20 ms block — a true 50 Hz
+decimation of the 0.5–15 Hz band, acceptable at 50 Hz (Nyquist 25 Hz) but aliasing at 10 Hz. It now
+sums AC² at the full rate over each block, like SpO2's products: the exact windowed RMS, same
+expectation, lower variance. The DC buffer went from block means to block sums for symmetry (both
+sums divide by the samples in the window).
+
+**Naming.** `Decimator _spo2_decim/_pi_decim` and `*_decim_target_rate_hz` are gone; a `WindowBlock`
+struct (configured by DURATION, `len` samples per block) replaces them, so the word "decimation" no
+longer appears near the windows and §5.3.1 carries a scope note.
+
+**Measured (SUBJ09 HOSPNAV replay, v0.102 vs v0.103, 29 946 common samples):** R mean difference 0,
+SD 0.0006 (max 0.006, the window edge now moving in 100 ms steps), r SD 0.0002, SpO2 SD 0.02 points
+(max 0.19), PI SD 0.02 % (max 0.31 %), median 8 s SD of R 0.00510 → 0.00506. The first estimate
+comes one block after the window is full: 6.1 s instead of 6.02 s. Host suites 10/10; the lab
+mirror (`SpO2TestCalc`, lab v1.87) agrees with the library to R 8e-6, PI 5e-3, identical validity.
 
 ---
 

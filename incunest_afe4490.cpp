@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.102 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.103 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -393,15 +393,16 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_ch_red_ema{},
       _spo2_bp_ir(), _spo2_bp_red(),
       _spo2_reg_x_prev(0.0f), _spo2_reg_y_prev(0.0f), _spo2_reg_count(0),
-      _spo2_decim(),
+      _spo2_block(),
       _spo2_blk_sxy(0.0f), _spo2_blk_sxx(0.0f), _spo2_blk_syy(0.0f),
       _spo2_blk_var_ir(0.0f), _spo2_blk_var_red(0.0f),
       _spo2_sxy_sum(0.0f), _spo2_sxx_sum(0.0f), _spo2_syy_sum(0.0f),
       _spo2_var_ir_sum(0.0f), _spo2_var_red_sum(0.0f),
       _spo2_buf_n(1), _spo2_buf_idx(0), _spo2_buf_count(0),
       _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
-      _pi_bpf(), _pi_decim(),
-      _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_dc_block_sum(0.0f), _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0),
+      _pi_bpf(), _pi_block(),
+      _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_ac_block_sum(0.0f), _pi_dc_block_sum(0.0f),
+      _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
@@ -1878,14 +1879,15 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_mean_tau_s, sample_rate_hz);
     _spo2_bp_ir.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
     _spo2_bp_red.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
-    // Sliding windows (v0.102): block cadence from each path's own decimation chain; the live
-    // length is the window in SECONDS at the rate really achieved, capped by the buffer. A length
-    // change (window setter or PRF change) empties the window: its content would mix two lengths.
-    _spo2_decim.configure(sample_rate_hz, spo2_decim_target_rate_hz);
-    _pi_decim.configure(sample_rate_hz, pi_decim_target_rate_hz);
-    const int spo2_n = _window_len(_spo2_window_s, _spo2_decim.rate_hz);
+    // Sliding windows (v0.102): blocks of alg_window_block_s (100 ms, v0.103) of the full-rate
+    // products; the live length is the window in SECONDS at the block rate really achieved,
+    // capped by the buffer. A length change (window setter or PRF change) empties the window:
+    // its content would mix two lengths.
+    _spo2_block.configure(sample_rate_hz, alg_window_block_s);
+    _pi_block.configure(sample_rate_hz, alg_window_block_s);
+    const int spo2_n = _window_len(_spo2_window_s, _spo2_block.rate_hz);
     if (spo2_n != _spo2_buf_n) { _spo2_buf_n = spo2_n; _spo2_window_reset(); }
-    const int pi_n = _window_len(_pi_window_s, _pi_decim.rate_hz);
+    const int pi_n = _window_len(_pi_window_s, _pi_block.rate_hz);
     if (pi_n != _pi_buf_n) { _pi_buf_n = pi_n; _pi_window_reset(); }
     _pi_bpf.init_bp(_pi_bpf.f_low, _pi_bpf.f_high, sample_rate_hz);
     // HGAC EMAs: var unused (only mean is read), so var_tau = mean_tau; warmup = 3·τ (fail-safe
@@ -2363,8 +2365,8 @@ void INCUNEST_AFE4490::_emit_tasks() {
 // sentinel like -1.0f) fails safe: any consumer that forgets to check sqi and instead
 // compares/averages a NAN value gets a comparison that is always false / a propagated NAN,
 // rather than a plausible-looking-but-wrong number that could trigger a false alarm.
-// Window length in decimated samples for a window in seconds at the rate really achieved,
-// capped by the buffer (alg_window_s_max at 50 Hz; a chain running faster than 50 Hz because the
+// Window length in blocks for a window in seconds at the block rate really achieved, capped by
+// the buffer (alg_window_s_max at 10 Hz; a block clock running faster than 10 Hz because the
 // PRF is not a multiple of it would otherwise overflow — then the longest window that fits).
 int INCUNEST_AFE4490::_window_len(float window_s, float rate_hz) {
     long n = lroundf(window_s * rate_hz);
@@ -2374,7 +2376,7 @@ int INCUNEST_AFE4490::_window_len(float window_s, float rate_hz) {
 }
 
 void INCUNEST_AFE4490::_spo2_window_reset() {
-    _spo2_decim.reset();
+    _spo2_block.reset();
     _spo2_blk_sxy = 0.0f; _spo2_blk_sxx = 0.0f; _spo2_blk_syy = 0.0f;
     _spo2_blk_var_ir = 0.0f; _spo2_blk_var_red = 0.0f;
     _spo2_sxy_sum = 0.0f; _spo2_sxx_sum = 0.0f; _spo2_syy_sum = 0.0f;
@@ -2421,7 +2423,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // Both methods' state advances on every applied sample whichever method is selected, so a
     // switch costs no warm-up. Full rate: R-METHOD-1's (x − mean)² per channel; R-METHOD-2's x, y
     // (band-passed OT normalised by its DC), their first differences and the three products. All
-    // five are summed over the current decimation block (v0.102, header SpO2 state block).
+    // five are summed over the current block (v0.102, header SpO2 state block).
     {
         const float d_ir = ot_ir - dc_ir, d_red = ot_red - dc_red;
         _spo2_blk_var_ir  += d_ir  * d_ir;
@@ -2438,11 +2440,11 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _spo2_reg_count++;
     }
 
-    // Window update at the decimated cadence: the block sums enter the circular buffers and the
-    // O(1) running totals; between decimated samples every output keeps its last value (as PI) —
+    // Window update at the block cadence: the block sums enter the circular buffers and the
+    // O(1) running totals; between blocks every output keeps its last value (as PI) —
     // except while the window is still filling, where "last value" must be NaN, never a stale or
     // constructed 0 (output contract: sqi == 0 ⇒ spo2, R, r are NaN).
-    if (!_spo2_decim.step()) {
+    if (!_spo2_block.step()) {
         if (_spo2_buf_count < (uint32_t)_spo2_buf_n) {
             _current_data.spo2        = NAN;
             _current_data.spo2_r      = NAN;
@@ -2465,7 +2467,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     _spo2_blk_var_ir = 0.0f; _spo2_blk_var_red = 0.0f;
     if (++_spo2_buf_idx >= _spo2_buf_n) {
         // Wrap: rebuild the totals from the buffers so float32 add/subtract drift never
-        // accumulates (5·n adds once per window length — negligible at the 50 Hz cadence).
+        // accumulates (5·n adds once per window length — negligible at the block cadence).
         _spo2_buf_idx = 0;
         float sxy = 0.0f, sxx = 0.0f, syy = 0.0f, vir = 0.0f, vred = 0.0f;
         for (int i = 0; i < _spo2_buf_n; i++) {
@@ -2540,13 +2542,13 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 
 // ── PI (Perfusion Index) algorithm — decoupled from SpO2 (v0.101, rationale §11) ─────────────
 // Fast path only: no slow/async computation needed, unlike HR2/HR3's O(N·lags)/FFT — the
-// sliding-window RMS update below is O(1) per decimated sample, cheap enough to commit
+// sliding-window RMS update below is O(1) per block, cheap enough to commit
 // _current_data.pi directly here. probe_state gate lives here exactly as in
 // _hr2_update_sample()/_spo2_update(): while not applied, resets every sample (idempotent).
 void INCUNEST_AFE4490::_pi_window_reset() {
-    _pi_decim.reset();
+    _pi_block.reset();
     _pi_buf_idx = 0; _pi_buf_count = 0;
-    _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_dc_block_sum = 0.0f;
+    _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_ac_block_sum = 0.0f; _pi_dc_block_sum = 0.0f;
     memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
     memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
 }
@@ -2559,27 +2561,30 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
         return;
     }
 
-    // DC accumulates the RAW OT over the decimation block (its mean is one anti-aliased decimated
-    // DC sample); the AC comes from the band-pass. Denominator only, never subtracted — carries
-    // none of the bradycardia-tracking risk an AC-extraction EMA would (header, PI state block).
+    // Both sums at the full rate over the current block (v0.103): the raw OT for the DC and the
+    // squared band-passed sample for the AC. DC is a denominator only, never subtracted — it
+    // carries none of the bradycardia-tracking risk an AC-extraction EMA would (header, PI
+    // state block). Until v0.102 the AC took ONE band-passed sample per 20 ms block (a true
+    // 50 Hz decimation); at 100 ms that would alias the 0.5–15 Hz band, and the full-rate sum
+    // is the exact RMS anyway.
     _pi_dc_block_sum += ot_ir;
-    float filtered = _pi_bpf.process(ot_ir);
+    const float filtered = _pi_bpf.process(ot_ir);
+    _pi_ac_block_sum += filtered * filtered;
 
-    if (!_pi_decim.step()) {         // not yet a decimated sample: pi keeps its last value —
+    if (!_pi_block.step()) {         // block not complete: pi keeps its last value —
         if (_pi_buf_count < (uint32_t)_pi_buf_n) _current_data.pi = NAN;   // which is NaN while filling
         return;
     }
 
-    // O(1) sliding windows, one cadence: add the incoming decimated sample, subtract the one
-    // falling out of the pi_window_s window, for AC² and for DC alike. True boxcars, not
-    // EMAs — PI settles EXACTLY at pi_window_s (contrast EMA's ~3·τ to reach ~95%) and its
-    // numerator and denominator always span the same seconds.
-    const float sq = filtered * filtered;
-    const float dc_block = _pi_dc_block_sum / (float)_pi_decim.factor;
-    _pi_dc_block_sum = 0.0f;
-    _pi_ac_sum += sq - _pi_ac_buf[_pi_buf_idx];
+    // O(1) sliding windows, one cadence: add the incoming block sum, subtract the one falling
+    // out of the pi_window_s window, for AC² and for DC alike. True boxcars, not EMAs — PI
+    // settles EXACTLY at pi_window_s (contrast EMA's ~3·τ to reach ~95%) and its numerator and
+    // denominator always span the same samples.
+    const float ac_block = _pi_ac_block_sum, dc_block = _pi_dc_block_sum;
+    _pi_ac_block_sum = 0.0f; _pi_dc_block_sum = 0.0f;
+    _pi_ac_sum += ac_block - _pi_ac_buf[_pi_buf_idx];
     _pi_dc_sum += dc_block - _pi_dc_buf[_pi_buf_idx];
-    _pi_ac_buf[_pi_buf_idx] = sq;
+    _pi_ac_buf[_pi_buf_idx] = ac_block;
     _pi_dc_buf[_pi_buf_idx] = dc_block;
     if (++_pi_buf_idx >= _pi_buf_n) {
         // Wrap: rebuild the totals from the buffers (float32 drift guard, as the SpO2 window).
@@ -2595,8 +2600,10 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     }
 
     // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp): AC_pp / DC × 100 [%].
-    const float dc    = _pi_dc_sum / (float)_pi_buf_n;
-    const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / (float)_pi_buf_n);
+    // Both sums span _pi_buf_n blocks of _pi_block.len full-rate samples.
+    const float n_raw = (float)_pi_buf_n * (float)_pi_block.len;
+    const float dc    = _pi_dc_sum / n_raw;
+    const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / n_raw);
     _current_data.pi = (dc > pi_div_eps) ? (ac_pp / dc) * 100.0f : NAN;
 }
 

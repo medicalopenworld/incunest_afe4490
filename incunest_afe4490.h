@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.102"
+#define INCUNEST_AFE4490_VERSION "0.103"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1041,6 +1041,30 @@ private:
         }
     };
 
+    // Block clock of the sliding windows (SpO2, PI — v0.103). NOT a decimator: nothing is
+    // discarded. Every full-rate product is accumulated into the current block, and every
+    // alg_window_block_s seconds the block sum enters its circular buffer. The block length is
+    // a DURATION, so the window buffers keep meaning seconds whatever the AFE rate does; len is
+    // whole samples, exact for every PRF of the validated grid (all multiples of 10 Hz, §7.4).
+    struct WindowBlock {
+        uint16_t len     = 1;      // full-rate samples per block
+        float    rate_hz = 0.0f;   // block rate ACTUALLY achieved (in_rate / len)
+        uint32_t phase   = 0;      // samples accumulated into the current block
+        void configure(float in_rate_hz, float block_s) {
+            long n  = lroundf(in_rate_hz * block_s);
+            len     = (uint16_t)(n < 1 ? 1 : n);
+            rate_hz = in_rate_hz / (float)len;
+            if (phase >= len) phase = 0;
+        }
+        void reset() { phase = 0; }
+        // true when the current block is complete on this call.
+        bool step() {
+            if (++phase < len) return false;
+            phase = 0;
+            return true;
+        }
+    };
+
     // EMA (Exponential Moving Average) estimator for one signal channel (mean + variance).
     // EMA low-pass: y += α·(x − y)  ≡  y = (1−α)·y + α·x   (α small = slow, α→1 = fast)
     // Configured by time constants τ (seconds): α = 1 − exp(−1/(τ·fs))
@@ -1431,14 +1455,22 @@ private:
     EmaChannel _spo2_ch_ir_ema;
     EmaChannel _spo2_ch_red_ema;
     // Averaging windows (v0.102): runtime length in [alg_window_s_min, alg_window_s_max] for SpO2
-    // and for PI independently; the buffers are sized for the maximum at the 50 Hz block cadence.
+    // and for PI independently; the buffers are sized for the maximum at the block cadence.
     // 2 s keeps the neonatal "short window + alarm delay" configuration reachable (McClure 2016,
     // rationale §4.5); 12 s is the longest anyone in the evidence base uses outside oxygen-target
-    // trials (16 s). RAM: 7 buffers × 600 × 4 B ≈ 17 KB.
+    // trials (16 s). RAM: 7 buffers × 120 × 4 B ≈ 3.4 KB.
     static constexpr float alg_window_s_min = 2.0f;
     static constexpr float alg_window_s_max = 12.0f;
-    static constexpr int   alg_window_buf_len_max = 600;   // 12 s at 50 Hz
-    static int _window_len(float window_s, float rate_hz);  // decimated samples, capped by the buffer
+    // Block cadence of both windows (v0.103, rationale §12): 100 ms. The products are formed at
+    // the full AFE rate; the block only sets how often the window edge moves and the outputs
+    // refresh, the buffer RAM and — the criterion that fixed it — the granularity at which a
+    // block flagged as artefact could be excluded from the sums: 100 ms loses ≤ 3.3 % of a 6 s
+    // window per excision edge and stays well under the shortest cardiac cycle of interest
+    // (250 ms at 240 BPM). Until v0.102 it was 20 ms (50 Hz), inherited from HR2/HR3's
+    // decimation chains, with which these windows share nothing (§5.3.1 does not apply here).
+    static constexpr float alg_window_block_s = 0.1f;
+    static constexpr int   alg_window_buf_len_max = 120;   // 12 s / 0.1 s
+    static int _window_len(float window_s, float rate_hz);  // blocks, capped by the buffer
     // R-METHOD-2 (v0.100): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red with the one-biquad band-pass
     // spo2_bp_f_low_hz–spo2_bp_f_high_hz and the EmaChannel means as DC; then, on the first
     // differences dx, dy: R = Σ(dx·dy)/Σ(dx²), r = Σ(dx·dy)/√(Σ(dx²)·Σ(dy²)) over the SpO2 window.
@@ -1447,10 +1479,10 @@ private:
     // R-METHOD-1's red RMS more than its IR RMS. Design rationale §9–§10.
     //
     // Averaging (v0.102, rationale §12): the products dx·dy, dx², dy² and R-METHOD-1's (x − mean)²
-    // are formed at the full AFE rate and summed over each decimation block (_spo2_decim, target
-    // 50 Hz, the HR2/HR3/PI family — §5.3.1); every block sum enters a circular buffer with an O(1)
-    // running total over the newest spo2_window_s seconds. A sum of block sums IS the full-rate
-    // sum, so nothing is decimated away: only the window edge moves in 20 ms steps. Replaces the
+    // are formed at the full AFE rate and summed over each block of alg_window_block_s (_spo2_block,
+    // 100 ms since v0.103); every block sum enters a circular buffer with an O(1) running total
+    // over the newest spo2_window_s seconds. A sum of block sums IS the full-rate sum, so nothing
+    // is decimated away: only the window edge moves in 100 ms steps. Replaces the
     // EMAs with τ = 6 s, which were equivalent to a 12 s window in noise and delay and needed 3·τ
     // = 18 s to be considered settled; a window settles exactly when full. Measured equal in
     // accuracy against the HOSPNAV reference (rationale §12). The running totals are rebuilt from
@@ -1459,13 +1491,12 @@ private:
     BiquadFilter _spo2_bp_red;
     float    _spo2_reg_x_prev, _spo2_reg_y_prev;
     uint32_t _spo2_reg_count;                              // samples since reset (0 → no difference yet)
-    Decimator _spo2_decim;
-    static constexpr float spo2_decim_target_rate_hz = 50.0f;   // Hz — block cadence of the windows (§5.3.1)
-    // Block accumulators (full rate, cleared every decimated sample):
+    WindowBlock _spo2_block;                               // alg_window_block_s clock of this window
+    // Block accumulators (full rate, cleared every block):
     float    _spo2_blk_sxy, _spo2_blk_sxx, _spo2_blk_syy;   // R-METHOD-2
     float    _spo2_blk_var_ir, _spo2_blk_var_red;           // R-METHOD-1: (x − mean)² per channel
-    // Circular buffers of block sums, sized for alg_window_s_max at the decimated rate; the live
-    // length is _spo2_buf_n = round(spo2_window_s · _spo2_decim.rate_hz).
+    // Circular buffers of block sums, sized for alg_window_s_max at the block rate; the live
+    // length is _spo2_buf_n = round(spo2_window_s · _spo2_block.rate_hz).
     float    _spo2_sxy_buf[alg_window_buf_len_max];
     float    _spo2_sxx_buf[alg_window_buf_len_max];
     float    _spo2_syy_buf[alg_window_buf_len_max];
@@ -1499,10 +1530,13 @@ private:
     //     rate (30 BPM = 0.5 Hz) more faithfully than a first-order EMA at an equivalent nominal
     //     corner, which starts tracking — and partially cancelling — the pulse itself near
     //     bradycardia, exactly where PI most needs to stay accurate.
-    //   - AC and DC from the SAME true sliding window (not EMAs): two circular buffers at the
-    //     decimated rate, one of squared band-passed samples (AC²) and one of block means of the
-    //     raw OT (DC — the mean of the 10 raw samples behind each decimated one, so no aliasing),
-    //     each with an O(1) running sum. Numerator and denominator share the window, so PI
+    //   - AC and DC from the SAME true sliding window (not EMAs): two circular buffers of block
+    //     sums at the alg_window_block_s cadence (100 ms, v0.103) — one of the squared band-passed
+    //     samples (AC²) and one of the raw OT (DC), both accumulated at the full AFE rate, so a
+    //     sum of block sums is the full-rate sum (until v0.102 the AC² buffer held ONE band-passed
+    //     sample per 20 ms block — a true 50 Hz decimation of the 0.5–15 Hz band; at 100 ms that
+    //     would alias, hence the block sum) — each with an O(1) running sum. Numerator and
+    //     denominator share the window, so PI
     //     settles EXACTLY at pi_window_s (default 6 s; runtime 2–12 s since v0.102, independent of
     //     the SpO2 window) with no EMA, no seed and no lead/lag between the
     //     two — Masimo's "λDC = average value of the signal" over the same span as the AC. (A 2 s
@@ -1513,14 +1547,14 @@ private:
     //     λmax−λmin; every published neonatal threshold): pp = 2√2·RMS of the band-passed signal,
     //     exact for a sinusoid; the band-passed PPG measured 2.8–3.2 (rationale §11).
     BiquadFilter _pi_bpf;
-    Decimator    _pi_decim;
-    static constexpr float pi_decim_target_rate_hz = 50.0f;   // Hz — same target-rate family as HR2/HR3 (§5.3.1)
-    float    _pi_ac_buf[alg_window_buf_len_max];  // circular buffer of decimated band-passed samples, SQUARED
-    float    _pi_dc_buf[alg_window_buf_len_max];  // circular buffer of raw-OT block means (one per decimated sample)
+    WindowBlock  _pi_block;           // alg_window_block_s clock of this window (v0.103)
+    float    _pi_ac_buf[alg_window_buf_len_max];  // circular buffer of block sums of the band-passed samples, SQUARED
+    float    _pi_dc_buf[alg_window_buf_len_max];  // circular buffer of block sums of the raw OT
     float    _pi_ac_sum;              // running sum of _pi_ac_buf — O(1) sliding-window update
     float    _pi_dc_sum;              // running sum of _pi_dc_buf
-    float    _pi_dc_block_sum;        // raw OT accumulated over the current decimation block
-    int      _pi_buf_n;               // live window length [decimated samples] = round(pi_window_s · rate)
+    float    _pi_ac_block_sum;        // AC² accumulated over the current block (full rate)
+    float    _pi_dc_block_sum;        // raw OT accumulated over the current block (full rate)
+    int      _pi_buf_n;               // live window length [blocks] = round(pi_window_s · rate)
     int      _pi_buf_idx;             // shared by both buffers (same cadence)
     uint32_t _pi_buf_count;
     void _pi_update_sample(float ot_ir, ProbeState probe_state);
@@ -1774,7 +1808,7 @@ public:
     // across the whole PRF catalogue (see test_time_parameters_hold_across_catalogue).
     int      test_spo2_buf_n() const               { return _spo2_buf_n; }
     uint32_t test_spo2_buf_count() const           { return _spo2_buf_count; }
-    float    test_spo2_decim_rate_hz() const       { return _spo2_decim.rate_hz; }
+    float    test_spo2_block_rate_hz() const       { return _spo2_block.rate_hz; }
     uint32_t test_hr1_refractory_samples() const   { return _hr1_refractory_samples; }
     uint32_t test_rsqm_probe_min_samples() const   { return _rsqm_probe_state_min_samples; }
     float    test_hr1_dc_alpha() const             { return _hr1_dc_alpha; }
@@ -1802,7 +1836,7 @@ public:
     void     test_feed_pi(float ot_ir, ProbeState probe_state) { _pi_update_sample(ot_ir, probe_state); }
     uint32_t test_pi_buf_count() const { return _pi_buf_count; }
     int      test_pi_buf_n() const     { return _pi_buf_n; }
-    uint16_t test_pi_decim_factor()  const { return _pi_decim.factor; }
-    float    test_pi_decim_rate_hz() const { return _pi_decim.rate_hz; }
+    uint16_t test_pi_block_len()     const { return _pi_block.len; }
+    float    test_pi_block_rate_hz() const { return _pi_block.rate_hz; }
 #endif
 };

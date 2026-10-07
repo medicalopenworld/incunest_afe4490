@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.102
+# incunest_afe4490 — Specification v0.103
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -942,7 +942,7 @@ The DC of each channel (IR and RED) is the mean of an `EmaChannel`; everything t
 `spo2_window_s` seconds (rationale §12):
 
 - **`spo2_ema_mean_tau_s` = 2.0 s** — tracks the DC baseline (slow IIR low-pass, f_c ≈ 0.08 Hz). Must satisfy f_c << 0.5 Hz (minimum physiological HR at 30 bpm) so the mean does not follow the pulsatile component. Same value as `rsqm_ema_mean_tau_s` — both track the DC of the same signal with the same physical requirement.
-- **`spo2_window_s` = 6.0 s** (`setSpO2WindowS()`, clamped to **2–12 s**) — the SpO2 averaging time, a true rectangular sliding window. The products (dx·dy, dx², dy² for R-METHOD-2; (x − mean)² per channel for R-METHOD-1) are formed at the full AFE rate and summed over each block of the SpO2 decimation chain (`_spo2_decim`, target 50 Hz, §5.3.1); each block sum enters a circular buffer with an O(1) running total over the newest `spo2_window_s` seconds. A sum of block sums is the full-rate sum, so nothing is decimated away — only the window edge moves in 20 ms steps, and R, r and SpO2 refresh at that cadence (they hold their value between blocks, as PI). The totals are rebuilt from the buffers each time the index wraps, so float32 add/subtract drift cannot accumulate. **The window is the warm-up:** the first estimate appears when the window is full and is exact from then on (there is no `spo2_warmup_s` any more); a length change (setter or PRF change) empties the window (NaN for one window length). Until v0.101 these were EMAs with τ = 6 s: an EMA of τ averages like a window of **2τ** in noise and in group delay, so the declared "6 s" was effectively 12 s — slower than the 8 s NICU default and outside the 6–10 s of **ISO 80601-2-61:2026 Annex JJ.2 d)** it had been taken from — and needed 3·τ = 18 s to be considered settled. Measured on the HOSPNAV campaigns (rationale §12): same accuracy against the reference, 36 % more noise than the EMA at equal nominal length (0.34 vs 0.25 SpO2 points), ~2 s less lag, exact purge of a transient after one window. 6 s: Nellcor "Normal" 5–7 s, between the 2–4 s of neonatal resuscitation / intermittent-hypoxaemia work and the 8 s NICU default (rationale §4.5); the 2 s floor keeps the neonatal "short window + alarm delay" configuration (McClure 2016) reachable. Buffers are sized for 12 s at 50 Hz (`alg_window_buf_len_max` = 600).
+- **`spo2_window_s` = 6.0 s** (`setSpO2WindowS()`, clamped to **2–12 s**) — the SpO2 averaging time, a true rectangular sliding window. The products (dx·dy, dx², dy² for R-METHOD-2; (x − mean)² per channel for R-METHOD-1) are formed at the full AFE rate and summed over each block of **`alg_window_block_s` = 100 ms** (`_spo2_block`, a `WindowBlock`: a block clock, not a decimator — v0.103); each block sum enters a circular buffer with an O(1) running total over the newest `spo2_window_s` seconds. A sum of block sums is the full-rate sum, so nothing is decimated away — only the window edge moves in 100 ms steps, and R, r and SpO2 refresh at that cadence (they hold their value between blocks, as PI). The block length is what fixes the granularity at which a block flagged as artefact could later be excluded from the sums (≤ 3.3 % of a 6 s window lost per excision edge; well under the 250 ms cardiac cycle at 240 BPM), the buffer RAM (7 × 120 floats ≈ 3.4 KB) and the output refresh; it is a duration so that the buffers keep meaning seconds at every PRF of the grid (all multiples of 10 Hz). Until v0.102 the cadence was 20 ms (50 Hz), inherited from the HR2/HR3 decimation chains with which these windows share nothing — rationale §12. The totals are rebuilt from the buffers each time the index wraps, so float32 add/subtract drift cannot accumulate. **The window is the warm-up:** the first estimate appears when the window is full and is exact from then on (there is no `spo2_warmup_s` any more); a length change (setter or PRF change) empties the window (NaN for one window length). Until v0.101 these were EMAs with τ = 6 s: an EMA of τ averages like a window of **2τ** in noise and in group delay, so the declared "6 s" was effectively 12 s — slower than the 8 s NICU default and outside the 6–10 s of **ISO 80601-2-61:2026 Annex JJ.2 d)** it had been taken from — and needed 3·τ = 18 s to be considered settled. Measured on the HOSPNAV campaigns (rationale §12): same accuracy against the reference, 36 % more noise than the EMA at equal nominal length (0.34 vs 0.25 SpO2 points), ~2 s less lag, exact purge of a transient after one window. 6 s: Nellcor "Normal" 5–7 s, between the 2–4 s of neonatal resuscitation / intermittent-hypoxaemia work and the 8 s NICU default (rationale §4.5); the 2 s floor keeps the neonatal "short window + alarm delay" configuration (McClure 2016) reachable. Buffers are sized for 12 s of 100 ms blocks (`alg_window_buf_len_max` = 120).
 
 DC and the window are intentionally different mechanisms: DC must track slow baseline drift (τ = 2 s, only ever a denominator for R-METHOD-2 — the experiment of rationale §10 found nothing to gain by making it faster), while the averaging must mean what the literature means by averaging time.
 
@@ -976,9 +976,12 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   sits on both channels and cancels.
 - **AC and DC from the same sliding window** of `pi_window_s` seconds (default **6 s**;
   `setPIWindowS()`, clamped to 2–12 s since v0.102, independent of `spo2_window_s`), not EMAs:
-  two circular buffers at the decimated rate — squared band-passed samples (AC²) and block means
-  of the raw OT (DC: the mean of the raw samples behind each decimated one, so no aliasing) —
-  each with an O(1) running sum, rebuilt at every wrap of the buffer (float32 drift guard).
+  two circular buffers of block sums at the `alg_window_block_s` = 100 ms cadence (v0.103) — the
+  squared band-passed samples (AC²) and the raw OT (DC), both accumulated at the full AFE rate,
+  so a sum of block sums is the full-rate sum — each with an O(1) running sum, rebuilt at every
+  wrap of the buffer (float32 drift guard). (Until v0.102 the AC² buffer held one band-passed
+  sample per 20 ms block, a true 50 Hz decimation of the 0.5–15 Hz band; at 100 ms that would
+  alias, hence the block sum — which is also the exact windowed RMS.)
   Numerator and denominator always span the same seconds; PI settles EXACTLY at `pi_window_s`
   instead of asymptotically, with no EMA and no seed. (A 2 s EMA measured within ±0.25 % of the
   window mean on HOSPNAV; the choice is structural.) No slow/async Task is needed (unlike
@@ -991,7 +994,7 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   v0.101.
 
 ```
-PI = 2√2 · sqrt(Σ AC² / N) / (Σ DC_block / N) × 100  [%]      N = pi_window_s · 50 Hz (300 by default)
+PI = 2√2 · sqrt(Σ AC² / N) / (Σ DC / N) × 100  [%]      N = samples in the window = pi_window_s · fs (3000 at 500 Hz by default)
    = AC_pp / DC × 100
 ```
 
@@ -1236,6 +1239,12 @@ The unbiased correction factor `N/(N−τ)` compensates for the finite-window ef
 A value close to 1 means the signal is strongly periodic at the detected RR period. `hr2_min_corr = 0.5` acts as the minimum threshold below which no peak is reported and SQI is forced to 0. If the buffer is not yet full or no valid peak is found, SQI = 0.
 
 #### 5.3.1 The decimation chains — one per filtered path, and why both target 50 Hz
+
+*Scope:* this section is about HR2 and HR3, whose estimators run on a decimated copy of the
+signal. The SpO2 and PI sliding windows (§5.1) do **not** decimate: they sum full-rate products
+over 100 ms blocks (`alg_window_block_s`, a `WindowBlock` clock), and nothing here applies to
+them. Until v0.102 they used `Decimator`s at the same 50 Hz, which suggested a relation that
+never existed (rationale §12).
 
 HR1 runs on the full AFE rate, sample by sample. The window-based estimators run on a decimated
 copy of the signal — but there is **one decimation chain per filtered path**, not one shared
@@ -2791,7 +2800,7 @@ See §5.1, *Perfusion Index (PI)* and rationale §11.
 |---|---|---|---|---|
 | Band-pass lower cutoff | `pi_bp_f_low_hz` | 0.5 Hz | Same 30 BPM floor as `hr2_f_low_hz`/`spo2_bp_f_low_hz`, through PI's own private `BiquadFilter` instance ("paths share nothing", §5.3.1) | AC waveform extraction — replaces the old EMA subtraction |
 | Band-pass upper cutoff | `pi_bp_f_high_hz` | 15.0 Hz | HR3's ceiling (3rd harmonic of 260 BPM = 13 Hz): a magnitude needs the harmonics — 5 Hz read −25 % at 220 vs 60 BPM on the MS100; noise above 10 Hz unmeasurable in the lowest-PI decile of a neonate (rationale §11) | HR-independence of PI |
-| Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; buffers `alg_window_buf_len_max` = 600 @ 50 Hz) | 6 s | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements) | PI settling time / noise |
+| Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; blocks of `alg_window_block_s` = 100 ms, buffers `alg_window_buf_len_max` = 120) | 6 s | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements) | PI settling time / noise |
 | RMS → peak-to-peak | `pi_rms_to_pp` | 2√2 | Exact for a sinusoid; band-passed PPG measured 2.79/2.92 (neonates), 3.0–3.2 (MS100) → under-reads a per-beat Max−Min by 0–12 %. Per-beat peaks (Masimo/Nellcor exact) need a beat detector: PILAB option, not library | PI in the industry's units |
 | PI upper bound | `spo2_pi_max` | 20 % | Top of the displayed range of Masimo (0.02–20), Mindray (0.05–20), Nellcor (0.03–20); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2PiSqiThresholds(lo, hi, max)`) |
 
@@ -3145,6 +3154,18 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.103  | **SpO2/PI window blocks of 100 ms (`alg_window_block_s`) instead of the 50 Hz |
+|         | cadence inherited from HR2/HR3 (§5.1, §5.3.1 scope note, rationale §12).**  |
+|         | New `WindowBlock` (a block clock by duration, not a `Decimator`) replaces     |
+|         | `_spo2_decim`/`_pi_decim` and their `*_decim_target_rate_hz`; buffers 600 →  |
+|         | 120 (≈ 3.4 KB). PI's AC² is now summed at the full rate over each block (one |
+|         | band-passed sample per 20 ms block until v0.102 — at 100 ms it would alias). |
+|         | Outputs refresh every 100 ms; the first estimate comes one block after the  |
+|         | window is full (6.1 s instead of 6.02 s). Measured on the SUBJ09 HOSPNAV      |
+|         | replay against v0.102: R mean diff 0, SD 0.0006 (max 0.006 at the window    |
+|         | edge), SpO2 SD 0.02 points (max 0.19), PI SD 0.02 % (max 0.31 %), noise of R |
+|         | unchanged. Test accessors renamed `test_spo2_block_rate_hz()`,                |
+|         | `test_pi_block_len()`, `test_pi_block_rate_hz()`.                             |
 | v0.102  | **SpO2 averaged over a true sliding window; window lengths runtime and      |
 |         | independent for SpO2 and PI (§5.1, §10.3, §10.3b, rationale §12).**         |
 |         | R-METHOD-2's Σ(dx·dy)/Σ(dx²)/Σ(dy²) and R-METHOD-1's AC² are block sums at   |
