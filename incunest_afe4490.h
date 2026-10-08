@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.103"
+#define INCUNEST_AFE4490_VERSION "0.104"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -729,6 +729,7 @@ struct AFE4490Config {
     float             rsqm_probe_state_min_s;    // debounce time to change probe state [s]
     // HGAC parameters (RF-only, two EMA per gain domain — see incunest_afe4490_spec.md §5.8)
     bool              hgac_enable;                    // master enable; false = HGAC never actuates
+    bool              afe_settle_freeze_enable;       // v0.104 bench switch, §5.8.4 (true in clinical use)
     float             hgac_v_tia_high2;          // V — guard: reduce RF urgently above this (fast EMA)
     float             hgac_v_tia_high1;          // V — leveling: reduce RF above this (slow EMA)
     float             hgac_v_tia_low1;           // V — leveling: raise RF below this (slow EMA)
@@ -860,6 +861,7 @@ public:
 
     // HGAC setters (callable before or after begin()) — RF-only, two EMA per domain
     void setHgacEnable(bool en);                    // master enable; false = HGAC never actuates
+    void setSettleFreezeEnable(bool en);            // v0.104 bench switch (§5.8.4); true = freeze as always
     void setHgacVTiaHigh2(float v);                 // V — guard threshold (fast EMA); clamped ≤ FS_V
     void setHgacVTiaHigh1(float v);                 // V — leveling upper threshold (slow EMA)
     void setHgacVTiaLow1(float v);                  // V — leveling lower threshold (slow EMA)
@@ -1132,6 +1134,10 @@ private:
     // Thresholds on the fast/slow EMA of v_tia_led (per color). high2 sourced from tia_axis
     // (the guard, below full-scale); high1/low1 are pure policy (leveling dead-band). See §5.8.
     bool              hgac_enable          = false; // OFF by default until bench-validated
+    // Bench switch (v0.104): false lets the real switched-RC transient after a gain change
+    // reach the algorithms instead of the frozen last-valid input, so a host can measure it
+    // (RSQM_DIAG_SWITCHED_RC_SETTLING keeps being flagged). Never false in clinical use. §5.8.4.
+    bool              afe_settle_freeze_enable = true;
     float             hgac_v_tia_high2     = tia_axis::HIGH2_V; // V — guard (fast EMA); clamped ≤ FS_V by setter
     float             hgac_v_tia_high1     = 0.75f;             // V — leveling upper (slow EMA)
     float             hgac_v_tia_low1      = 0.20f;             // V — leveling lower (slow EMA)
@@ -1210,7 +1216,9 @@ private:
     // real SPI read) for as long as this holds. Not platform-dependent — it's pure member
     // reads, no SPI — so the condition itself is unit-testable without a running task.
     bool _should_freeze_input() const {
-        return _diag_active || _diag_holdoff_samples > 0 || _switched_rc_settling_countdown > 0;
+        // The diagnostics part is never switchable: the chip produces no valid data then.
+        return _diag_active || _diag_holdoff_samples > 0
+            || (afe_settle_freeze_enable && _switched_rc_settling_countdown > 0);
     }
 
     // FreeRTOS task

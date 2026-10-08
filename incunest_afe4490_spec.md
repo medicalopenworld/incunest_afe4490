@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.103
+# incunest_afe4490 — Specification v0.104
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1747,6 +1747,18 @@ input-freeze protection (§2.6b). `_arm_switched_rc_settling()` now lives inside
 `_hgac_change_rf()`'s own `new_rf == old_rf` early return) — `_hgac_change_rf()` gets it "for
 free" through the setter call it already makes, so its own separate arm was removed.
 
+**Bench switch `afe_settle_freeze_enable` (v0.104, default `true`).** `setSettleFreezeEnable(false)`
+lets the real post-change transient reach `_process_sample()` (fresh SPI reads and a fresh
+`_compute_analog_state()` during the countdown) instead of the frozen last-valid input, so that
+a host can **measure** the switched-RC settling the datasheet only bounds (§7.7 t5, 3 ms per
+phase): with the freeze on, the `$M4` rows of those samples repeat the pre-change values and the
+transient is invisible. `RSQM_DIAG_SWITCHED_RC_SETTLING` keeps being armed and flagged either way,
+so the rows remain identifiable. The diagnostics part of `_should_freeze_input()` is not
+switchable: the chip produces no valid ADC data while `runAfeDiagnostics()` runs. The switch
+exists for the RF tap characterisation bench (PulseNest `tools/rf_tap_bench.py`, `$SET
+afe_settle_freeze_enable`) and is **never false in clinical use**; it is exposed in `$LCFG` so
+that a capture records which state produced it.
+
 **Why `_switched_rc_settling_countdown` is `volatile` (no mutex):** with the arm moved into the public
 setters, it can now be written from a *different* thread than the one that reads/decrements it —
 e.g. `Cmd_Task` processing a manual `$SET` (PulseNest `main.cpp`) races against `_task_body()`'s
@@ -3154,6 +3166,10 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.104  | **Bench switch `afe_settle_freeze_enable` (§5.8.4): `setSettleFreezeEnable(false)` |
+|         | lets the real switched-RC transient after a gain change reach the algorithms so    |
+|         | a host can measure it (default `true`; `AFE4490Config` field; diagnostics freeze |
+|         | unaffected). For the RF tap characterisation bench of 2026-10-08.               |
 | v0.103  | **SpO2/PI window blocks of 100 ms (`alg_window_block_s`) instead of the 50 Hz |
 |         | cadence inherited from HR2/HR3 (§5.1, §5.3.1 scope note, rationale §12).**  |
 |         | New `WindowBlock` (a block clock by duration, not a `Decimator`) replaces     |

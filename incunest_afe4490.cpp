@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.103 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.104 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -1081,6 +1081,12 @@ void INCUNEST_AFE4490::setHgacEnable(bool en) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+void INCUNEST_AFE4490::setSettleFreezeEnable(bool en) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    afe_settle_freeze_enable = en;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 void INCUNEST_AFE4490::setHgacVTiaHigh2(float v) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     // Keep the guard on the operating axis: it must trip BELOW the TIA full-scale
@@ -1188,6 +1194,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.rsqm_disconn_i_pd_thr    = rsqm_disconn_i_pd_thr;
     cfg.rsqm_probe_state_min_s   = rsqm_probe_state_min_s;
     cfg.hgac_enable          = hgac_enable;
+    cfg.afe_settle_freeze_enable = afe_settle_freeze_enable;
     cfg.hgac_v_tia_high2     = hgac_v_tia_high2;
     cfg.hgac_v_tia_high1     = hgac_v_tia_high1;
     cfg.hgac_v_tia_low1      = hgac_v_tia_low1;

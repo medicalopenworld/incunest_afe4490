@@ -1225,6 +1225,22 @@ exactly this; (b) rescale the band-pass and DC state by the step factor in `_hga
 (exact for RF, §2 / the O8.3 compensation). PI's jump after an HGAC move (§11, pending) has the same
 cause.
 
+**Follow-up, constant-light bench (2026-10-08, same day).** Alex covered the LEDs of the three probes
+so the photodiode sees ambient light only, equal in the four phases: `V_TIA = I_amb · RF_nominal ·
+(1 + ε_tap) + V_off`, measurable tap by tap with no pulse in the way (PulseNest
+`tools/rf_tap_bench.py`, `tools/rf_tap_analyze.py`, reference CSVs in `docs/rf_taps/`). Two things
+the simulator run could not show: an **additive offset** of the chain, per chip (+1.0 / −5.0 /
+−6.6 mV, identical in the four phases), which dominates the low taps and must be fitted before any
+tap comparison; and an **ε pattern nearly identical on the three chips** (10K +0.2, 25K −0.4,
+50K −0.3, 100K −0.7, 250K +1.1, 500K 0.0 %), i.e. a systematic deviation of the design, far inside
+the ±7 % bound, rather than per-chip scatter — which makes a library constant a candidate against a
+per-board calibration. To measure the settling the datasheet only bounds (3 ms per phase), v0.104
+adds the bench switch `afe_settle_freeze_enable` (spec §5.8.4): with the freeze on, the `$M4` rows
+of the countdown repeat the pre-change values and the transient cannot be seen; a dedicated
+raw-dump frame was the alternative and was rejected as more firmware for the same information.
+Default true; never false in clinical use. The report of the bench lives in PulseNest
+`docs/rf_taps/`.
+
 ---
 
 ## Appendix — source rationale (to distill at consolidation)
