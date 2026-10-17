@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.104
+# incunest_afe4490 — Specification v0.105
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1550,12 +1550,15 @@ v_tia > FS on any channel), OT is clipped/unreliable, so RSQM looks at *which* p
   NOT chase RF to the floor on finger removal (which would ruin the operating point for reattach).
   *Limitation:* LED-only clipping can't distinguish air from tissue so thin that it saturates
   without ambient — assumed air. **v0.90 gives that case its own state** so the assumption is
-  visible in the data instead of buried in a comment. **Open check:** thin tissue at high RF →
-  `PROBE_ONLY_LED_SATURATING` → absent → HGAC gate closed → nobody lowers RF → saturation
-  persists → stays absent. A stable false negative that nobody corrects, symmetric to the bug
-  v0.61 fixed. Verification protocol and tooling: `tools/probe_state_saturation_check.py`
-  (PulseNest). If confirmed, the fix needs a discriminant in this branch — OT is degraded under
-  saturation but an OT far below `rsqm_ot_thr` still says "tissue" — not a change of gate.
+  visible in the data instead of buried in a comment. **Open check, closed in v0.105:** thin
+  tissue at high RF → `PROBE_ONLY_LED_SATURATING` → absent → HGAC gate closed → nobody lowers RF →
+  saturation persists → stays absent. Confirmed on the bench 2026-10-17 (finger on a V18 left at
+  RF 500K: both LEDs clipping, never APPLIED, only a power cycle cleared it). The fix is in the
+  gate, not in this branch: the OT discriminant that was proposed does not work at high RF (at
+  500K the clipped OT is ~48 ppm, below `rsqm_ot_thr`, air or tissue alike), so RSQM keeps
+  calling this state absent and HGAC alone treats it as **half-open — slow step-down only**
+  (§5.8). The state's meaning is unchanged; what changed is that a saturation nobody can
+  classify is no longer a dead end.
 
 **Consumers:** SpO2/HR1/HR2/HR3 and RSQI treat PROBE_AMB_SATURATING, PROBE_ONLY_LED_SATURATING and PROBE_OT_HIGH like any
 non-`PROBE_APPLIED` state (invalid/reset — they gate on `!= PROBE_APPLIED`). `_diag_task_body()` and
@@ -1931,8 +1934,22 @@ the diagnostics task (§5.7); a ProbeState missing from that list is NOT gated o
 the EMAs are `reset()` so they re-warm cleanly when the probe is re-applied (otherwise stale
 probe-in-air values would leak into the first decisions). `PROBE_AMB_SATURATING` (§5.6.2) is a
 distinct state so a guard event can't flip to an absent state and deadlock the step-down.
-**Open check (v0.90):** `PROBE_ONLY_LED_SATURATING` is absent by inheritance from NOT_APPLIED — with
-thin tissue at high RF that closes the HGAC gate exactly when it should lower RF (§5.6.2).
+
+**Half-open under LED-only saturation (v0.105).** `PROBE_ONLY_LED_SATURATING` stays in
+`isProbeAbsent()` for every other consumer, but the HGAC gate treats it specially: the EMAs are fed
+and `_hgac_track()` runs in *step-down-only* mode — the fast HIGH2 guard is off, the LOW1 raise
+branch is off, and only the slow leveling branch (`slow.mean ≥ hgac_v_tia_high1`) may lower RF by
+one LUT step, after which the domain's EMAs reset as usual, so the next step needs another slow
+warm-up (3·τ = 6 s at τ = 2 s). Why this shape: the signature has two causes RSQM cannot tell
+apart (§5.6.2) — a probe in air, for which v0.61 wanted RF left alone so the reattach finds its
+operating point, and tissue so thin that it clips at the current RF, for which v0.61's rule was a
+deadlock (reproduced 2026-10-17). A brief removal (a few seconds) therefore still moves nothing;
+a persistent LED-only clip walks RF down one step per ~6 s until the clip clears and RSQM can
+classify the signal again. The cost in the probe-in-air case is bounded and symmetric: a long
+removal walks RF to the floor at that pace, and the ordinary leveling climbs back at the same
+pace once the probe is reapplied (≤ 5 steps, ~30 s). Rationale §13. Tests: `test_hgac`
+`*_led_only_sat_*` (no fast guard; one step per slow warm-up; floor if persistent) and
+`test_hgac_disconnected_keeps_gate_closed`.
 
 **Concurrency:** `_hgac_update()` and everything it calls take no lock of their own — they run from
 `_process_sample()`, already under `_state_mutex`. `_hgac_change_rf()` calls `setTIAGainLED1/2()`,
@@ -3166,6 +3183,11 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.105  | **HGAC gate half-open under `PROBE_ONLY_LED_SATURATING` (§5.8, §5.6.2): slow     |
+|         | step-down only (no fast guard, no raise). Closes the v0.90 open check: a thin    |
+|         | tissue clipping at a high RF was absent → gated off → RF never lowered → locked  |
+|         | until power cycle (bench, 2026-10-17). `_hgac_track(..., slow_step_down_only)`.       |
+|         | `isProbeAbsent()` unchanged for RSQM/diagnostics. Rationale §13.                 |
 | v0.104  | **Bench switch `afe_settle_freeze_enable` (§5.8.4): `setSettleFreezeEnable(false)` |
 |         | lets the real switched-RC transient after a gain change reach the algorithms so    |
 |         | a host can measure it (default `true`; `AFE4490Config` field; diagnostics freeze |

@@ -1243,6 +1243,51 @@ Default true; never false in clinical use. The report of the bench lives in Puls
 
 ---
 
+## 13. HGAC under LED-only saturation — from "gate closed" to "slow step-down only" (2026-10-17)
+
+**The problem.** `PROBE_ONLY_LED_SATURATING` (LED phases clip, ambient phases clean) has two
+physical causes that RSQM cannot separate: the probe in air (the LED's light reaches the
+photodiode with nothing in between) and tissue so thin that it saturates the TIA at the current
+RF. Since v0.61 the state was "absent", and the HGAC gate (G0) closed on it, so that a removed
+finger did not drag RF to the floor and ruin the operating point for the reattach. The spec
+recorded the other half as an open check from v0.90: thin tissue at a high RF → absent → HGAC
+off → nobody lowers RF → still saturated → still absent. Alex reproduced it on the bench on
+2026-10-17: a V18 left at RF 500K, finger on, both LEDs clipping, APPLIED never reached, HGAC ON
+did nothing, only a reset cleared it. The same day's audit of the hospital captures showed two of
+four subjects recorded with `hgac_enable=0` all day (SUBJ08 on 23-09, SUBJ10/11 on 13-10), which
+is how a board arrives at a stale RF in the first place.
+
+**Options weighed.**
+1. *OT discriminant inside the RSQM branch* (the spec's own proposal): "an OT far below
+   `rsqm_ot_thr` under saturation still says tissue". Rejected on arithmetic: the OT computed from
+   a clipped TIA is bounded by FS/(RF·I_LED); at 500K and 50 mA that is ≈ 2.4 µA / 50 mA ≈ 48 ppm,
+   below the 150 ppm threshold **whatever** is in the optical path — air and tissue read the same.
+   The discriminant only separates the two cases at low RF, where the deadlock does not occur.
+2. *Open the gate fully* (treat the state like AMB_SATURATING): the fast guard walks RF to the
+   floor in ~1.6 s on every finger removal; v0.61's reason for closing the gate was exactly this.
+3. *Half-open: step-down only, slow branch only* — chosen. The fast guard exists for real light on
+   a patient and is off here; the raise branch cannot fire under saturation and is off for
+   symmetry; the slow leveling branch (τ 2 s, valid after 6 s, reset after each step) lowers RF
+   one LUT step per ~6 s. Consequences: a removal shorter than ~6 s moves nothing (the common bench
+   case); a persistent clip, whatever its cause, walks down until it clears; a long removal ends at
+   the floor and the ordinary leveling climbs back at the same cadence after reattach (≤ 5 steps,
+   ~30 s). A system that can take 30 s to recover beats one that never recovers.
+4. *A time-qualified fast guard* (act after N s in the state): equivalent to 3 but adds a parameter
+   with no measured basis; the slow EMA's warm-up already is that timer.
+
+**What did not change.** `isProbeAbsent()` keeps the state: RSQM, the diagnostics task and every
+algorithm still treat it as no patient. Only `_hgac_update()` makes the exception, documented
+beside the function and in the ProbeState comment. The library default `hgac_enable = false` is
+untouched (the clinical firmware never runs this path unless it opts in).
+
+**Operational companion (PulseNest, not the library).** The deadlock needs a stale high RF, and a
+board gets one when a host turns HGAC off and does not turn it back on (LAB CAPTURE's "Disable HGAC
+during capture", restored only if the capture closes normally). The recorder now reads
+`hgac_enable` from the board's `$LCFG`, shows **HGAC OFF** in red in the window and in `status`,
+and notes the moment in the raw stream; it still writes nothing to the board. Open: whether the
+firmware should re-arm HGAC on a recorder session start — rejected for now, the host-writes-to-
+board rule of 2026-09-10 stands.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

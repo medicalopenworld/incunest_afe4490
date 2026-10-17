@@ -1610,11 +1610,14 @@ uint32_t INCUNEST_AFE4490::hgacRfChangeCount(uint64_t* last_ts_us) const {
 // severity×time); slow EMA drives the HIGH1/LOW1 leveling dead-band on the clean DC. valid()
 // short-circuits each check so nothing acts during an EMA's warmup (see spec §5.8). RF steps are
 // one LUT level. The ambient alarm is a diagnostic, computed separately (_hgac_ambient_high).
-void INCUNEST_AFE4490::_hgac_track(HgacColor color, EmaChannel& fast, EmaChannel& slow) {
+void INCUNEST_AFE4490::_hgac_track(HgacColor color, EmaChannel& fast, EmaChannel& slow,
+                                   bool slow_step_down_only) {
     const AFE4490RF rf = (color == HgacColor::IR) ? _afe_tia_rf_led1 : _afe_tia_rf_led2;
 
     // Guard (fast EMA): reduce RF urgently above HIGH2, then bail (guard has priority).
-    if (fast.valid() && fast.mean >= hgac_v_tia_high2) {
+    // Off in slow_step_down_only mode (ONLY_LED_SATURATING, v0.105): the slow branch below is the
+    // only actuator there, so a brief probe removal moves nothing.
+    if (!slow_step_down_only && fast.valid() && fast.mean >= hgac_v_tia_high2) {
         if (rf > AFE4490RF::RF_10K) _hgac_change_rf(color, (AFE4490RF)((int)rf - 1));
         return;
     }
@@ -1622,7 +1625,7 @@ void INCUNEST_AFE4490::_hgac_track(HgacColor color, EmaChannel& fast, EmaChannel
     if (!slow.valid()) return;
     if (slow.mean >= hgac_v_tia_high1) {
         if (rf > AFE4490RF::RF_10K) _hgac_change_rf(color, (AFE4490RF)((int)rf - 1));
-    } else if (slow.mean < hgac_v_tia_low1) {
+    } else if (!slow_step_down_only && slow.mean < hgac_v_tia_low1) {
         if (rf < AFE4490RF::RF_1M)  _hgac_change_rf(color, (AFE4490RF)((int)rf + 1));
     }
 }
@@ -1640,17 +1643,32 @@ void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     if (!hgac_enable) return;
 
     // HGAC gate (spec §5.8; the design's "Gate G0", from the RSQM/HGAC separation axiom A6):
-    // HGAC acts only while the probe is active (APPLIED or
-    // AMB_SATURATING) and the front-end is not re-settling after a gain change. Gate off in the
-    // absent states — isProbeAbsent(): DISCONNECTED / OT_HIGH / ONLY_LED_SATURATING — so HGAC
-    // doesn't drive RF on an unrelated optical event (e.g. a phototherapy lamp) with nobody
-    // connected. AMB_SATURATING is deliberately NOT absent: it has its own state since 2026-07-24
-    // so a guard event can't flip to an absent state and deadlock the step-down.
+    // HGAC acts only while the probe is active (APPLIED or AMB_SATURATING) and the front-end is
+    // not re-settling after a gain change. Gate off in the absent states — isProbeAbsent():
+    // DISCONNECTED / OT_HIGH / ONLY_LED_SATURATING — so HGAC doesn't drive RF on an unrelated
+    // optical event (e.g. a phototherapy lamp) with nobody connected. AMB_SATURATING is
+    // deliberately NOT absent: it has its own state since 2026-07-24 so a guard event can't flip
+    // to an absent state and deadlock the step-down.
     // NOTE: the absent list lives in isProbeAbsent() (single source of truth, shared with the
     // diagnostics task). A ProbeState missing from it is NOT gated off here and lets HGAC act.
-    // Open check (v0.90): ONLY_LED_SATURATING is absent by inheritance from NOT_APPLIED — with
-    // thin tissue at high RF that gates HGAC off exactly when it should lower RF (spec §5.6.2).
-    if (isProbeAbsent(_rsqm_probe_state)
+    //
+    // v0.105 — ONLY_LED_SATURATING is half-open: step DOWN only, and only by the slow EMA.
+    // The LED-only clip signature has two causes RSQM cannot tell apart (spec §5.6.2): the probe
+    // in air (finger removed: the LED light reaches the PD directly) and tissue so thin that it
+    // saturates at the current RF. Gating fully off (v0.61–v0.104) served the first — RF stays
+    // put for the reattach — and deadlocked the second: saturated → absent → nobody lowers RF →
+    // still saturated, a stable false negative that only a power cycle cleared (reproduced on
+    // the bench 2026-10-17: finger on, RF 500K, both LEDs clipping, APPLIED never reached). So in
+    // this state the leveling branch may lower RF, one LUT step per slow-EMA warm-up (~6 s at
+    // τ = 2 s), and nothing else: the fast guard is off (an urgent response is for real light on
+    // a patient, not for a hand that may come back in a second) and the raise branch is off
+    // (saturation never asks for more gain). A brief removal therefore moves nothing; a persistent
+    // saturation walks down until the clip clears and RSQM can classify the signal again. The
+    // cost in the probe-in-air case is bounded: a long removal walks RF to the floor at one step
+    // per ~6 s, and the ordinary leveling climbs back at the same pace once the probe is
+    // reapplied (rationale §13).
+    const bool led_sat_only = (_rsqm_probe_state == ProbeState::PROBE_ONLY_LED_SATURATING);
+    if ((isProbeAbsent(_rsqm_probe_state) && !led_sat_only)
      || (_diag_code & RSQM_DIAG_SWITCHED_RC_SETTLING)) {
         // Reset the EMAs while gated off so they re-warm cleanly when the probe is re-applied
         // (otherwise they'd carry stale probe-in-air values into the first decisions).
@@ -1665,9 +1683,9 @@ void INCUNEST_AFE4490::_hgac_update(const AFE4490AnalogState& as) {
     _hgac_ema_ambient_led1.update(as.v_tia_aled1);
     _hgac_ema_ambient_led2.update(as.v_tia_aled2);
 
-    // Actuate per domain (RF only).
-    _hgac_track(HgacColor::IR,  _hgac_ema_fast_led1, _hgac_ema_slow_led1);
-    _hgac_track(HgacColor::RED, _hgac_ema_fast_led2, _hgac_ema_slow_led2);
+    // Actuate per domain (RF only); half-open (slow step-down only) under LED-only saturation.
+    _hgac_track(HgacColor::IR,  _hgac_ema_fast_led1, _hgac_ema_slow_led1, led_sat_only);
+    _hgac_track(HgacColor::RED, _hgac_ema_fast_led2, _hgac_ema_slow_led2, led_sat_only);
 
     // Ambient alarm (diagnostic, separate from actuation): global OR across domains. Evaluated
     // AFTER _hgac_track — if a track just stepped to the floor it reset the ambient EMA, so

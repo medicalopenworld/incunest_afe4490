@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.104"
+#define INCUNEST_AFE4490_VERSION "0.105"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -100,14 +100,18 @@ enum class ProbeState {
                                     // attenuating it. Read as probe-in-air (finger removed) since
                                     // v0.61 — but thin tissue at high RF gives the same signature,
                                     // and OT is not consulted under saturation, so that case lands
-                                    // here too (§5.6.2, open check). Treated as ABSENT everywhere
-                                    // via isProbeAbsent() — no behavioural change from v0.89.
+                                    // here too (§5.6.2). ABSENT per isProbeAbsent() for every
+                                    // consumer but one: since v0.105 the HGAC gate is half-open
+                                    // here (slow step-DOWN only), so a thin-tissue saturation
+                                    // cannot lock the board at a high RF (§5.8, rationale §13).
 };
 
 // The one place that defines "no patient on the probe". Consumers that must separate the idle
 // states from APPLIED / AMB_SATURATING — the HGAC gate, the diagnostics task — call this instead
 // of listing states, so a new ProbeState is classified here, once, deliberately. A state missing
 // from this list counts as PRESENT: HGAC would act on it and diagnostics would not run.
+// One documented exception (v0.105): HGAC treats PROBE_ONLY_LED_SATURATING as half-open —
+// slow step-down only — see _hgac_update().
 inline bool isProbeAbsent(ProbeState s) {
     return s == ProbeState::PROBE_DISCONNECTED
         || s == ProbeState::PROBE_OT_HIGH
@@ -1251,7 +1255,8 @@ private:
     // One gain domain (color): fast EMA drives the HIGH2 guard, slow EMA the HIGH1/LOW1 leveling
     // dead-band. valid() gates each check (no action during warmup). Pure actuation — no diagnostic
     // output (the ambient alarm is computed separately, see _hgac_ambient_high). See spec §5.8.
-    void _hgac_track(HgacColor color, EmaChannel& fast, EmaChannel& slow);
+    void _hgac_track(HgacColor color, EmaChannel& fast, EmaChannel& slow,
+                     bool slow_step_down_only = false);
     // Ambient-light alarm condition for one domain (diagnostic, not actuation): RF at the floor AND
     // the ambient (ALED) EMA ≥ HIGH2 → ambient light alone saturates, so RF/ILED can't help. Kept
     // out of _hgac_track so actuation and diagnostic stay separate; produced by HGAC (not RSQM)
