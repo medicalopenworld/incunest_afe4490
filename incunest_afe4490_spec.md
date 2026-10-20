@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.105
+# incunest_afe4490 — Specification v0.106
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -1013,6 +1013,27 @@ sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %)
 
 PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when SpO2 falls outside the valid range [70–100 %] and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
+#### PI methods (v0.106)
+
+The PI definition has changed twice (v0.101: units ×2√2 and a band-pass instead of the EMA; the
+intermediate 2026-10-05 state never reached a board) and nothing in a capture said which number
+its PI column held: HOSPNAV SUBJ08 reads a median PI of 1.66 under the old definition and ≈ 3 under
+the current one, same baby. The SQI thresholds (`spo2_pi_sqi_lo/hi`), `spo2_pi_max` and every
+comparison with a published neonatal threshold depend on it. So the definition carries an id,
+`PI_METHOD_ID`, by the R-method rule: it changes if and only if, for the same input, PI comes out
+as a different number; parameters (`pi_window_s`, `pi_bp_f_*`) travel in the configuration and do
+not change it. `AFE4490Config::pi_method_id` names it; PulseNest prints it in `$CFG`
+(`pi_method_id`, fw 0.25) and the capture's `alg:` snapshot. There is no setter and no alternative
+method: unlike R, no measured PI problem is one that another estimator fixes (the open ones —
+excursion after an HGAC RF step, the biquad's ripple, the 2√2 sinusoid assumption against a 2.8–3.2
+crest factor — are of this method). Captures without the key: lib ≤ 0.100 → `PI-METHOD-0`,
+0.101–0.105 → `PI-METHOD-1`, from the `lib=` header.
+
+| Id | Definition | Library versions |
+|---|---|---|
+| `PI-METHOD-0` | √(`EmaChannel` var) / `EmaChannel` mean of OT_IR — the EMA shared with SpO2 (τ mean 2 s, τ var 6 s); RMS units. | ≤ v0.100 |
+| `PI-METHOD-1` | 2√2 · RMS(one-biquad band-pass `pi_bp_f_low_hz`–`pi_bp_f_high_hz`, 0.5–15 Hz, of OT_IR) / mean of raw OT_IR, both over the same `pi_window_s` sliding window (6 s; 2–12 s since v0.102; 100 ms block sums since v0.103 — implementation, same number); peak-to-peak units. | v0.101 → **current** |
+
 #### R methods and R curves (v0.98)
 
 Two different things decide the SpO2 number, and each has its own identifier:
@@ -1065,11 +1086,13 @@ method "R-METHOD-1 with modified parameters"; those parameters travel in the cap
 snapshot. First offline comparison of candidate methods (band-pass + RMS, regression on samples and
 on derivatives): PulseNest `captures/sessions/20260923_HOSPNAV_SUBJ08_ANALYSIS/r_regression_test.py`.
 
-**R curves known to the library.**
+**R curves known to the library.** Only the curves the library ships or shipped; every curve fitted
+or tried, with its data, range, residuals and state, is in the PulseNest register
+`docs/spo2_r_curves.md` (2026-10-20), which also compares them with the published ones.
 
 | Id | a | b | Fitted with | Provenance |
 |---|---|---|---|---|
-| `R-CURVE-STS0163-HOSPNAV-20260923` (**default since v0.100**) | 123.98 | 39.13 | `R-METHOD-2` | Clinical, not a desaturation study: the two 2026-09-23 HOSPNAV campaigns (two neonates, probe Medle ST-S0163, reference = the ward monitor read by VideoNest OCR — make, model and averaging not recorded), replayed by `incunest_offline_runner` with lib v0.100 and paired on 3455 stationary 8 s windows (`fit_method2.py` in the SUBJ08 analysis directory). Spearman ρ −0.80, scatter 1.65 points, median \|residual\| 0.91; per subject 129.2 − 46.7·R / 118.8 − 32.1·R, leave-one-subject-out median \|error\| 0.95–1.38. Reference 85–100 % (31 windows below 85, read −3.4 points). The same id was used on 2026-09-24 for a 115.17 − 21.54·R proposal fitted with R-METHOD-1 (findings.md); that one was never applied. |
+| `R-CURVE-STS0163-HOSPNAV-20261004` (**default since v0.100**; labelled `…-20260923` until v0.105 — the date is now the date of the fit, so one label is one (a, b)) | 123.98 | 39.13 | `R-METHOD-2` | Clinical, not a desaturation study: the two 2026-09-23 HOSPNAV campaigns (two neonates, probe Medle ST-S0163, reference = the ward monitor read by VideoNest OCR — make, model and averaging not recorded), replayed by `incunest_offline_runner` with lib v0.100 and paired on 3455 stationary 8 s windows (`fit_method2.py` in the SUBJ08 analysis directory). Spearman ρ −0.80, scatter 1.65 points, median \|residual\| 0.91; per subject 129.2 − 46.7·R / 118.8 − 32.1·R, leave-one-subject-out median \|error\| 0.95–1.38. Reference 85–100 % (31 windows below 85, read −3.4 points). The same id was used on 2026-09-24 for a 115.17 − 21.54·R proposal fitted with R-METHOD-1 (findings.md); that one was never applied. |
 | `R-CURVE-U401D-MS100-20260323` (default until v0.99) | 114.9208 | 30.5547 | `R-METHOD-0` | CONTEC MS100 simulator, setting "R-Curve Nellcor, 100 bpm", probe UpnMed U401-D(01AS-F) (Nellcor Non-Oximax type, IR 905 nm). A simulator does not validate accuracy (ISO 80601-2-61 EE.4). |
 
 The default pair matches since v0.100 (it raised the mismatch warning by itself from v0.98 to
@@ -3183,6 +3206,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.106  | **The PI definition gets a name (§5.1, *PI methods*): `PI_METHOD_ID` =         |
+|         | `PI-METHOD-1`, `AFE4490Config::pi_method_id`; `PI-METHOD-0` is the ≤ v0.100     |
+|         | EMA/RMS definition. Traceability only — no setter, no alternative. Default R   |
+|         | curve relabelled `R-CURVE-STS0163-HOSPNAV-20261004` (same 123.98 − 39.13·R;   |
+|         | label date = fit date). Curve registry → PulseNest `docs/spo2_r_curves.md`.   |
+|         | Rationale §14.                                                                  |
 | v0.105  | **HGAC gate half-open under `PROBE_ONLY_LED_SATURATING` (§5.8, §5.6.2): slow     |
 |         | step-down only (no fast guard, no raise). Closes the v0.90 open check: a thin    |
 |         | tissue clipping at a high RF was absent → gated off → RF never lowered → locked  |

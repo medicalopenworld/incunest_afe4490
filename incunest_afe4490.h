@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.105"
+#define INCUNEST_AFE4490_VERSION "0.106"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -129,6 +129,14 @@ inline bool isProbeAbsent(ProbeState s) {
 inline constexpr char SPO2_R_METHOD_1_ID[] = "R-METHOD-1";   // RMS ratio: (σ_red/μ_red)/(σ_ir/μ_ir)
 inline constexpr char SPO2_R_METHOD_2_ID[] = "R-METHOD-2";   // regression on derivatives of the band-passed, DC-normalised OT
 inline constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, terminator included
+
+// ── PI method identifier (v0.106) ────────────────────────────────────────────
+// Names HOW this library computes the Perfusion Index, by the same rule as the R method ids: it
+// changes if and only if, for the same input, PI comes out as a different number (AC estimator,
+// DC estimator, units, band) — never for a parameter that already travels in the configuration
+// (pi_window_s, pi_bp_f_*). Registry: spec §5.1, "PI methods". There is one method; the id exists
+// so that a capture says which definition its PI column holds (PI-METHOD-0 was 3× smaller).
+inline constexpr char PI_METHOD_ID[] = "PI-METHOD-1";   // 2√2·RMS(band-pass 0.5–15 Hz) / mean OT, one sliding window
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
 // Multiple bits may be set simultaneously.
@@ -709,6 +717,7 @@ struct AFE4490Config {
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11):
     // own band-pass (not an EMA subtraction) for the AC, AC and DC from the same sliding window
     // (pi_window_s, runtime since v0.102 — see _pi_update_sample()).
+    char              pi_method_id[SPO2_R_ID_LEN];  // how this library computes PI (PI_METHOD_ID, v0.106)
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
     float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, setPIWindowS)

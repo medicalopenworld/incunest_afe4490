@@ -709,9 +709,11 @@ on every sample of the 24 HOSPNAV parts. Decisions taken with it:
   118.8 − 32.1·R (leave-one-out median |error| 0.95 / 1.38). Below a reference of 85 % (31 windows,
   all dynamic) it reads −3.4 points: the low range is unmeasured, not fitted. It is a hospital-monitor-
   referenced curve for one probe model (Medle ST-S0163), not an ISO Annex DD desaturation study; the
-  reference monitor's make and averaging were not recorded. Its id reuses
+  reference monitor's make and averaging were not recorded. Its id reused
   `R-CURVE-STS0163-HOSPNAV-20260923`: the 2026-09-24 proposal under that id (115.17 − 21.54·R,
-  R-METHOD-1) was never applied, and the pair (id, method) is what identifies a curve.
+  R-METHOD-1) was never applied, and the pair (id, method) was taken to identify a curve. Reversed
+  on 2026-10-20 (v0.106): the label's date is the date of the fit, `…-20261004`, so that one label
+  is one (a, b) without needing the method to disambiguate — see §14.
 - **Why not the MS100 curve any more:** with R-METHOD-1 it read a median −9.9 points against the
   ward monitor on these campaigns (p10 −17.2), and a curve fitted with one method applied to the R of
   another is worse still (−9.7 for the step-1 `reg_dols` fit on R-METHOD-1's R — the 2026-10-03
@@ -1287,6 +1289,45 @@ during capture", restored only if the capture closes normally). The recorder now
 and notes the moment in the raw stream; it still writes nothing to the board. Open: whether the
 firmware should re-arm HGAC on a recorder session start — rejected for now, the host-writes-to-
 board rule of 2026-09-10 stands.
+
+## 14. Naming the PI definition, and the date in an R-curve label (2026-10-20)
+
+**The problem.** Between v0.100 and v0.101 the PI changed definition (EMA-based RMS → band-passed
+RMS × 2√2, peak-to-peak units) and the same subject's PI went from a median 1.66 to ≈ 3 (HOSPNAV
+SUBJ08). Nothing in a capture recorded which definition produced its PI column; the SQI thresholds
+(0.5 / 2.0 %), `spo2_pi_max` and any comparison with a published neonatal threshold (Masimo
+peak-to-peak, e.g. Granelli's p5 of 0.70) silently depend on it. R had the same problem and solved
+it in v0.98 with `R-METHOD-n`.
+
+**Options considered.**
+1. *An id, by the R-method rule* (chosen): `PI_METHOD_ID` in the library, `pi_method_id` in
+   `AFE4490Config`, `$CFG` and the capture snapshot; a registry table in the spec. Changes only when
+   the number changes for the same input; parameters already travel in the snapshot. Cost: one
+   constant, one field, one key. No downside found.
+2. *Infer from `lib=` in the capture header.* Works for the past (≤ 0.100 → PI-METHOD-0, 0.101+ →
+   PI-METHOD-1) and is what readers do for old captures, but a version number is not a definition:
+   a future change that leaves the version bump to something else would be invisible. Kept only
+   as the fallback for captures that predate the key.
+3. *A setter and alternative methods in parallel, as R has.* Rejected for now: R got a second
+   method because a measured problem (5.07 → 1.6 points of scatter) justified it; PI's open
+   problems — the 25–250 % excursion for 6–14 s after an HGAC RF change, the biquad's 3–9 % ripple
+   at 60–90 BPM, the 2√2 sinusoid assumption against a measured crest factor of 2.8–3.2 (up to −13 %
+   versus a per-beat Max−Min; the MS100 reads PI = 1.47 × its Pulse Amp setting) — are properties
+   of this method to fix or characterise, not a choice between methods. A per-beat peak-to-peak
+   median (Masimo/Nellcor style) was tried offline on 2026-10-05 with an ambiguous result
+   (variability 28 → 42 % in the subject who moved, 8.7 → 4.5 % in the one who was still); it stays
+   a lab option until it improves something measurable.
+
+**The intermediate state** of 2026-10-05 (band-pass 0.5–5 Hz, window DC, no 2√2) gets no id: it
+never reached a board or a capture, and ids exist for definitions that produced data.
+
+**The date in an R-curve label.** `R-CURVE-STS0163-HOSPNAV-20260923` was used twice: for the
+discarded R-METHOD-1 proposal of 2026-09-24 and for the R-METHOD-2 fit of 2026-10-04 that ships.
+§9 argued that (id, method) identifies a curve; the PulseNest register (`docs/spo2_r_curves.md`)
+showed that a label that needs a second field to be unique is a weak label. Rule from 2026-10-20:
+the date is the date of the fit, and the capture's date goes in the register row. The shipped
+curve is relabelled `…-20261004` with identical coefficients; readers of captures keep matching the
+old string.
 
 ## Appendix — source rationale (to distill at consolidation)
 

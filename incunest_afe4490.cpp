@@ -33,7 +33,7 @@ namespace {
     // Runtime range [alg_window_s_min, alg_window_s_max] — 2 s keeps the "short window + alarm
     // delay" configuration of the neonatal literature (McClure 2016) reachable.
     constexpr float    spo2_window_s         = 6.0f;
-    // Default R curve (v0.100): R-CURVE-STS0163-HOSPNAV-20260923 — fitted with R-METHOD-2 as this
+    // Default R curve (v0.100): R-CURVE-STS0163-HOSPNAV-20261004 — fitted with R-METHOD-2 as this
     // library computes it (offline_runner replay of the 2026-09-23 HOSPNAV campaigns, two neonates,
     // Medle ST-S0163 probe, reference = the ward monitor read by VideoNest, 3455 stationary 8 s
     // windows): SpO2 = 123.98 − 39.13·R, Spearman ρ −0.80, scatter 1.65 points, median |residual|
@@ -42,8 +42,10 @@ namespace {
     // a simulator-free, hospital-monitor-referenced curve, not a controlled desaturation study
     // (ISO 80601-2-61 Annex DD). Only valid with R-METHOD-2 and for that probe. Spec §5.1,
     // rationale §9. The previous default (MS100 simulator, R-METHOD-0: 114.9208 − 30.5547·R)
-    // stays in the spec's registry.
-    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-STS0163-HOSPNAV-20260923";
+    // stays in the spec's registry. The label's date is the date of the FIT (2026-10-04), not of
+    // the campaign: until v0.105 it read -20260923, the same label the discarded R-METHOD-1
+    // proposal of 2026-09-24 had used — one label, one (a, b) (PulseNest docs/spo2_r_curves.md).
+    constexpr const char* spo2_r_curve_id_default          = "R-CURVE-STS0163-HOSPNAV-20261004";
     constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-2";
     constexpr float    spo2_r_curve_a_default = 123.98f;   // SpO2 = a - b·R
     constexpr float    spo2_r_curve_b_default =  39.13f;
@@ -1177,6 +1179,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
     cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
     cfg.spo2_pi_max           = _spo2_pi_max;
+    _copy_spo2_r_id(cfg.pi_method_id, PI_METHOD_ID);
     cfg.pi_bp_f_low_hz        = _pi_bpf.f_low;
     cfg.pi_bp_f_high_hz       = _pi_bpf.f_high;
     cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
