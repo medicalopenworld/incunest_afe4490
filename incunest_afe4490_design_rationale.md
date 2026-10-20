@@ -1329,6 +1329,49 @@ the date is the date of the fit, and the capture's date goes in the register row
 curve is relabelled `…-20261004` with identical coefficients; readers of captures keep matching the
 old string.
 
+## 15. The upper SpO2 bound — clamp margin 3 → 10 % (2026-10-20)
+
+**The problem.** The library publishes SpO2 = a − b·R only while it lies in [`spo2_min`,
+`spo2_max` + `spo2_clamp_margin`]; between 100 and the margin it is clamped to 100, beyond it the
+output is NaN with SQI 0. The margin was 3 % with no recorded provenance. With the shipped curve
+(123.98 − 39.13·R) the reject sits at R = 0.536.
+
+**Measured.** Three adult-finger sessions of 2026-10-18 (SUBJ01, three Medle ST-S0163-26 units,
+r 0.999, PI 7–9 %, HR3 valid 96–99 %): SpO2 withheld 1.3 / 2.3 / 3.9 % of the probe-on time, in
+99 % of those samples because a − b·R exceeded 103; the r and PI gates never fired. Episodes of
+0.7–20 s. In the same sessions a − b·R lay between 100 and 103 (clamped) 17–27 % of the time:
+the neonatal-foot curve reads +3 pt on an adult finger (SUBJ01 bias analysis), so a true 99
+computes as 102 and a true 100 as 103, exactly on the edge. On 2026-10-20, at rest with warm
+hands, Alex saw the value disappear repeatedly. The MS100 showed the same on 2026-10-19: at
+setpoint 100 % R was 0.48–0.53 (103–105) and SpO2 was invalid 51–99 % of the plateau.
+
+**What the reject was punishing.** A calibration offset, not a signal defect. Every quantity the
+library uses to judge the signal (r, PI, HR3's harmonic comb) was at its best in those samples.
+The upper bound cannot distinguish "the curve is 3 pt high at this site" from "R is wrong": both
+look like a − b·R > 100, and the first is expected whenever the probe is on a site other than the
+one the curve was fitted on (§9: one curve, ~1 pt per site; the adult finger shows 3 pt with the
+reference confounded).
+
+**What manufacturers do.** Nellcor and Masimo display 100 for any R at or beyond the top of
+their table; neither withholds a reading for being "too saturated". The ISO 80601-2-61 accuracy
+claim is stated over 70–100 %; above 100 there is nothing to be accurate about.
+
+**Options considered.**
+1. Keep 3 % and fit a curve per site — rejected: the register (`docs/spo2_r_curves.md`) argues
+   for one curve, and the dropout would return with every new probe lot or LED current (λ shift).
+2. Remove the upper reject entirely (clamp always) — rejected by a small margin: a − b·R far above
+   100 (R < 0.4 with this curve) has no physiological reading and is worth flagging as a
+   configuration or estimator fault rather than reported as 100.
+3. **Widen the margin to 10 % (chosen).** a − b·R up to 110 (R ≥ 0.357) is published as 100;
+   beyond that the output stays NaN. 10 covers the observed offsets (3 pt) with room for a lot or
+   current shift, and sits well outside anything the fitted curves produce at 100 % (R 0.48–0.61
+   across the register). It is a sanity bound, not a signal gate; the signal gates remain r
+   (`spo2_r_corr_min`) and PI (`spo2_pi_max`).
+
+**Consequence.** On the 2026-10-18 sessions the change removes every dropout (max a − b·R was
+106.4). It does not change any value below 100. Reverting is one constant. `pulsenest_lab.py`
+mirrors it (`SPO2_CLAMP_MARGIN`).
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

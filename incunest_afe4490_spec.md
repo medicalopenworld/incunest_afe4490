@@ -1011,7 +1011,7 @@ NaN pass-through.
 sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %) → SpO2 invalid, SQI = 0
 ```
 
-PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when SpO2 falls outside the valid range [70–100 %] and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
+PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
 #### PI methods (v0.106)
 
@@ -2943,7 +2943,7 @@ Applied by all HR algorithms equally to decide whether an output is reportable a
 | Internal search upper bound | `hr_search_max_bpm` | 263 BPM | Guard band: hr_max + 3 |
 | SpO2 reported valid lower bound | `spo2_min` | 70 % | SpO2 |
 | SpO2 reported valid upper bound | `spo2_max` | 100 % | SpO2 |
-| SpO2 clamp margin | `spo2_clamp_margin` | 3 % | Values within margin are clamped, not rejected |
+| SpO2 clamp margin | `spo2_clamp_margin` | 10 % | a − b·R up to 110 % reads 100 %; beyond that invalid. 3 % until v0.106: a +3 pt curve offset (adult finger, MS100 at 100 %) withheld SpO2 at SaO2 100 % — rationale §15 |
 
 ---
 
@@ -3206,6 +3206,10 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.107  | **`spo2_clamp_margin` 3 → 10 % (§5.1, §10):** a − b·R up to 110 % is published  |
+|         | as 100; only beyond that is SpO2 withheld. With 3 % a curve offset of +3 pt     |
+|         | (the neonatal-foot curve on an adult finger; the MS100 at setpoint 100) made   |
+|         | SpO2 vanish at SaO2 100 % with r 0.999 and PI 7 %. Rationale §15.              |
 | v0.106  | **The PI definition gets a name (§5.1, *PI methods*): `PI_METHOD_ID` =         |
 |         | `PI-METHOD-1`, `AFE4490Config::pi_method_id`; `PI-METHOD-0` is the ≤ v0.100     |
 |         | EMA/RMS definition. Traceability only — no setter, no alternative. Default R   |

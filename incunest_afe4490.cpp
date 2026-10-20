@@ -51,7 +51,10 @@ namespace {
     constexpr float    spo2_r_curve_b_default =  39.13f;
     constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
     constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
-    constexpr float    spo2_clamp_margin   =   3.0f;   // % — clamp to spo2_max if within margin above
+    constexpr float    spo2_clamp_margin   =  10.0f;   // % — clamp to spo2_max if within margin above;
+                                                       //     beyond it the curve is off the physiology
+                                                       //     (3 → 10 in v0.107: a 3-pt curve offset at
+                                                       //     SaO2 100 % withheld SpO2 — rationale §15)
     // EXPERIMENT (OT-domain input, branch experiment/ot-domain-inputs): SpO2's DC/AC now
     // live in OT units (~1e-5 typical, dimensionless A/A) instead of adc_code (~1e5).
     // Presence detection (is there a real signal / finger applied?) is RSQM's responsibility
