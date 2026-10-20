@@ -276,7 +276,7 @@ struct AFE4490Config {
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
-    float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
+    float             spo2_r_method2_reg_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%] (v0.101)
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11)
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
@@ -332,7 +332,7 @@ void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output 
 void setSpO2MinDC(float counts);                           // no-finger DC threshold [adc_code]
 void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
 void setSpO2RMethod(uint8_t method);                       // 1 = RMS ratio, 2 = regression on derivatives (default, v0.100)
-void setSpO2RCorrMin(float r);                              // R-METHOD-2 validity gate on r (default 0.8)
+void setSpO2RMethod2RegCorrMin(float r);                              // R-METHOD-2 validity gate on r (default 0.8)
 bool setSpO2RCurve(const char* id, const char* r_method_id, float a, float b);  // R curve + the R method it was fitted with (v0.98; replaces setSpO2Coefficients)
 
 // HR1
@@ -1011,7 +1011,7 @@ NaN pass-through.
 sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %) → SpO2 invalid, SQI = 0
 ```
 
-PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
+PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_method2_reg_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_method2_reg_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
 #### PI methods (v0.106)
 
@@ -1064,13 +1064,13 @@ Two different things decide the SpO2 number, and each has its own identifier:
 |---|---|---|
 | `R-METHOD-0` | Inputs: ambient-corrected `adc_code` (`led1_sub` / `led2_sub`). DC = IIR low-pass, τ = 1.6 s. AC = √(EMA of (x − DC)²), τ = 1.0 s. R = (AC_red/DC_red)/(AC_ir/DC_ir). | The library of 2026-03-23, when the default curve was fitted. Reconstructed from the conversation log (session 26 and the SpO2LocalCalc mirror of that day), not from a tagged version. |
 | `R-METHOD-1` | Inputs: OT (`ot_led1` / `ot_led2`, v0.38). DC = `EmaChannel` mean, τ = `spo2_ema_mean_tau_s` = 2.0 s. AC = RMS of (x − DC) over the `spo2_window_s` = 6.0 s sliding window (v0.102; until v0.101 √(`EmaChannel` var), an EMA with τ 6.0 s, both since 2026-06-11). Same ratio. | v0.38 – v0.99 default; since v0.100 selectable with `setSpO2RMethod(1)`. |
-| `R-METHOD-2` | Inputs: OT. Per channel: one-biquad band-pass 0.5–5 Hz (`BiquadFilter::init_bp`, precharged) divided by the same `EmaChannel` mean (DC, τ 2.0 s): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red. On the first differences dx = x[n] − x[n−1], dy: **R = Σ(dx·dy) / Σ(dx²)**, the least-squares slope of dy on dx through the origin, and **r = Σ(dx·dy) / √(Σ(dx²)·Σ(dy²))**, its correlation; the three sums run over the `spo2_window_s` = 6.0 s sliding window (v0.102; EMAs with τ 6.0 s and an 18 s warm-up until v0.101), valid from the first full window. SpO2 is withheld (NaN, SQI 0) while r < `spo2_r_corr_min` = 0.8; R and r stay reported. The band-pass corners are constants (`spo2_bp_f_low_hz`, `spo2_bp_f_high_hz`); the gate has `setSpO2RCorrMin()`. | **Current, default since v0.100** (`setSpO2RMethod(2)`). Rationale §9–§10. |
+| `R-METHOD-2` | Inputs: OT. Per channel: one-biquad band-pass 0.5–5 Hz (`BiquadFilter::init_bp`, precharged) divided by the same `EmaChannel` mean (DC, τ 2.0 s): x = BP(ot_ir)/DC_ir, y = BP(ot_red)/DC_red. On the first differences dx = x[n] − x[n−1], dy: **R = Σ(dx·dy) / Σ(dx²)**, the least-squares slope of dy on dx through the origin, and **r = Σ(dx·dy) / √(Σ(dx²)·Σ(dy²))**, its correlation; the three sums run over the `spo2_window_s` = 6.0 s sliding window (v0.102; EMAs with τ 6.0 s and an 18 s warm-up until v0.101), valid from the first full window. SpO2 is withheld (NaN, SQI 0) while r < `spo2_r_method2_reg_corr_min` = 0.8; R and r stay reported. The band-pass corners are constants (`spo2_bp_f_low_hz`, `spo2_bp_f_high_hz`); the gate has `setSpO2RMethod2RegCorrMin()`. | **Current, default since v0.100** (`setSpO2RMethod(2)`). Rationale §9–§10. |
 
 Both methods run on every applied sample (the regression state is cheap: two biquads, five block
 accumulators and their buffers), so `setSpO2RMethod()` takes effect at the next window update
 (one decimation block) with no new warm-up;
 `AFE4490Config::spo2_r_method` (1 | 2) and `spo2_r_method_id` say which is in force, and the
-curve-mismatch check follows it. `AFE4490Data::spo2_r_corr` carries r (NaN under R-METHOD-1).
+curve-mismatch check follows it. `AFE4490Data::spo2_r_method2_reg_corr` carries r (NaN under R-METHOD-1).
 **Why the derivative regression (measured, rationale §9):** on 3471 stationary 8 s windows of the
 HOSPNAV campaigns it brings the R→SpO2 scatter from 5.07 points (R-METHOD-1) to 1.6 and Spearman ρ
 from −0.44 to −0.80; it estimates the same Beer-Lambert quantity (the slope of ln I_red on ln I_ir
@@ -3206,6 +3206,11 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.108  | **Rename: the R-METHOD-2 correlation is `spo2_r_method2_reg_corr`** (was          |
+|         | `spo2_r_corr`): `AFE4490Data::spo2_r_method2_reg_corr`, `spo2_r_method2_reg_corr_min`, |
+|         | `setSpO2RMethod2RegCorrMin()`, `$CFG` key `spo2_r_method2_reg_corr_min`, `$M4` field 36 |
+|         | `R_METHOD2_REG_CORR`. Same numbers. Under `spo2_r_` only R and its own quantities  |
+|         | live, and `r_corr` read as "R's correlation". Rationale §16.                     |
 | v0.107  | **`spo2_clamp_margin` 3 → 10 % (§5.1, §10):** a − b·R up to 110 % is published  |
 |         | as 100; only beyond that is SpO2 withheld. With 3 % a curve offset of +3 pt     |
 |         | (the neonatal-foot curve on an adult finger; the MS100 at setpoint 100) made   |

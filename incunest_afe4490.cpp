@@ -82,11 +82,11 @@ namespace {
     constexpr float    spo2_pi_max         = 20.0f;    // % — PI above this → SpO2 invalid, SQI = 0
     // R-METHOD-2 (v0.100, design rationale §9–§10). Band-pass = the pulse band HR2 uses, one
     // biquad: 0.3/0.7–4/8 Hz and 2 vs 4 poles measured equal for R on HOSPNAV (scatter 1.63 vs
-    // 1.62 points), so no new filter type enters the library for it. r below spo2_r_corr_min
+    // 1.62 points), so no new filter type enters the library for it. r below spo2_r_method2_reg_corr_min
     // invalidates SpO2: on the corpus r never fell below 0.83 with a pulse (p1 0.949), and the
     // threshold is provisional until r has been measured on pulse-less input (probe off, motion).
     constexpr uint8_t  spo2_r_method_default = 2;
-    constexpr float    spo2_r_corr_min       = 0.8f;
+    constexpr float    spo2_r_method2_reg_corr_min       = 0.8f;
     constexpr float    spo2_bp_f_low_hz      = 0.5f;    // Hz — 30 BPM, the HR floor (§8)
     constexpr float    spo2_bp_f_high_hz     = 5.0f;    // Hz — R does not depend on the cut (MS100 40–250 BPM)
     constexpr float    spo2_reg_eps          = 1e-30f;  // EMA(dx²)/EMA(dy²) at or below this: no slope yet
@@ -425,7 +425,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
       _spo2_pi_max(spo2_pi_max),
       _spo2_r_method(spo2_r_method_default),
-      _spo2_r_corr_min(spo2_r_corr_min),
+      _spo2_r_method2_reg_corr_min(spo2_r_method2_reg_corr_min),
       _hr1_dc_tau_s(hr1_dc_tau_s),
       _hr1_lp_cutoff_hz(hr1_lp_cutoff_hz), _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
       _hr1_threshold_fraction(hr1_threshold_fraction),
@@ -942,9 +942,9 @@ void INCUNEST_AFE4490::setSpO2RMethod(uint8_t method) {
     _spo2_warn_if_curve_mismatch();
 }
 
-void INCUNEST_AFE4490::setSpO2RCorrMin(float r) {
+void INCUNEST_AFE4490::setSpO2RMethod2RegCorrMin(float r) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_r_corr_min = r;
+    _spo2_r_method2_reg_corr_min = r;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1170,10 +1170,10 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     memcpy(cfg.spo2_r_curve_id, _spo2_r_curve_id, sizeof(_spo2_r_curve_id));
     memcpy(cfg.spo2_r_curve_r_method_id, _spo2_r_curve_r_method_id, sizeof(_spo2_r_curve_r_method_id));
     cfg.spo2_r_curve_method_match = strcmp(_spo2_r_curve_r_method_id, _spo2_r_method_id()) == 0;
-    cfg.spo2_r_method         = _spo2_r_method;
-    cfg.spo2_r_corr_min       = _spo2_r_corr_min;
-    cfg.spo2_r_curve_a   = _spo2_r_curve_a;
-    cfg.spo2_r_curve_b   = _spo2_r_curve_b;
+    cfg.spo2_r_method               = _spo2_r_method;
+    cfg.spo2_r_method2_reg_corr_min = _spo2_r_method2_reg_corr_min;
+    cfg.spo2_r_curve_a              = _spo2_r_curve_a;
+    cfg.spo2_r_curve_b              = _spo2_r_curve_b;
     cfg.spo2_ema_mean_tau_s     = _spo2_ema_mean_tau_s;
     cfg.spo2_window_s         = _spo2_window_s;
     cfg.pi_window_s           = _pi_window_s;
@@ -2438,7 +2438,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _spo2_reset_state();
         _current_data.spo2        = NAN;
         _current_data.spo2_r      = NAN;
-        _current_data.spo2_r_corr = NAN;
+        _current_data.spo2_r_method2_reg_corr = NAN;
         _current_data.spo2_sqi    = 0.0f;
         return;
     }
@@ -2479,7 +2479,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         if (_spo2_buf_count < (uint32_t)_spo2_buf_n) {
             _current_data.spo2        = NAN;
             _current_data.spo2_r      = NAN;
-            _current_data.spo2_r_corr = NAN;
+            _current_data.spo2_r_method2_reg_corr = NAN;
             _current_data.spo2_sqi    = 0.0f;
         }
         return;
@@ -2513,7 +2513,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _spo2_buf_count++;
         _current_data.spo2        = NAN;
         _current_data.spo2_r      = NAN;
-        _current_data.spo2_r_corr = NAN;
+        _current_data.spo2_r_method2_reg_corr = NAN;
         _current_data.spo2_sqi    = 0.0f;
         return;
     }
@@ -2538,7 +2538,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         R = valid ? (ac_red / dc_red) / (ac_ir / dc_ir) : NAN;
     }
     _current_data.spo2_r      = R;
-    _current_data.spo2_r_corr = r;
+    _current_data.spo2_r_method2_reg_corr = r;
     if (!valid) {
         _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
@@ -2548,7 +2548,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     const float spo2 = _spo2_r_curve_a - _spo2_r_curve_b * R;    // the R curve (setSpO2RCurve)
     // R-METHOD-2's validity gate: a fit that does not describe the data gives no SpO2. R and r
     // stay visible so the reason is on record.
-    const bool r_ok = (_spo2_r_method != 2) || (r >= _spo2_r_corr_min);
+    const bool r_ok = (_spo2_r_method != 2) || (r >= _spo2_r_method2_reg_corr_min);
     // PI is computed independently by _pi_update_sample() (v0.101, rationale §11) — NaN while its
     // own window is still filling; since v0.102 the two windows are independent lengths, so a PI
     // window longer than the SpO2 window makes this gate bind for the difference.

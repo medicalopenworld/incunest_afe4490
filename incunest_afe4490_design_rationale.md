@@ -696,11 +696,11 @@ on every sample of the 24 HOSPNAV parts. Decisions taken with it:
   A/B in the next hospital campaign and the replay of older behaviour. Not two outputs: `spo2_r` is
   the method in force, `$CFG` names it.
 - **r is a validity gate, not the SQI value.** SQI keeps its PI ramp (signal strength); under
-  R-METHOD-2, r < `spo2_r_corr_min` (0.8) sets SpO2 = NaN, SQI = 0 and leaves R and r reported, so
+  R-METHOD-2, r < `spo2_r_method2_reg_corr_min` (0.8) sets SpO2 = NaN, SQI = 0 and leaves R and r reported, so
   the reason is on record. Mapping r itself onto [0, 1] was rejected: r = 0.9 is a sound fit on this
   corpus (p1 of the window medians 0.944) and would have read as "half quality". The 0.8 stays
   provisional (§9 above): it costs nothing on the corpus and has not been measured on pulse-less
-  input. r travels in `AFE4490Data::spo2_r_corr`; whether the `$M4` frame carries it is the
+  input. r travels in `AFE4490Data::spo2_r_method2_reg_corr`; whether the `$M4` frame carries it is the
   firmware's call (its 288-byte slot has ~10 B of margin after the 7-figure OT).
 - **The curve is fitted on the library's own R** (`fit_method2.py`, same pairs, stationarity rule
   and bin fit as the step-1 table): SpO2 = 123.98 − 39.13·R, pooled over 3455 windows of the two
@@ -1366,11 +1366,34 @@ claim is stated over 70–100 %; above 100 there is nothing to be accurate about
    beyond that the output stays NaN. 10 covers the observed offsets (3 pt) with room for a lot or
    current shift, and sits well outside anything the fitted curves produce at 100 % (R 0.48–0.61
    across the register). It is a sanity bound, not a signal gate; the signal gates remain r
-   (`spo2_r_corr_min`) and PI (`spo2_pi_max`).
+   (`spo2_r_method2_reg_corr_min`) and PI (`spo2_pi_max`).
 
 **Consequence.** On the 2026-10-18 sessions the change removes every dropout (max a − b·R was
 106.4). It does not change any value below 100. Reverting is one constant. `pulsenest_lab.py`
 mirrors it (`SPO2_CLAMP_MARGIN`).
+
+## 16. Naming the R-METHOD-2 correlation: `spo2_r_method2_reg_corr` (2026-10-20)
+
+**The problem (Alex).** Reading the source, R (the ratio of ratios) and r (the correlation of
+R-METHOD-2's regression) were indistinguishable: snake_case drops the case, and `spo2_r_corr` sat
+under the same `spo2_r_` root as `spo2_r_method` and `spo2_r_curve_*`, reading as "the
+correlation of R". In five consecutive lines of `getConfig()` four were R and one was r.
+
+**Options.**
+1. `spo2_reg_corr` (own root, no `r`). Unambiguous, but it moves the quantity out of R's
+   namespace although it is a by-product of the R computation; §9's rule is one root per concept.
+2. `spo2_r_m2_reg_corr` (Alex's first proposal): keeps the root and names the method. Rejected on
+   one point: `M2` is a frame mode in this project (`$M1`–`$M4`); a column `R_M2_REG_CORR` inside a
+   `$M4` frame reads as a frame mode.
+3. **`spo2_r_method2_reg_corr` (chosen).** Root `spo2_r_` (it is R's), `method2` spelt like
+   `spo2_r_method`, `reg_corr` says what it is. Rule: under `spo2_r_` only R and its own
+   quantities; the correlation is never a bare `r_`. The method number in the name pins the
+   quantity to the implementation that produces it, which is what the `R-METHOD-n` ids do anyway.
+
+**Scope.** Library (`AFE4490Data`, `AFE4490Config`, setter, test accessor), firmware (`$CFG`
+key, `$SET`, `$M4` field 36 `R_METHOD2_REG_CORR`), capture dictionary and CSV column, the lab's
+mirror and buffers, the bias-analysis tool, tests, specs. Captures already written keep `R_CORR`
+and `spo2_r_corr_min`: the readers take the old names as synonyms, as they did for `spo2a/b`.
 
 ## Appendix — source rationale (to distill at consolidation)
 

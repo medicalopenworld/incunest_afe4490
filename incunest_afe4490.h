@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.107"
+#define INCUNEST_AFE4490_VERSION "0.108"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -193,9 +193,9 @@ struct AFE4490Data {
                               // HGAC changes RF, unlike the raw-ADC-code led1_sub/led2_sub it replaced.
                               // Display only — not an input to algorithms.
     float   spo2;        // SpO2 in %
-    float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based ramp; 0 also when R-METHOD-2's r < spo2_r_corr_min
+    float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based ramp; 0 also when R-METHOD-2's r < spo2_r_method2_reg_corr_min
     float   spo2_r;      // R used for SpO2: R-METHOD-1 ratio or R-METHOD-2 regression slope (getConfig().spo2_r_method_id)
-    float   spo2_r_corr; // R-METHOD-2 only: correlation r of the regression [−1…1], its goodness of fit; NaN otherwise
+    float   spo2_r_method2_reg_corr; // R-METHOD-2 only: correlation r of the regression [−1…1], its goodness of fit; NaN otherwise
     float   pi;          // Perfusion Index: (AC_ir / DC_ir) * 100 [%]
     float   hr1;         // HR1 (peak detection) in bpm
     float   hr1_sqi;     // HR1 Signal Quality Index [0–1]: 1 − CV/0.15; 0=arrhythmia/artefact/invalid, 1=perfectly regular
@@ -712,7 +712,7 @@ struct AFE4490Config {
     float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
     float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
-    float             spo2_r_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
+    float             spo2_r_method2_reg_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%]
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11):
     // own band-pass (not an EMA subtraction) for the AC, AC and DC from the same sliding window
@@ -842,7 +842,7 @@ public:
     // R method in force (v0.100): 1 = RMS ratio, 2 = regression on derivatives (default). Both
     // run on every sample, so switching is immediate; anything else is rejected and logged.
     void setSpO2RMethod(uint8_t method);
-    void setSpO2RCorrMin(float r);                              // R-METHOD-2 validity gate on r
+    void setSpO2RMethod2RegCorrMin(float r);                              // R-METHOD-2 validity gate on r
 
     // PI (Perfusion Index) algorithm setter — decoupled from SpO2 (v0.101); callable before or
     // after begin(). Band-pass 0.5–15 Hz by default: the same floor as HR2/R-METHOD-2, but the
@@ -1693,7 +1693,7 @@ private:
     float    _spo2_pi_sqi_hi;
     float    _spo2_pi_max;
     uint8_t  _spo2_r_method;
-    float    _spo2_r_corr_min;
+    float    _spo2_r_method2_reg_corr_min;
     float    _hr1_dc_tau_s;
     float    _hr1_lp_cutoff_hz;
     // Decay of the running max that sets HR1's detection threshold. Was a bare 0.9999f literal
@@ -1799,7 +1799,7 @@ public:
     }
     float test_spo2()                       { return _current_data.spo2; }
     float test_spo2_r()                     { return _current_data.spo2_r; }
-    float test_spo2_r_corr()                { return _current_data.spo2_r_corr; }
+    float test_spo2_r_method2_reg_corr()                { return _current_data.spo2_r_method2_reg_corr; }
     float test_spo2_sqi()                   { return _current_data.spo2_sqi; }
     float test_spo2_ir_ema_mean()  const { return _spo2_ch_ir_ema.mean; }
     float test_spo2_ir_ema_var()   const { return _spo2_ch_ir_ema.var; }
