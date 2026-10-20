@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.108"
+#define INCUNEST_AFE4490_VERSION "0.109"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1811,6 +1811,27 @@ public:
     // HGAC — full-pipeline entry point (HGAC hooks inside _process_sample(), not a narrower path)
     void  test_feed_sample(int32_t led1, int32_t led2, int32_t aled1, int32_t aled2) {
         _process_sample(led1, led2, aled1, aled2, led1 - aled1, led2 - aled2);
+    }
+    // Host builds have no Task B/C: a test_feed_sample() that fires HR2/HR3's interval sets
+    // _hr2/_hr3_computing and signals a semaphore nobody takes, so the slow path never ran and
+    // the flag stayed set for good (every raw replay of the offline runner up to v0.27 carried
+    // HR2 = HR3 = NaN). This runs what Task A signalled, synchronously, writing exactly what the
+    // task bodies write (v0.109). Call it after each test_feed_sample(). Returns how many ran.
+    int   test_run_pending_hr_computations() {
+        int n = 0;
+        if (_hr2_computing) {
+            _hr2_compute();
+            _current_data.hr2     = (_hr2_result_sqi > 0.0f) ? _hr2_result : NAN;
+            _current_data.hr2_sqi = _hr2_result_sqi;
+            _hr2_computing = false; n++;
+        }
+        if (_hr3_computing) {
+            _hr3_compute();
+            _current_data.hr3     = (_hr3_result_sqi > 0.0f) ? _hr3_result : NAN;
+            _current_data.hr3_sqi = _hr3_result_sqi;
+            _hr3_computing = false; n++;
+        }
+        return n;
     }
     AFE4490RF test_hgac_rf_led1() const { return _afe_tia_rf_led1; }
     AFE4490RF test_hgac_rf_led2() const { return _afe_tia_rf_led2; }

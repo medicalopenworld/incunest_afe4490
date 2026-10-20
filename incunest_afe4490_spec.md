@@ -2563,7 +2563,9 @@ columns are missing):
 | IR ambient      | `ALED1` | `IR_Amb`  | `aled1` |
 | RED ambient     | `ALED2` | `RED_Amb` | `aled2` |
 
-Since v0.20 the runner feeds the **raw ADC codes** through `test_feed_sample()` — the
+Since v0.20 the runner feeds the **raw ADC codes** through `test_feed_sample()` (and, since
+runner v0.28 / lib v0.109, `test_run_pending_hr_computations()` after each sample, or HR2/HR3
+stay NaN: the host has no Task B/C) — the
 full `_process_sample()` path (analog state → RSQM → SpO2/HR1/HR2/HR3) — so OT, probe
 state (debounce included), R, PI and SpO2 are recomputed by the library itself; the
 `*_Sub` columns are derived internally and no longer read.
@@ -3206,6 +3208,10 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.109  | **Test hook `test_run_pending_hr_computations()` (§9):** runs the HR2/HR3 slow paths |
+|         | Task A signalled, synchronously, as the task bodies do. Host builds have no Task  |
+|         | B/C, so a raw replay through `test_feed_sample()` never produced HR2/HR3 (flag  |
+|         | stuck after the first interval). No change on the device. Runner v0.28 calls it. |
 | v0.108  | **Rename: the R-METHOD-2 correlation is `spo2_r_method2_reg_corr`** (was          |
 |         | `spo2_r_corr`): `AFE4490Data::spo2_r_method2_reg_corr`, `spo2_r_method2_reg_corr_min`, |
 |         | `setSpO2RMethod2RegCorrMin()`, `$CFG` key `spo2_r_method2_reg_corr_min`, `$M4` field 36 |
