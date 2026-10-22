@@ -76,10 +76,25 @@ namespace {
     constexpr float    spo2_pi_sqi_hi      = 2.0f;     // % — PI above this → SQI = 1
     // Both in PEAK-TO-PEAK units since v0.101 (the units Nellcor/Masimo quote them in; the library's
     // PI was RMS-based until then, i.e. ÷2.8–3.2, so these gates fired ~3× too early — rationale §11).
-    // Upper bound: the industry's displayed range tops at 20 % (Masimo 0.02–20, Mindray 0.05–20,
-    // Nellcor 0.03–20). Above it the "PI" is a DC transient (probe coming off before probe_state
-    // notices, an RF step), not perfusion: SpO2 is withheld instead of reported with SQI = 1.
+    // Upper bound: the industry's DISPLAYED range tops at 20 % — Masimo 0.02–20 (LAB-9204A, Rad-57
+    // operator's manual; lab3410f "Perfusion Index" whitepaper defines PI only as pulsatile over
+    // non-pulsatile), Mindray 0.05–20 (BeneVision N-Series operator's manual, SpO2 chapter),
+    // Nellcor 0.03–20 (PM-1000N service manual, Table 2-1 note 6, "detected IR pulse modulation").
+    // Links in PulseNest docs/ppg_neonatal_manufacturer_references.md. None of the three discloses
+    // its estimator (peak-to-peak per beat vs RMS); ISO 80601-2-61:2026 201.3.245 defines %mod only
+    // as "approximately AC/DC × 100". So 20 % is a display convention, not a physiological limit
+    // (open: where the 20 % ceiling really comes from — BACKLOG 2026-10-22). Above it the "PI" is a
+    // DC transient (probe coming off before probe_state notices, an RF step), not perfusion: SpO2
+    // is withheld instead of reported with SQI = 1.
     constexpr float    spo2_pi_max         = 20.0f;    // % — PI above this → SpO2 invalid, SQI = 0
+    // Pulse gate (v0.110, rationale §17): SpO2 only while HR3 has identified a pulse. Measured on
+    // the 21 referenced sessions (2026-10-20): the moving neonate SUBJ10 went from 81 % of windows
+    // published at −16 points to 2.6 % at +2; quiet subjects kept 78–98 %; what the gate withholds
+    // there had a median error of 2.5–3.8 points. Costs: desaturations that coincide with movement
+    // are withheld (−27 points of availability below 90 % in SUBJ08/09) and the first value after
+    // applying the probe waits for HR3's 10.24 s buffer (median 10.5 s, p90 36.6 s). No hold of the
+    // last value: HR3 stays valid into the first seconds of motion, so a hold re-admits the error.
+    constexpr bool     spo2_pulse_gate_enable = true;
     // R-METHOD-2 (v0.100, design rationale §9–§10). Band-pass = the pulse band HR2 uses, one
     // biquad: 0.3/0.7–4/8 Hz and 2 vs 4 poles measured equal for R on HOSPNAV (scatter 1.63 vs
     // 1.62 points), so no new filter type enters the library for it. r below spo2_r_method2_reg_corr_min
@@ -426,6 +441,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_pi_max(spo2_pi_max),
       _spo2_r_method(spo2_r_method_default),
       _spo2_r_method2_reg_corr_min(spo2_r_method2_reg_corr_min),
+      _spo2_pulse_gate_enable(spo2_pulse_gate_enable),
       _hr1_dc_tau_s(hr1_dc_tau_s),
       _hr1_lp_cutoff_hz(hr1_lp_cutoff_hz), _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
       _hr1_threshold_fraction(hr1_threshold_fraction),
@@ -948,6 +964,12 @@ void INCUNEST_AFE4490::setSpO2RMethod2RegCorrMin(float r) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+void INCUNEST_AFE4490::setSpO2PulseGateEnable(bool on) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _spo2_pulse_gate_enable = on;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 void INCUNEST_AFE4490::setSpO2EmaMeanTauS(float tau_s) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _spo2_ema_mean_tau_s = tau_s;
@@ -1182,6 +1204,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
     cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
     cfg.spo2_pi_max           = _spo2_pi_max;
+    cfg.spo2_pulse_gate_enable = _spo2_pulse_gate_enable;
     _copy_spo2_r_id(cfg.pi_method_id, PI_METHOD_ID);
     cfg.pi_bp_f_low_hz        = _pi_bpf.f_low;
     cfg.pi_bp_f_high_hz       = _pi_bpf.f_high;
@@ -2440,6 +2463,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _current_data.spo2_r      = NAN;
         _current_data.spo2_r_method2_reg_corr = NAN;
         _current_data.spo2_sqi    = 0.0f;
+        _current_data.spo2_hold_reason = SpO2HoldReason::PROBE;
         return;
     }
 
@@ -2481,6 +2505,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
             _current_data.spo2_r      = NAN;
             _current_data.spo2_r_method2_reg_corr = NAN;
             _current_data.spo2_sqi    = 0.0f;
+            _current_data.spo2_hold_reason = SpO2HoldReason::WINDOW;
         }
         return;
     }
@@ -2515,40 +2540,45 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _current_data.spo2_r      = NAN;
         _current_data.spo2_r_method2_reg_corr = NAN;
         _current_data.spo2_sqi    = 0.0f;
+        _current_data.spo2_hold_reason = SpO2HoldReason::WINDOW;
         return;
     }
 
-    float R, r = NAN;
-    bool  valid;
+    // Locals (renamed v0.110, Alex): R the ratio; reg_corr the correlation of R-METHOD-2's
+    // regression (never a bare r); eps_valid = the window sums clear their epsilons, i.e. the
+    // divisions below are safe — not "SpO2 is valid", which the gates at the end decide.
+    float R, reg_corr = NAN;
+    bool  eps_valid;
     if (_spo2_r_method == 2) {
         // R = Σ(dx·dy)/Σ(dx²) over the window: the least-squares slope of dy on dx through the
         // origin, i.e. of ln(I_red) on ln(I_ir) over the pulse — the Beer-Lambert ratio R-METHOD-1
         // approximates. r = Σ(dx·dy)/√(Σ(dx²)·Σ(dy²)) is that fit's correlation: ~0.99 with a pulse.
         // (Sums, not means: the common 1/N cancels in both ratios.)
-        valid = _spo2_sxx_sum > spo2_reg_eps && _spo2_syy_sum > spo2_reg_eps;
-        R = valid ? _spo2_sxy_sum / _spo2_sxx_sum : NAN;
-        r = valid ? _spo2_sxy_sum / sqrtf(_spo2_sxx_sum * _spo2_syy_sum) : NAN;
+        eps_valid = _spo2_sxx_sum > spo2_reg_eps && _spo2_syy_sum > spo2_reg_eps;
+        R        = eps_valid ? _spo2_sxy_sum / _spo2_sxx_sum : NAN;
+        reg_corr = eps_valid ? _spo2_sxy_sum / sqrtf(_spo2_sxx_sum * _spo2_syy_sum) : NAN;
     } else {
         // R = (AC_red/DC_red)/(AC_ir/DC_ir) — ISO 80601-2-61:2026 "ratio of ratios"; each term is
         // the channel's AC/DC, AC = RMS of (x − mean) over the window (the common 1/N cancels).
         // Guard is division-safety only (presence is probe_state's job).
         const float ac_ir  = sqrtf(_spo2_var_ir_sum);
         const float ac_red = sqrtf(_spo2_var_red_sum);
-        valid = dc_red >= spo2_div_eps && ac_ir >= spo2_div_eps;
-        R = valid ? (ac_red / dc_red) / (ac_ir / dc_ir) : NAN;
+        eps_valid = dc_red >= spo2_div_eps && ac_ir >= spo2_div_eps;
+        R = eps_valid ? (ac_red / dc_red) / (ac_ir / dc_ir) : NAN;
     }
     _current_data.spo2_r      = R;
-    _current_data.spo2_r_method2_reg_corr = r;
-    if (!valid) {
+    _current_data.spo2_r_method2_reg_corr = reg_corr;
+    if (!eps_valid) {
         _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
+        _current_data.spo2_hold_reason = SpO2HoldReason::EPS;
         return;
     }
 
     const float spo2 = _spo2_r_curve_a - _spo2_r_curve_b * R;    // the R curve (setSpO2RCurve)
     // R-METHOD-2's validity gate: a fit that does not describe the data gives no SpO2. R and r
     // stay visible so the reason is on record.
-    const bool r_ok = (_spo2_r_method != 2) || (r >= _spo2_r_method2_reg_corr_min);
+    const bool reg_corr_ok = (_spo2_r_method != 2) || (reg_corr >= _spo2_r_method2_reg_corr_min);
     // PI is computed independently by _pi_update_sample() (v0.101, rationale §11) — NaN while its
     // own window is still filling; since v0.102 the two windows are independent lengths, so a PI
     // window longer than the SpO2 window makes this gate bind for the difference.
@@ -2558,7 +2588,21 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // a DC transient, not perfusion: it used to map to SQI = 1 (output clamped, input not) and
     // publish a plausible-looking SpO2 while the probe was coming off.
     const bool pi_ok = !isnan(_current_data.pi) && _current_data.pi <= _spo2_pi_max;
-    if (r_ok && pi_ok && spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin) {
+    const bool range_ok = spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin;
+    // Pulse gate (v0.110): HR3's harmonic test is the artefact criterion the red-IR correlation
+    // lacks (SUBJ10: r 0.96 with −16 points). _current_data.hr3 is NaN while HR3 has no valid
+    // result — committed by Task C under _state_mutex, which Task A holds here. The window above
+    // keeps running meanwhile, so when HR3 returns SpO2 is published in that same block: HR3
+    // valid means 10.24 s of pulse, which covers this 6 s window.
+    // Validity is hr3_sqi > 0 (Task C writes hr3 = sqi > 0 ? result : NAN), not !isnan(hr3): before
+    // Task C's first commit after boot _current_data.hr3 is 0.0, which would open the gate.
+    const bool pulse_ok = !_spo2_pulse_gate_enable || (_current_data.hr3_sqi > 0.0f && !isnan(_current_data.hr3));
+    _current_data.spo2_hold_reason =
+        !reg_corr_ok ? SpO2HoldReason::REG_CORR :
+        !pi_ok       ? SpO2HoldReason::PI :
+        !range_ok    ? SpO2HoldReason::RANGE :
+        !pulse_ok    ? SpO2HoldReason::PULSE : SpO2HoldReason::NONE;
+    if (_current_data.spo2_hold_reason == SpO2HoldReason::NONE) {
         _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
         // PI < spo2_pi_sqi_lo → SQI = 0 (very weak signal). PI ≥ spo2_pi_sqi_hi → SQI = 1

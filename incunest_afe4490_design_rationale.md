@@ -1465,6 +1465,83 @@ table for Alex; not adopted in this version. Open: whether true preterm PPG has 
 than these neonates (no gestational age in the sessions; the MS100 cannot emulate it), and the
 monitor's pulse rate for the next campaign (VideoNest's `pr` field exists and stayed empty).
 
+## 17. The SpO2 artefact gate: HR3's pulse identification, withhold, no hold (2026-10-20 → 2026-10-22)
+
+**The problem.** SUBJ10 (term neonate, moving, 2026-10-13) read −16 points against the Mindray N17
+with R 1.1–1.2 at a reference of 97 %, and 81 % of its reference windows passed every gate the
+library had: probe applied, r ≥ 0.8, PI ≤ 20 %, 70 ≤ a − b·R ≤ 110. r stayed at 0.96 — the
+regression of red on IR fits motion as well as it fits a pulse. The spectrograms of 2026-10-16
+separated the two subjects of that day: a clean harmonic comb in SUBJ11, none in SUBJ10; HR3 was
+valid in 18 of 760 SUBJ10 windows against 1500 of 1664 in SUBJ11.
+
+**Prior art.** Nellcor (US 6,083,172), Philips FAST (US 6,631,281) and Masimo SET (Signal IQ) all
+tie SpO2 validity to the identification of the pulse and its harmonic structure, not to the red-IR
+correlation alone, which is one of their several criteria. Nellcor: harmonic energy decreasing
+with order, states Pulse present / Not sure / Pulse lost / Non-pulse → UPDATE / HOLD / CLEAR, a
+displayed value never older than 40 s. Philips: FFT every 1 s, harmonic families scored, six
+artefact criteria, the failing cycle discarded, INOP after ~10 s. Masimo: engines in parallel with
+a confidence → Low SIQ shows the value dimmed, Pulse Search blanks it. HR3 (FFT + Harmonic Product
+Spectrum, true-peak validation, §5.4) already computes the harmonic test.
+
+**Measured (PulseNest `experiments/spo2_artifact_gate_20261020.py`, report in
+`captures/sessions/GATE_ANALYSIS_20261020/findings.md`).** The 21 sessions with a reference
+(SUBJ08, 09, 10, 11, the adult finger SUBJ01, the MS100) replayed with lib v0.108 in OT-input mode,
+SpO2 recomputed with the shipped curve and the current validity rule, each candidate ANDed per
+sample; 8 s windows against the VideoNest OCR (confidence ≥ 0.9), published when ≥ 25 % of the
+samples pass.
+
+| subject | gate | windows published | Arms | > 4 pt |
+|---|---|---|---|---|
+| SUBJ10 moving | today | 81 % | 16.3 | 92 % |
+| SUBJ10 | **HR3 valid** | **2.6 %** | **2.1** | **0 %** |
+| SUBJ11 preterm, still | today / HR3 valid | 98 / 93 % | 1.45 / 1.23 | 1.5 / 0.7 % |
+| SUBJ08, SUBJ09 | today / HR3 valid | 97–100 / 78–80 % | 3.0–3.2 / 2.4 | 14–15 / 7 % |
+| adult finger, MS100 | today / HR3 valid | ≥ 98 % both | unchanged | unchanged |
+
+What the gate withholds in the quiet neonates was mostly bad: |bias| median 2.7 (SUBJ08), 3.8
+(SUBJ09), 2.5 (SUBJ11), with 42 / 45 / 20 % of those windows beyond 4 points; what it keeps:
+1.2 / 0.9 / 0.7 and 7 / 7 / 0.7 %.
+
+**Candidates rejected.** r ≥ 0.99 still publishes 11 % of SUBJ10, all at −14 points, and already
+costs 10–15 % of SUBJ08/09; PI ≤ 10 % keeps 76 % of SUBJ10 and cuts the adult finger (PI 7–9 %).
+HR3_SQI thresholds (0.3 / 0.5 / 0.7) add nothing over validity: when HR3 passes the true-peak test
+its SQI is already 1.00 at the median and below 0.5 in only 1.5–3.5 % of samples (quiet subjects).
+HR2 agreeing with HR3 within 10 % gains a little more (SUBJ09 Arms 2.39 → 1.87) for 3–7 % less
+availability — kept for later; HR1 agreement costs too much (SUBJ11 59 %). **Holding the last
+value** (Nellcor HOLD, 5 or 10 s) hurts: HR3's 10 s buffer stays valid into the first seconds of
+motion, so the last "good" value is already contaminated and the hold extends it (SUBJ10 publishes
+7–10 % of windows again at −12 to −13 points).
+
+**Costs.** (1) Desaturations coinciding with movement are withheld: in SUBJ08/09 availability with
+reference < 90 % drops from 97–100 % to 69–73 % (−27/−28 points) against −16/−19 at ≥ 95 %.
+(2) The first value after applying the probe: median 6.1 → 10.5 s, p90 6.8 → 36.6 s (10
+applications ≥ 30 s), HR3's 10.24 s buffer. Neither is fixable inside this gate; a faster
+criterion at onset is open.
+
+**The two options and the decision (Alex, 2026-10-22).** A — withhold (NaN, SQI 0) with a reason
+code, the Philips/Nellcor-CLEAR model; B — publish with a low-quality flag, the Masimo model. Both
+satisfy ISO 80601-2-61:2026 201.12.4.102 (signal inadequacy indicator): note 6 says not posting
+SpO2 under inadequate signals satisfies it, note 5 that sensed movement artefact may enter the
+criterion, example 1 that a visual signal or message also does — but B puts the indicator on the
+consumer's UI and adds the 30 s "not current" indication of 201.12.4.101. **A chosen**: the
+library's consumer is the IncuNest firmware (display, record, alarms), not a person reading a
+flag; a −16-point value on the wire would reach the alarm system unless every consumer filtered it.
+Revisit with more moving subjects with a reference (n = 1 today).
+
+**Design.** `spo2_pulse_gate_enable` (default true, runtime setter and `$SET`); the gate reads
+`_current_data.hr3` (NaN while HR3 has no valid result; written by Task C under `_state_mutex`,
+held by Task A in `_spo2_update()`); the SpO2 window keeps running, so SpO2 returns in the block
+HR3 does; no hold. `AFE4490Data::spo2_hold_reason` names the first failing gate (probe, window,
+eps, reg_corr, pi, range, pulse) — a field, not a DiagCode bit, because any DiagCode bit zeroes
+RSQI and would invalidate HR and PI. Verified on the host: gate on / off, return in the next
+100 ms block after HR3 returns, reason order.
+
+**Also in v0.110 (Alex).** The locals of `_spo2_update()` renamed so R and r are told apart in
+the source: `valid` → `eps_valid` (the window sums clear their epsilons: division safety, not
+SpO2 validity), `r` → `reg_corr`, `r_ok` → `reg_corr_ok`. And the three PI display-range
+citations behind `spo2_pi_max` = 20 % are now in the constant's comment and §10, with the open
+question of where that ceiling really comes from (none of the three discloses its PI estimator).
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

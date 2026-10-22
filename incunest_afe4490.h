@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.109"
+#define INCUNEST_AFE4490_VERSION "0.110"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -118,6 +118,36 @@ inline bool isProbeAbsent(ProbeState s) {
         || s == ProbeState::PROBE_ONLY_LED_SATURATING;
 }
 
+// ── SpO2 hold reason (v0.110) ────────────────────────────────────────────────
+// Why AFE4490Data::spo2 is NaN right now: the FIRST gate that failed, in the order _spo2_update()
+// checks them. NONE = published. A consumer can show "pulse search" instead of a mute dash, and a
+// capture records why each value was withheld. Not a DiagCode bit: any DiagCode bit forces RSQI to
+// 0 and would invalidate HR and PI, which have their own rules. Codes are stable (wire: $M4 field
+// 37, CSV column SPO2_HOLD_REASON); add new ones at the end.
+enum class SpO2HoldReason : uint8_t {
+    NONE     = 0,   // SpO2 published
+    PROBE    = 1,   // ProbeState != PROBE_APPLIED (state reset every sample)
+    WINDOW   = 2,   // the spo2_window_s sliding window is still filling
+    EPS      = 3,   // division safety: a window sum below spo2_reg_eps / spo2_div_eps
+    REG_CORR = 4,   // R-METHOD-2: regression correlation below spo2_r_method2_reg_corr_min
+    PI       = 5,   // PI unknown (its window filling) or above spo2_pi_max (DC transient)
+    RANGE    = 6,   // a − b·R outside [spo2_min, spo2_max + spo2_clamp_margin]
+    PULSE    = 7    // pulse gate (spo2_pulse_gate_enable): HR3 has not identified a pulse
+};
+inline const char* afeSpO2HoldReasonToStr(SpO2HoldReason r) {
+    switch (r) {
+        case SpO2HoldReason::NONE:     return "none";
+        case SpO2HoldReason::PROBE:    return "probe";
+        case SpO2HoldReason::WINDOW:   return "window";
+        case SpO2HoldReason::EPS:      return "eps";
+        case SpO2HoldReason::REG_CORR: return "reg_corr";
+        case SpO2HoldReason::PI:       return "pi";
+        case SpO2HoldReason::RANGE:    return "range";
+        case SpO2HoldReason::PULSE:    return "pulse";
+    }
+    return "?";
+}
+
 // ── SpO2: R method and R curve identifiers (v0.98) ──────────────────────────
 // An R method id names HOW this library computes R from the signals. It changes if and only if,
 // for the same input, R comes out as a different number (method, τ of DC or AC, DC split, input
@@ -196,6 +226,7 @@ struct AFE4490Data {
     float   spo2_sqi;    // SpO2 Signal Quality Index [0–1]: PI-based ramp; 0 also when R-METHOD-2's r < spo2_r_method2_reg_corr_min
     float   spo2_r;      // R used for SpO2: R-METHOD-1 ratio or R-METHOD-2 regression slope (getConfig().spo2_r_method_id)
     float   spo2_r_method2_reg_corr; // R-METHOD-2 only: correlation r of the regression [−1…1], its goodness of fit; NaN otherwise
+    SpO2HoldReason spo2_hold_reason; // why spo2 is NaN (v0.110): NONE when published; see the enum
     float   pi;          // Perfusion Index: (AC_ir / DC_ir) * 100 [%]
     float   hr1;         // HR1 (peak detection) in bpm
     float   hr1_sqi;     // HR1 Signal Quality Index [0–1]: 1 − CV/0.15; 0=arrhythmia/artefact/invalid, 1=perfectly regular
@@ -714,6 +745,7 @@ struct AFE4490Config {
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
     float             spo2_r_method2_reg_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%]
+    bool              spo2_pulse_gate_enable;    // v0.110: SpO2 only while HR3 has identified a pulse (default true)
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11):
     // own band-pass (not an EMA subtraction) for the AC, AC and DC from the same sliding window
     // (pi_window_s, runtime since v0.102 — see _pi_update_sample()).
@@ -843,6 +875,10 @@ public:
     // run on every sample, so switching is immediate; anything else is rejected and logged.
     void setSpO2RMethod(uint8_t method);
     void setSpO2RMethod2RegCorrMin(float r);                              // R-METHOD-2 validity gate on r
+    // Pulse gate (v0.110, rationale §17): SpO2 is withheld (NaN, SQI 0, spo2_hold_reason PULSE)
+    // while AFE4490Data::hr3 is NaN — HR3's harmonic test found no pulse. The SpO2 window keeps
+    // running, so the value returns in the block HR3 does. Off = the pre-v0.110 behaviour.
+    void setSpO2PulseGateEnable(bool on);
 
     // PI (Perfusion Index) algorithm setter — decoupled from SpO2 (v0.101); callable before or
     // after begin(). Band-pass 0.5–15 Hz by default: the same floor as HR2/R-METHOD-2, but the
@@ -1694,6 +1730,7 @@ private:
     float    _spo2_pi_max;
     uint8_t  _spo2_r_method;
     float    _spo2_r_method2_reg_corr_min;
+    bool     _spo2_pulse_gate_enable;
     float    _hr1_dc_tau_s;
     float    _hr1_lp_cutoff_hz;
     // Decay of the running max that sets HR1's detection threshold. Was a bare 0.9999f literal
@@ -1801,6 +1838,11 @@ public:
     float test_spo2_r()                     { return _current_data.spo2_r; }
     float test_spo2_r_method2_reg_corr()                { return _current_data.spo2_r_method2_reg_corr; }
     float test_spo2_sqi()                   { return _current_data.spo2_sqi; }
+    SpO2HoldReason test_spo2_hold_reason() const { return _current_data.spo2_hold_reason; }
+    // Drives the pulse gate without the FFT: what Task C would have committed (v0.110).
+    void  test_set_hr3(float hr_bpm, float sqi) {
+        _current_data.hr3 = (sqi > 0.0f) ? hr_bpm : NAN; _current_data.hr3_sqi = sqi;
+    }
     float test_spo2_ir_ema_mean()  const { return _spo2_ch_ir_ema.mean; }
     float test_spo2_ir_ema_var()   const { return _spo2_ch_ir_ema.var; }
     float test_spo2_red_ema_mean() const { return _spo2_ch_red_ema.mean; }

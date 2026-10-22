@@ -278,6 +278,7 @@ struct AFE4490Config {
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
     float             spo2_r_method2_reg_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%] (v0.101)
+    bool              spo2_pulse_gate_enable;    // v0.110: SpO2 only while HR3 has identified a pulse (default true)
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11)
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
@@ -1012,6 +1013,23 @@ sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %)
 ```
 
 PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_method2_reg_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_method2_reg_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
+
+**Pulse gate (v0.110, rationale §17).** With `spo2_pulse_gate_enable` (default true; `setSpO2PulseGateEnable()`,
+`$SET spo2_pulse_gate_enable`) SpO2 is also withheld while `AFE4490Data::hr3` is NaN, i.e. while HR3's
+harmonic test (§5.4, true-peak validation) has not identified a pulse. The red-IR correlation r does not
+see motion artefact (SUBJ10: r 0.96 with −16 points); the harmonic structure does, and it is what Nellcor,
+Philips and Masimo tie SpO2 validity to. The SpO2 window keeps running while the gate is closed, so SpO2
+returns in the same 100 ms block HR3 does (HR3 valid implies 10.24 s of pulse, which covers the 6 s window);
+there is no hold of the last value (measured to re-admit the artefact). Costs, measured on the 21
+referenced sessions: quiet neonates keep 78–93 % of their reference windows (what is withheld had a median
+error of 2.5–3.8 points), desaturations coinciding with movement are withheld, and the first value after
+applying the probe waits for HR3's buffer (median 10.5 s, p90 36.6 s).
+
+**Hold reason (v0.110).** `AFE4490Data::spo2_hold_reason` (`SpO2HoldReason`, `afeSpO2HoldReasonToStr()`)
+names the FIRST gate that withheld SpO2, in the order the library checks them: 0 none (published), 1 probe
+(ProbeState ≠ APPLIED), 2 window (filling), 3 eps (a window sum below its epsilon), 4 reg_corr, 5 pi (unknown
+or > `spo2_pi_max`), 6 range (outside 70–110), 7 pulse (the gate above). It is not a DiagCode bit (any DiagCode
+bit forces RSQI to 0 and would invalidate HR and PI). Wire: `$M4` field 37; CSV column `SPO2_HOLD_REASON`.
 
 #### PI methods (v0.106)
 
@@ -2856,7 +2874,9 @@ See §5.1, *Perfusion Index (PI)* and rationale §11.
 | Band-pass upper cutoff | `pi_bp_f_high_hz` | 15.0 Hz | HR3's ceiling (3rd harmonic of 260 BPM = 13 Hz): a magnitude needs the harmonics — 5 Hz read −25 % at 220 vs 60 BPM on the MS100; noise above 10 Hz unmeasurable in the lowest-PI decile of a neonate (rationale §11) | HR-independence of PI |
 | Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; blocks of `alg_window_block_s` = 100 ms, buffers `alg_window_buf_len_max` = 120) | 6 s | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements) | PI settling time / noise |
 | RMS → peak-to-peak | `pi_rms_to_pp` | 2√2 | Exact for a sinusoid; band-passed PPG measured 2.79/2.92 (neonates), 3.0–3.2 (MS100) → under-reads a per-beat Max−Min by 0–12 %. Per-beat peaks (Masimo/Nellcor exact) need a beat detector: PILAB option, not library | PI in the industry's units |
-| PI upper bound | `spo2_pi_max` | 20 % | Top of the displayed range of Masimo (0.02–20), Mindray (0.05–20), Nellcor (0.03–20); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2PiSqiThresholds(lo, hi, max)`) |
+| PI upper bound | `spo2_pi_max` | 20 % | Top of the DISPLAYED range of Masimo 0.02–20 (LAB-9204A Rad-57 manual; whitepaper lab3410f defines PI only as pulsatile/non-pulsatile), Mindray 0.05–20 (BeneVision N-Series operator's manual), Nellcor 0.03–20 (PM-1000N service manual, Table 2-1 note 6); links in PulseNest `docs/ppg_neonatal_manufacturer_references.md`. None discloses its estimator; ISO 80601-2-61:2026 201.3.245 defines %mod only as ≈ AC/DC × 100. A display convention, not a physiological limit (open: PulseNest BACKLOG 2026-10-22); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2PiSqiThresholds(lo, hi, max)`) |
+| Pulse gate | `spo2_pulse_gate_enable` | true | §5.1 *Pulse gate*; rationale §17 (measured 2026-10-20) | SpO2 withheld (reason 7) while `AFE4490Data::hr3` is NaN (`setSpO2PulseGateEnable()`) |
+| Hold reason | `AFE4490Data::spo2_hold_reason` | — | §5.1 *Hold reason*: first failing gate, codes 0–7 | output, `$M4` field 37 |
 
 ---
 
@@ -3208,6 +3228,12 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.110  | **Pulse gate (§5.1, §10, rationale §17; decision Alex 2026-10-22):** SpO2 withheld   |
+|         | while `AFE4490Data::hr3` is NaN — `spo2_pulse_gate_enable` (default true),       |
+|         | `setSpO2PulseGateEnable()`. **Hold reason:** `AFE4490Data::spo2_hold_reason`     |
+|         | (`SpO2HoldReason` 0–7, first failing gate). PI 20 % ceiling: sources cited (§10). |
+|         | `_spo2_update()` locals renamed `eps_valid`, `reg_corr`, `reg_corr_ok` (Alex).  |
+|         | Tests: pulse gate on/off, return in the next block, reason order (test_spo2 21). |
 | v0.109  | **Test hook `test_run_pending_hr_computations()` (§9):** runs the HR2/HR3 slow paths |
 |         | Task A signalled, synchronously, as the task bodies do. Host builds have no Task  |
 |         | B/C, so a raw replay through `test_feed_sample()` never produced HR2/HR3 (flag  |
