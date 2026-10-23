@@ -413,14 +413,14 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_ch_red_ema{},
       _spo2_bp_ir(), _spo2_bp_red(),
       _spo2_reg_x_prev(0.0f), _spo2_reg_y_prev(0.0f), _spo2_reg_count(0),
-      _spo2_block(),
+      _spo2_block_clock(),
       _spo2_blk_sxy(0.0f), _spo2_blk_sxx(0.0f), _spo2_blk_syy(0.0f),
       _spo2_blk_var_ir(0.0f), _spo2_blk_var_red(0.0f),
       _spo2_sxy_sum(0.0f), _spo2_sxx_sum(0.0f), _spo2_syy_sum(0.0f),
       _spo2_var_ir_sum(0.0f), _spo2_var_red_sum(0.0f),
       _spo2_buf_n(1), _spo2_buf_idx(0), _spo2_buf_count(0),
       _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
-      _pi_bpf(), _pi_block(),
+      _pi_bpf(), _pi_block_clock(),
       _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_ac_block_sum(0.0f), _pi_dc_block_sum(0.0f),
       _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0),
       _hr1_dc(0.0f),
@@ -1937,11 +1937,11 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     // summands; the live length is the window in SECONDS at the block rate really achieved,
     // capped by the buffer. A length change (window setter or PRF change) empties the window:
     // its content would mix two lengths.
-    _spo2_block.configure(sample_rate_hz, alg_window_block_s);
-    _pi_block.configure(sample_rate_hz, alg_window_block_s);
-    const int spo2_n = _window_len(_spo2_window_s, _spo2_block.rate_hz);
+    _spo2_block_clock.configure(sample_rate_hz, alg_window_block_s);
+    _pi_block_clock.configure(sample_rate_hz, alg_window_block_s);
+    const int spo2_n = _window_len(_spo2_window_s, _spo2_block_clock.rate_hz);
     if (spo2_n != _spo2_buf_n) { _spo2_buf_n = spo2_n; _spo2_window_reset(); }
-    const int pi_n = _window_len(_pi_window_s, _pi_block.rate_hz);
+    const int pi_n = _window_len(_pi_window_s, _pi_block_clock.rate_hz);
     if (pi_n != _pi_buf_n) { _pi_buf_n = pi_n; _pi_window_reset(); }
     _pi_bpf.init_bp(_pi_bpf.f_low, _pi_bpf.f_high, sample_rate_hz);
     // HGAC EMAs: var unused (only mean is read), so var_tau = mean_tau; warmup = 3·τ (fail-safe
@@ -2430,7 +2430,7 @@ int INCUNEST_AFE4490::_window_len(float window_s, float rate_hz) {
 }
 
 void INCUNEST_AFE4490::_spo2_window_reset() {
-    _spo2_block.reset();
+    _spo2_block_clock.reset();
     _spo2_blk_sxy = 0.0f; _spo2_blk_sxx = 0.0f; _spo2_blk_syy = 0.0f;
     _spo2_blk_var_ir = 0.0f; _spo2_blk_var_red = 0.0f;
     _spo2_sxy_sum = 0.0f; _spo2_sxx_sum = 0.0f; _spo2_syy_sum = 0.0f;
@@ -2499,7 +2499,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // O(1) running totals; between blocks every output keeps its last value (as PI) —
     // except while the window is still filling, where "last value" must be NaN, never a stale or
     // constructed 0 (output contract: sqi == 0 ⇒ spo2, R, r are NaN).
-    if (!_spo2_block.step()) {
+    if (!_spo2_block_clock.step()) {
         if (_spo2_buf_count < (uint32_t)_spo2_buf_n) {
             _current_data.spo2        = NAN;
             _current_data.spo2_r      = NAN;
@@ -2621,7 +2621,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 // _current_data.pi directly here. probe_state gate lives here exactly as in
 // _hr2_update_sample()/_spo2_update(): while not applied, resets every sample (idempotent).
 void INCUNEST_AFE4490::_pi_window_reset() {
-    _pi_block.reset();
+    _pi_block_clock.reset();
     _pi_buf_idx = 0; _pi_buf_count = 0;
     _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_ac_block_sum = 0.0f; _pi_dc_block_sum = 0.0f;
     memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
@@ -2646,7 +2646,7 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     const float filtered = _pi_bpf.process(ot_ir);
     _pi_ac_block_sum += filtered * filtered;
 
-    if (!_pi_block.step()) {         // block not complete: pi keeps its last value —
+    if (!_pi_block_clock.step()) {         // block not complete: pi keeps its last value —
         if (_pi_buf_count < (uint32_t)_pi_buf_n) _current_data.pi = NAN;   // which is NaN while filling
         return;
     }
@@ -2675,8 +2675,8 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     }
 
     // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp): AC_pp / DC × 100 [%].
-    // Both sums span _pi_buf_n blocks of _pi_block.len full-rate samples.
-    const float n_raw = (float)_pi_buf_n * (float)_pi_block.len;
+    // Both sums span _pi_buf_n blocks of _pi_block_clock.len full-rate samples.
+    const float n_raw = (float)_pi_buf_n * (float)_pi_block_clock.len;
     const float dc    = _pi_dc_sum / n_raw;
     const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / n_raw);
     _current_data.pi = (dc > pi_div_eps) ? (ac_pp / dc) * 100.0f : NAN;

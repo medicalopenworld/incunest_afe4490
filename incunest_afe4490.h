@@ -1092,13 +1092,14 @@ private:
         }
     };
 
-    // Block clock of the sliding windows (SpO2, PI — v0.103). NOT a decimator: nothing is
+    // Block clock of the sliding windows (SpO2, PI — v0.103; WindowBlockClock since 2026-10-23, Alex:
+    // it counts samples and fires once per block, it holds no data). NOT a decimator: nothing is
     // discarded. Every full-rate summand (dx·dy, dx², dy² of R-METHOD-2; (x − mean)² of
     // R-METHOD-1; PI's AC²) is accumulated into the current block, and every
     // alg_window_block_s seconds the block sum enters its circular buffer. The block length is
     // a DURATION, so the window buffers keep meaning seconds whatever the AFE rate does; len is
     // whole samples, exact for every PRF of the validated grid (all multiples of 10 Hz, §7.4).
-    struct WindowBlock {
+    struct WindowBlockClock {
         uint16_t len     = 1;      // full-rate samples per block
         float    rate_hz = 0.0f;   // block rate ACTUALLY achieved (in_rate / len)
         uint32_t phase   = 0;      // samples accumulated into the current block
@@ -1538,7 +1539,7 @@ private:
     // R-METHOD-1's red RMS more than its IR RMS. Design rationale §9–§10.
     //
     // Averaging (v0.102, rationale §12): the summands dx·dy, dx², dy² and R-METHOD-1's (x − mean)²
-    // are formed at the full AFE rate and summed over each block of alg_window_block_s (_spo2_block,
+    // are formed at the full AFE rate and summed over each block of alg_window_block_s (_spo2_block_clock,
     // 100 ms since v0.103); every block sum enters a circular buffer with an O(1) running total
     // over the newest spo2_window_s seconds. A sum of block sums IS the full-rate sum, so nothing
     // is decimated away: only the window edge moves in 100 ms steps. Replaces the
@@ -1550,12 +1551,12 @@ private:
     BiquadFilter _spo2_bp_red;
     float    _spo2_reg_x_prev, _spo2_reg_y_prev;
     uint32_t _spo2_reg_count;                              // samples since reset (0 → no difference yet)
-    WindowBlock _spo2_block;                               // alg_window_block_s clock of this window
+    WindowBlockClock _spo2_block_clock;                               // alg_window_block_s clock of this window
     // Block accumulators (full rate, cleared every block):
     float    _spo2_blk_sxy, _spo2_blk_sxx, _spo2_blk_syy;   // R-METHOD-2
     float    _spo2_blk_var_ir, _spo2_blk_var_red;           // R-METHOD-1: (x − mean)² per channel
     // Circular buffers of block sums, sized for alg_window_s_max at the block rate; the live
-    // length is _spo2_buf_n = round(spo2_window_s · _spo2_block.rate_hz).
+    // length is _spo2_buf_n = round(spo2_window_s · _spo2_block_clock.rate_hz).
     float    _spo2_sxy_buf[alg_window_buf_len_max];
     float    _spo2_sxx_buf[alg_window_buf_len_max];
     float    _spo2_syy_buf[alg_window_buf_len_max];
@@ -1606,7 +1607,7 @@ private:
     //     λmax−λmin; every published neonatal threshold): pp = 2√2·RMS of the band-passed signal,
     //     exact for a sinusoid; the band-passed PPG measured 2.8–3.2 (rationale §11).
     BiquadFilter _pi_bpf;
-    WindowBlock  _pi_block;           // alg_window_block_s clock of this window (v0.103)
+    WindowBlockClock  _pi_block_clock;           // alg_window_block_s clock of this window (v0.103)
     float    _pi_ac_buf[alg_window_buf_len_max];  // circular buffer of block sums of the band-passed samples, SQUARED
     float    _pi_dc_buf[alg_window_buf_len_max];  // circular buffer of block sums of the raw OT
     float    _pi_ac_sum;              // running sum of _pi_ac_buf — O(1) sliding-window update
@@ -1894,7 +1895,7 @@ public:
     // across the whole PRF catalogue (see test_time_parameters_hold_across_catalogue).
     int      test_spo2_buf_n() const               { return _spo2_buf_n; }
     uint32_t test_spo2_buf_count() const           { return _spo2_buf_count; }
-    float    test_spo2_block_rate_hz() const       { return _spo2_block.rate_hz; }
+    float    test_spo2_block_rate_hz() const       { return _spo2_block_clock.rate_hz; }
     uint32_t test_hr1_refractory_samples() const   { return _hr1_refractory_samples; }
     uint32_t test_rsqm_probe_min_samples() const   { return _rsqm_probe_state_min_samples; }
     float    test_hr1_dc_alpha() const             { return _hr1_dc_alpha; }
@@ -1922,7 +1923,7 @@ public:
     void     test_feed_pi(float ot_ir, ProbeState probe_state) { _pi_update_sample(ot_ir, probe_state); }
     uint32_t test_pi_buf_count() const { return _pi_buf_count; }
     int      test_pi_buf_n() const     { return _pi_buf_n; }
-    uint16_t test_pi_block_len()     const { return _pi_block.len; }
-    float    test_pi_block_rate_hz() const { return _pi_block.rate_hz; }
+    uint16_t test_pi_block_len()     const { return _pi_block_clock.len; }
+    float    test_pi_block_rate_hz() const { return _pi_block_clock.rate_hz; }
 #endif
 };

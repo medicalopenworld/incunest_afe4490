@@ -969,7 +969,7 @@ mentioning "replace EMA-6s with a 6s window of memory" as an example. Two shapes
   slower than the sample rate.
 - **A decimated circular buffer with an O(1) running sum of squares** (chosen): the library
   already has exactly this shape for HR2/HR3 — band-pass → `Decimator` (target 50 Hz, §5.3.1;
-  since v0.103 a 100 ms `WindowBlock` summing AC² at the full rate — §12 below) →
+  since v0.103 a 100 ms `WindowBlockClock` summing AC² at the full rate — §12 below) →
   circular buffer — the only difference being that HR2/HR3 need a slow/async Task (Task B/C) to
   run their O(N·lags) autocorrelation or FFT on that buffer, whereas PI's "AC RMS" is just
   `sqrt(sum_of_squares / N)`: updating the running sum when one decimated sample enters and
@@ -1175,7 +1175,7 @@ sums AC² at the full rate over each block, like SpO2's products: the exact wind
 expectation, lower variance. The DC buffer went from block means to block sums for symmetry (both
 sums divide by the samples in the window).
 
-**Naming.** `Decimator _spo2_decim/_pi_decim` and `*_decim_target_rate_hz` are gone; a `WindowBlock`
+**Naming.** `Decimator _spo2_decim/_pi_decim` and `*_decim_target_rate_hz` are gone; a `WindowBlockClock`
 struct (configured by DURATION, `len` samples per block) replaces them, so the word "decimation" no
 longer appears near the windows and §5.3.1 carries a scope note.
 
