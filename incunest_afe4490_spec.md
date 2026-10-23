@@ -979,7 +979,7 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   `setPIWindowS()`, clamped to 2–12 s since v0.102, independent of `spo2_window_s`), not EMAs:
   two circular buffers of block sums at the `alg_window_block_s` = 100 ms cadence (v0.103) — the
   squared band-passed samples (AC²) and the raw OT (DC), both accumulated at the full AFE rate,
-  so a sum of block sums is the full-rate sum — each with an O(1) running sum, rebuilt at every
+  so a sum of block sums is the full-rate sum — each with a fixed-cost running sum, rebuilt at every
   wrap of the buffer (float32 drift guard). (Until v0.102 the AC² buffer held one band-passed
   sample per 20 ms block, a true 50 Hz decimation of the 0.5–15 Hz band; at 100 ms that would
   alias, hence the block sum — which is also the exact windowed RMS.)
@@ -2395,7 +2395,7 @@ arrives later and falls outside it.
 
 Now `hr1_ma_max_len` is **160**, the worst case of the catalogue at the default cutoff
 (1600 / (2·5)). The cost is RAM only — **+384 B**, measured: firmware RAM 60 444 → 60 828 B of
-327 680 — because the average is incremental, so CPU is O(1) in N, and group delay stays ≈
+327 680 — because the average is incremental, so the CPU cost does not grow with N, and group delay stays ≈
 1/(4·cutoff) ≈ 50 ms at any PRF since N scales with the rate.
 
 No fixed capacity can cover every configuration: `setHR1MaCutoffHz()` is public and unvalidated,
@@ -3278,7 +3278,7 @@ Key references for each algorithm implemented in this library.
 |         | independent for SpO2 and PI (§5.1, §10.3, §10.3b, rationale §12).**         |
 |         | R-METHOD-2's Σ(dx·dy)/Σ(dx²)/Σ(dy²) and R-METHOD-1's AC² are block sums at   |
 |         | the 50 Hz cadence of a new `_spo2_decim` chain, kept in circular buffers    |
-|         | with O(1) running totals (rebuilt at every wrap: float32 drift guard);       |
+|         | with fixed-cost running totals (rebuilt at every wrap: float32 drift guard);       |
 |         | R, r and SpO2 refresh per block and are valid from the first full window.   |
 |         | Replaces the EMAs with τ = 6 s, equivalent to a 12 s window in noise and    |
 |         | delay and 18 s to settle; measured on HOSPNAV: same accuracy, +36 % noise   |
@@ -3297,7 +3297,7 @@ Key references for each algorithm implemented in this library.
 |         | AC from a private band-pass 0.5–15 Hz (`pi_bp_f_low_hz`/`_high_hz`,          |
 |         | `setPIFilter()`; the HR3 ceiling, since a 5 Hz one made PI fall 25 % from 60 |
 |         | to 220 BPM), not an EMA subtraction. AC² and DC (block means of the raw OT)  |
-|         | from the SAME 6 s sliding window (`pi_buf_len` = 300 @ 50 Hz, O(1) running   |
+|         | from the SAME 6 s sliding window (`pi_buf_len` = 300 @ 50 Hz, fixed-cost running |
 |         | sums): settles EXACTLY at 6 s, no EMA, no seed, no lead/lag between          |
 |         | numerator and denominator. **PI is now peak-to-peak** (`2√2·RMS`, Nellcor/   |
 |         | Masimo's definition, ISO *%mod*): the old RMS-based PI was ÷2.8–3.2 of it,   |
@@ -3563,7 +3563,7 @@ Key references for each algorithm implemented in this library.
 |         | and falls outside the refractory — i.e. it fails in the clinically         |
 |         | critical case. 160 = worst case of the catalogue at the default cutoff.     |
 |         | Cost is RAM only (+384 B measured: 60 444 → 60 828 B): the average is       |
-|         | incremental so CPU is O(1) in N, and group delay stays ≈ 50 ms at any PRF.  |
+|         | incremental so the CPU cost does not grow with N, and group delay stays ≈ 50 ms at any PRF.  |
 |         | Since `setHR1MaCutoffHz()` is public and unvalidated no fixed capacity can  |
 |         | cover every case (2 Hz at 1600 Hz would need 400 samples), so the clamp now    |
 |         | emits `logE` with the length needed, the length available and the effective |

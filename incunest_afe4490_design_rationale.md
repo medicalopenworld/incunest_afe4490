@@ -377,7 +377,7 @@ masks it.
 
 #### Recommendation
 
-**TERMA**, with **SSF** as the simpler fallback. Reasons: O(1) cost (two incremental averages, like
+**TERMA**, with **SSF** as the simpler fallback. Reasons: fixed cost per sample (two incremental averages, like
 the one already there); the strongest external validation among the candidates, and obtained on
 *heat-stressed* signals — a poor-quality regime comparable to ours; and it attacks the actual cause,
 since the ~667 ms average sets the threshold from the **local beat level** instead of from a global
@@ -967,13 +967,13 @@ mentioning "replace EMA-6s with a 6s window of memory" as an example. Two shapes
   rejected on RAM: 12 KB per channel is a real cost on an ESP32-S3 for no behavioural gain over
   the decimated version below, since PI's AC envelope changes on a timescale of seconds, far
   slower than the sample rate.
-- **A decimated circular buffer with an O(1) running sum of squares** (chosen): the library
+- **A decimated circular buffer with a fixed-cost running sum of squares** (chosen): the library
   already has exactly this shape for HR2/HR3 — band-pass → `Decimator` (target 50 Hz, §5.3.1;
   since v0.103 a 100 ms `WindowBlockClock` summing AC² at the full rate — §12 below) →
   circular buffer — the only difference being that HR2/HR3 need a slow/async Task (Task B/C) to
   run their autocorrelation (N × lags multiplications) or FFT on that buffer, whereas PI's "AC RMS" is just
   `sqrt(sum_of_squares / N)`: updating the running sum when one decimated sample enters and
-  another leaves is O(1), so PI needs no Task at all — the fast path commits `AFE4490Data::pi`
+  another leaves costs the same whatever the window length, so PI needs no Task at all — the fast path commits `AFE4490Data::pi`
   directly. Buffer: 300 floats (6 s @ 50 Hz) ≈ 1.2 KB for one channel (PI only needs IR, per
   existing clinical convention — unlike R, it is not a ratio of two channels). This settles
   EXACTLY at 6 s (the window is either full or it is not — no asymptotic tail) instead of needing
@@ -994,7 +994,7 @@ the one parameter to revisit — the decimation/buffer architecture does not nee
   `pi_bp_f_high_hz` and `spo2_pi_max`, but wiring them into the firmware's `$SET`/`$LCFG`
   commands and `pulsenest_lab.py`'s LIB CONFIG window is a separate, cross-repo task (PulseNest
   fw + spec), out of scope here.
-- **No dedicated `TimingStat` for PI.** `_pi_update_sample()` is cheap (O(1) per sample, same
+- **No dedicated `TimingStat` for PI.** `_pi_update_sample()` is cheap (fixed cost per sample, same
   order as the EMA it replaces) and is not instrumented under `INCUNEST_TIMING_STATS` the way
   SpO2/HR1/HR2/HR3 are; add one if PI's cost is ever in question.
 - **The reset while the probe is not applied stays unconditional (PI, HR2, HR3).** Alex asked
@@ -1099,7 +1099,7 @@ place to revisit it.
 - *Block sums at the 50 Hz cadence, products at full rate* (chosen; the shape of PI's DC in §11;
   the cadence itself was revisited the next day — see "Block cadence" below):
   dx·dy, dx², dy² and (x − mean)² are formed at the AFE rate and summed over each decimation block of
-  a new `_spo2_decim` chain; each block sum enters a circular buffer with an O(1) running total. A sum
+  a new `_spo2_decim` chain; each block sum enters a circular buffer with a fixed-cost running total. A sum
   of block sums is the full-rate sum — nothing is lost; the window edge moves in 20 ms steps and the
   outputs refresh at that cadence (the rest of the system consumes algorithms every 20 ms anyway).
   Rejected: a full-rate buffer (3 × 6 s × 500 Hz × 4 B = 36 KB, > 100 KB at 1600 Hz / 8 s, and a
@@ -1114,7 +1114,7 @@ place to revisit it.
 - *A length change empties the window* (NaN for one length) rather than keeping the newest samples:
   simpler, and a half-filled window of another length is not a valid estimate.
 - *Not done, deliberately:* a Hann/triangular window (same reason as §11: tapering the boxcar edge
-  costs the O(1) update for a benefit not yet observed); an EMA with τ = 3 s (noise-matched to the
+  costs the fixed-cost update for a benefit not yet observed); an EMA with τ = 3 s (noise-matched to the
   6 s window but still 3τ to settle and an infinite tail); exposing the lengths as `$SET`/`$LCFG`
   keys (firmware/lab work, a task of its own — the library version in `$CFG` identifies the
   defaults in force).
