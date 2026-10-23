@@ -945,7 +945,7 @@ below Granelli's p5; the capture's first rows show the problem in one line: PI 0
 Masimo units, a normal neonate) with SQI 0.08.
 
 **Decisions (Alex, "adelante" to all four).** (a) DC = the window mean above. (b) **PI in
-peak-to-peak units, as `2√2 · RMS` of the band-passed signal** (`pi_rms_to_pp`): exact for a
+peak-to-peak units, as `2√2 · RMS` of the band-passed signal** (`pi_rms_to_pp_ratio`): exact for a
 sinusoid, which the band-passed PPG nearly is (2.8–3.2 measured), so it under-reads a per-beat
 Max − Min by 0–12 %; it needs no beat detector and is the smoother of the two on a quiet subject
 (SUBJ09: 4.5 % vs 8.7 %). The per-beat median (Masimo/Nellcor exactly; more robust on a moving

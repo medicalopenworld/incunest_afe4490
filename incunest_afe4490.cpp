@@ -120,7 +120,7 @@ namespace {
     // RMS → peak-to-peak, exact for a sinusoid. The band-passed PPG measured 2.79/2.92 on two
     // neonates and 3.0–3.2 on the MS100, so this under-reads a per-beat Max−Min by 0–12 %; the
     // alternative (per-beat peaks) needs a beat detector and is kept for PILAB (rationale §11).
-    constexpr float    pi_rms_to_pp          = 2.8284271f;   // 2·√2
+    constexpr float    pi_rms_to_pp_ratio          = 2.8284271f;   // 2·√2
     constexpr float    pi_div_eps            = 1e-9f;   // A/A — division-safety guard only (mirrors spo2_div_eps)
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
@@ -2674,11 +2674,11 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
         return;
     }
 
-    // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp): AC_pp / DC × 100 [%].
+    // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp_ratio): AC_pp / DC × 100 [%].
     // Both sums span _pi_buf_n blocks of _pi_block_clock.len full-rate samples.
     const float n_raw = (float)_pi_buf_n * (float)_pi_block_clock.len;
     const float dc    = _pi_dc_sum / n_raw;
-    const float ac_pp = pi_rms_to_pp * sqrtf(_pi_ac_sum / n_raw);
+    const float ac_pp = pi_rms_to_pp_ratio * sqrtf(_pi_ac_sum / n_raw);
     _current_data.pi = (dc > pi_div_eps) ? (ac_pp / dc) * 100.0f : NAN;
 }
 
