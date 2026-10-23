@@ -2496,7 +2496,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     }
 
     // Window update at the block cadence: the block sums enter the circular buffers and the
-    // O(1) running totals; between blocks every output keeps its last value (as PI) —
+    // fixed-cost running totals; between blocks every output keeps its last value (as PI) —
     // except while the window is still filling, where "last value" must be NaN, never a stale or
     // constructed 0 (output contract: sqi == 0 ⇒ spo2, R, r are NaN).
     if (!_spo2_block_clock.step()) {
@@ -2616,8 +2616,8 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 }
 
 // ── PI (Perfusion Index) algorithm — decoupled from SpO2 (v0.101, rationale §11) ─────────────
-// Fast path only: no slow/async computation needed, unlike HR2/HR3's O(N·lags)/FFT — the
-// sliding-window RMS update below is O(1) per block, cheap enough to commit
+// Fast path only: no slow/async computation needed, unlike HR2's autocorrelation (N × lags multiplications) and HR3's FFT — the
+// sliding-window RMS update below costs the same per block whatever the window length, cheap enough to commit
 // _current_data.pi directly here. probe_state gate lives here exactly as in
 // _hr2_update_sample()/_spo2_update(): while not applied, resets every sample (idempotent).
 void INCUNEST_AFE4490::_pi_window_reset() {
@@ -2651,7 +2651,7 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
         return;
     }
 
-    // O(1) sliding windows, one cadence: add the incoming block sum, subtract the one falling
+    // Fixed-cost sliding windows, one cadence: add the incoming block sum, subtract the one falling
     // out of the pi_window_s window, for AC² and for DC alike. True boxcars, not EMAs — PI
     // settles EXACTLY at pi_window_s (contrast EMA's ~3·τ to reach ~95%) and its numerator and
     // denominator always span the same samples.

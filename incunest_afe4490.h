@@ -1469,7 +1469,7 @@ private:
     // _recalc_rate_params() is for — a clamped filter is now diagnosable instead of mute.
     //
     // Cost of the capacity is RAM only: the average is incremental (subtract the outgoing sample,
-    // add the incoming one), so CPU is O(1) in N. Group delay does not grow either — (N−1)/2
+    // add the incoming one), so the CPU cost does not grow with N. Group delay does not grow either — (N−1)/2
     // samples, and N scales with the rate, so the delay stays ≈ 1/(4·cutoff) ≈ 50 ms at any PRF.
     static constexpr int hr1_ma_max_len = 160;
     float    _hr1_ma_buf[hr1_ma_max_len];
@@ -1540,7 +1540,8 @@ private:
     //
     // Averaging (v0.102, rationale §12): the summands dx·dy, dx², dy² and R-METHOD-1's (x − mean)²
     // are formed at the full AFE rate and summed over each block of alg_window_block_s (_spo2_block_clock,
-    // 100 ms since v0.103); every block sum enters a circular buffer with an O(1) running total
+    // 100 ms since v0.103); every block sum enters a circular buffer with a running total updated at fixed cost
+    // (the block that enters is added, the one that leaves subtracted)
     // over the newest spo2_window_s seconds. A sum of block sums IS the full-rate sum, so nothing
     // is decimated away: only the window edge moves in 100 ms steps. Replaces the
     // EMAs with τ = 6 s, which were equivalent to a 12 s window in noise and delay and needed 3·τ
@@ -1595,14 +1596,14 @@ private:
     //     samples (AC²) and one of the raw OT (DC), both accumulated at the full AFE rate, so a
     //     sum of block sums is the full-rate sum (until v0.102 the AC² buffer held ONE band-passed
     //     sample per 20 ms block — a true 50 Hz decimation of the 0.5–15 Hz band; at 100 ms that
-    //     would alias, hence the block sum) — each with an O(1) running sum. Numerator and
+    //     would alias, hence the block sum) — each with a fixed-cost running sum. Numerator and
     //     denominator share the window, so PI
     //     settles EXACTLY at pi_window_s (default 6 s; runtime 2–12 s since v0.102, independent of
     //     the SpO2 window) with no EMA, no seed and no lead/lag between the
     //     two — Masimo's "λDC = average value of the signal" over the same span as the AC. (A 2 s
     //     EMA measured within ±0.25 % of this window mean on HOSPNAV; the choice is structural,
     //     not numerical — rationale §11.) No slow/async Task is needed (unlike HR2/HR3's
-    //     autocorrelation/FFT): the running-sum updates are O(1) — see _pi_update_sample().
+    //     autocorrelation/FFT): the running-sum updates cost the same whatever the window length — see _pi_update_sample().
     //   - PI reported in PEAK-TO-PEAK units, the industry's definition (Nellcor Max−Min, Masimo
     //     λmax−λmin; every published neonatal threshold): pp = 2√2·RMS of the band-passed signal,
     //     exact for a sinusoid; the band-passed PPG measured 2.8–3.2 (rationale §11).
@@ -1610,7 +1611,7 @@ private:
     WindowBlockClock  _pi_block_clock;           // alg_window_block_s clock of this window (v0.103)
     float    _pi_ac_buf[alg_window_buf_len_max];  // circular buffer of block sums of the band-passed samples, SQUARED
     float    _pi_dc_buf[alg_window_buf_len_max];  // circular buffer of block sums of the raw OT
-    float    _pi_ac_sum;              // running sum of _pi_ac_buf — O(1) sliding-window update
+    float    _pi_ac_sum;              // running sum of _pi_ac_buf — fixed-cost sliding-window update
     float    _pi_dc_sum;              // running sum of _pi_dc_buf
     float    _pi_ac_block_sum;        // AC² accumulated over the current block (full rate)
     float    _pi_dc_block_sum;        // raw OT accumulated over the current block (full rate)
@@ -1663,7 +1664,7 @@ private:
     // not a constraint: HR3's chain NEEDS ~50 Hz (its 15 Hz low-pass would stop
     // protecting the decimation below that), while HR2's has 5x of spare margin (its
     // bandpass cuts at 5 Hz, so 25 Hz would still leave Nyquist at 12.5 Hz). Lowering the pulse
-    // chain to 25 Hz would cut the O(N·lags) autocorrelation cost by ~3.9x — tripled once MPM
+    // chain to 25 Hz would cut the autocorrelation cost (proportional to N × lags) by ~3.9x — tripled once MPM
     // and YIN share the buffer — at the price of lag resolution, which is exactly what those
     // two estimators depend on. Decide it with the offline experiment, not by guessing.
     static constexpr float hr2_decim_target_rate_hz    = 50.0f;

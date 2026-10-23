@@ -324,7 +324,7 @@ from literature from inference.
 | When HR1 got its own filter, the decision being taken was **decoupling it from the display filter** (changing `f_high` to look at the signal altered HR), not choosing a filter type. The MA was justified by *"se adapta automáticamente si cambia `_sample_rate_hz`"* | `conversation_log.md:745-755` |
 | The premise expired in **v0.6**: *"Coeficientes biquad dinámicos… `setFilter()` completamente funcional para cualquier fs/f_low/f_high"*. Nobody revisited HR1 in the ~80 versions since | `conversation_log.md:430` |
 | A later review inventoried the filters and **noted the asymmetry without acting** (HR1 with MA "sin biquad"; HR2/HR3 with Butterworth biquads) | `conversation_log.md:5644` |
-| Neither the log nor the code ever mentions linear phase or O(1) cost — the two arguments that *would* justify an MA today. They are real but accidental | search of log + code |
+| Neither the log nor the code ever mentions linear phase or fixed cost per sample — the two arguments that *would* justify an MA today. They are real but accidental | search of log + code |
 
 ### 5.2 Measured: MA vs biquad (own measurement, `tools/hr1_filter_experiment.py`)
 
@@ -365,7 +365,7 @@ masks it.
 | Strategy | How it works | Cost in Task A | Robustness to interference | Demands on the filter | Source |
 |---|---|---|---|---|---|
 | **Adaptive threshold** (current) | 0.6 × decaying running max + fixed refractory | ~0 | **Poor** (+26 % measured) | aggressive low-pass | as built, spec §5.2 |
-| **TERMA** | Two event-related moving averages — ~111 ms (peak) and ~667 ms (beat) — whose crossing generates blocks of interest; the peak is sought inside the block. The published design rule `2·W1 <= W2 <= 8·W1` is what separates the systolic peak from the dicrotic notch. Reported 99.89 % sensitivity / 99.84 % PPV over 5 071 beats, **on heat-stressed PPG** | two incremental MAs, O(1) | **Very good** | soft low-pass + squaring | Elgendi, PLOS One 2013 (10.1371/journal.pone.0076585); Biosensors 2016 (10.3390/bios6040055) |
+| **TERMA** | Two event-related moving averages — ~111 ms (peak) and ~667 ms (beat) — whose crossing generates blocks of interest; the peak is sought inside the block. The published design rule `2·W1 <= W2 <= 8·W1` is what separates the systolic peak from the dicrotic notch. Reported 99.89 % sensitivity / 99.84 % PPV over 5 071 beats, **on heat-stressed PPG** | two incremental MAs, fixed cost per sample | **Very good** | soft low-pass + squaring | Elgendi, PLOS One 2013 (10.1371/journal.pone.0076585); Biosensors 2016 (10.3390/bios6040055) |
 | **SSF (slope sum function)** | Slope sum over a window enhances the upslope and suppresses the rest: low-pass + SSF + decision rule | O(W), W ~ 100 ms | Good | soft low-pass | Zong et al., open-source ABP onset algorithm |
 | **First derivative / local extrema** | Zero crossing of dy with the sign of d²y; variants cube the derivative to highlight search zones | ~0 | Medium | low cutoff (the derivative amplifies HF noise) | Billauer; Li; FDPPG variants |
 | **`y × dy` delayed** | Product amplifies edges and suppresses flat regions | ~0 | Medium | low cutoff | own idea — `project_hr1_improvements_task` option A |
@@ -971,7 +971,7 @@ mentioning "replace EMA-6s with a 6s window of memory" as an example. Two shapes
   already has exactly this shape for HR2/HR3 — band-pass → `Decimator` (target 50 Hz, §5.3.1;
   since v0.103 a 100 ms `WindowBlockClock` summing AC² at the full rate — §12 below) →
   circular buffer — the only difference being that HR2/HR3 need a slow/async Task (Task B/C) to
-  run their O(N·lags) autocorrelation or FFT on that buffer, whereas PI's "AC RMS" is just
+  run their autocorrelation (N × lags multiplications) or FFT on that buffer, whereas PI's "AC RMS" is just
   `sqrt(sum_of_squares / N)`: updating the running sum when one decimated sample enters and
   another leaves is O(1), so PI needs no Task at all — the fast path commits `AFE4490Data::pi`
   directly. Buffer: 300 floats (6 s @ 50 Hz) ≈ 1.2 KB for one channel (PI only needs IR, per
