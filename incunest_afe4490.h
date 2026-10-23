@@ -1093,7 +1093,8 @@ private:
     };
 
     // Block clock of the sliding windows (SpO2, PI — v0.103). NOT a decimator: nothing is
-    // discarded. Every full-rate product is accumulated into the current block, and every
+    // discarded. Every full-rate summand (dx·dy, dx², dy² of R-METHOD-2; (x − mean)² of
+    // R-METHOD-1; PI's AC²) is accumulated into the current block, and every
     // alg_window_block_s seconds the block sum enters its circular buffer. The block length is
     // a DURATION, so the window buffers keep meaning seconds whatever the AFE rate does; len is
     // whole samples, exact for every PRF of the validated grid (all multiples of 10 Hz, §7.4).
@@ -1519,7 +1520,7 @@ private:
     // trials (16 s). RAM: 7 buffers × 120 × 4 B ≈ 3.4 KB.
     static constexpr float alg_window_s_min = 2.0f;
     static constexpr float alg_window_s_max = 12.0f;
-    // Block cadence of both windows (v0.103, rationale §12): 100 ms. The products are formed at
+    // Block cadence of both windows (v0.103, rationale §12): 100 ms. The summands are formed at
     // the full AFE rate; the block only sets how often the window edge moves and the outputs
     // refresh, the buffer RAM and — the criterion that fixed it — the granularity at which a
     // block flagged as artefact could be excluded from the sums: 100 ms loses ≤ 3.3 % of a 6 s
@@ -1536,7 +1537,7 @@ private:
     // slow venous/motion components; the band-pass removes the out-of-band power that inflates
     // R-METHOD-1's red RMS more than its IR RMS. Design rationale §9–§10.
     //
-    // Averaging (v0.102, rationale §12): the products dx·dy, dx², dy² and R-METHOD-1's (x − mean)²
+    // Averaging (v0.102, rationale §12): the summands dx·dy, dx², dy² and R-METHOD-1's (x − mean)²
     // are formed at the full AFE rate and summed over each block of alg_window_block_s (_spo2_block,
     // 100 ms since v0.103); every block sum enters a circular buffer with an O(1) running total
     // over the newest spo2_window_s seconds. A sum of block sums IS the full-rate sum, so nothing

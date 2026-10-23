@@ -23,7 +23,7 @@ namespace {
     // pulsatile component; if it did, AC = x−DC would be underestimated, biasing the R ratio and SpO2.
     constexpr float    spo2_ema_mean_tau_s   = 2.0f;
     // SpO2 averaging window (v0.102, rationale §12): a true sliding window of 6.0 s over the
-    // products of R-METHOD-2 (and the AC² of R-METHOD-1). Replaces the EMA with τ = 6 s, which
+    // summands of R-METHOD-2 (dx·dy, dx², dy²) and the (x − mean)² of R-METHOD-1. Replaces the EMA with τ = 6 s, which
     // in noise and group delay was equivalent to a 12 s window (an EMA of τ averages like a
     // window of 2τ) and so was slower than the 8 s NICU default and outside the 6–10 s of ISO
     // 80601-2-61:2026 Annex JJ.2 d) it was taken from. 6 s: Nellcor "Normal" 5–7 s, between the
@@ -1934,7 +1934,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _spo2_bp_ir.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
     _spo2_bp_red.init_bp(spo2_bp_f_low_hz, spo2_bp_f_high_hz, sample_rate_hz);
     // Sliding windows (v0.102): blocks of alg_window_block_s (100 ms, v0.103) of the full-rate
-    // products; the live length is the window in SECONDS at the block rate really achieved,
+    // summands; the live length is the window in SECONDS at the block rate really achieved,
     // capped by the buffer. A length change (window setter or PRF change) empties the window:
     // its content would mix two lengths.
     _spo2_block.configure(sample_rate_hz, alg_window_block_s);
@@ -2477,7 +2477,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 
     // Both methods' state advances on every applied sample whichever method is selected, so a
     // switch costs no warm-up. Full rate: R-METHOD-1's (x − mean)² per channel; R-METHOD-2's x, y
-    // (band-passed OT normalised by its DC), their first differences and the three products. All
+    // (band-passed OT normalised by its DC), their first differences and the three summands dx·dy, dx², dy². All
     // five are summed over the current block (v0.102, header SpO2 state block).
     {
         const float d_ir = ot_ir - dc_ir, d_red = ot_red - dc_red;
