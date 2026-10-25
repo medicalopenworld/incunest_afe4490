@@ -46,9 +46,9 @@ namespace {
     // the campaign: until v0.105 it read -20260923, the same label the discarded R-METHOD-1
     // proposal of 2026-09-24 had used — one label, one (a, b) (PulseNest docs/spo2_r_curves.md).
     constexpr const char* spo2_r_curve_id_default          = "R-CURVE-STS0163-HOSPNAV-20261004";
-    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-2";
-    constexpr float    spo2_r_curve_a_default = 123.98f;   // SpO2 = a - b·R
+    constexpr float    spo2_r_curve_a_default = 123.98f;   // SpO2 = a - b·R: the (a, b) that label names
     constexpr float    spo2_r_curve_b_default =  39.13f;
+    constexpr const char* spo2_r_curve_r_method_id_default = "R-METHOD-2";  // the R method it was fitted with
     constexpr float    spo2_min            =  70.0f;   // % — valid output lower bound
     constexpr float    spo2_max            = 100.0f;   // % — valid output upper bound
     constexpr float    spo2_clamp_margin   =  10.0f;   // % — clamp to spo2_max if within margin above;
