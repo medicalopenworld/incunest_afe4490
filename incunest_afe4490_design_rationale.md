@@ -1542,6 +1542,120 @@ SpO2 validity), `r` → `reg_corr`, `r_ok` → `reg_corr_ok`. And the three PI d
 citations behind `spo2_pi_max` = 20 % are now in the constant's comment and §10, with the open
 question of where that ceiling really comes from (none of the three discloses its PI estimator).
 
+## 18. One R curve or two? Neonatal foot vs adult finger — the evidence and the alternatives (2026-10-25)
+
+**The question (Alex, several times since 2026-10-19).** Should the library carry one R→SpO2 curve
+for neonates and another for adults? Each time the answer was "no" (§15 option 1; register
+`docs/spo2_r_curves.md`), on three grounds: ISO 80601-2-61:2026 201.12.1.101 d) validates paediatric
+accuracy with adult desaturation studies and knows no neonatal curve; fetal haemoglobin does not
+change the red/IR optics (Pritišanac 2021); Nellcor MAX-N runs one calibration on adult fingers and
+neonatal feet (Arms 2.0 vs 2.5). The 3-point adult-finger offset of 2026-10-18 was attributed to the
+reference (a home oximeter with a Nellcor-type adult curve, vs the Mindray in the NICU). The two
+sessions of 2026-10-23 (three probes, four home oximeters, two phones) reproduced the offset, and
+Alex's own R at rest, 0.54-0.56, gives 102-103 with the shipped curve: only `spo2_clamp_margin`
+(§15) hides it. This section records what is known, what is not, and the alternatives, so the next
+decision is taken on the numbers rather than on the 2026-10-19 hypothesis.
+
+**What the data say — median R at the same displayed SpO2, every data set with a stationary range.**
+
+| reference SpO2 | neonatal feet, SUBJ08+09, Mindray N17 (fit base, 3455 windows) | preterm 30 wk, SUBJ11, Mindray N17 (1121) | adult finger, SUBJ01 18-oct, home oximeter (1179) | adult finger, SUBJ01 23-oct, home oximeter (2022) | MS100 "Nellcor" table (SUBJ90) |
+|---|---|---|---|---|---|
+| 94 % | 0.757 | 0.766 | 0.712 | 0.705 | 0.692 |
+| 96 % | 0.715 | 0.739 | 0.636 | 0.615 | 0.641 |
+| 98 % | 0.650 | 0.665 | 0.580 | 0.585 | 0.590 |
+| 99 % | 0.629 | 0.635 | 0.545 | 0.531 | 0.564 |
+
+(Same probe model, same R-METHOD-2, same 8 s windows; neonatal PI 0.8-1.1 %, adult 3-8 %.) Three
+findings. (1) The three Mindray-referenced neonates agree with each other within 0.02 and the two
+adult sessions agree with the simulator's Nellcor table within 0.02: each convention is internally
+consistent. (2) Between the two groups R differs by 0.05-0.10 at every level, mean 0.07 ≈ 2.7 points
+at slope 39, with no trend over 94-99 %: an offset, not a slope. (3) The slope itself is the same
+everywhere a range exists (39.1 neonatal fit, 39.1 simulator; the adult-finger bin fits are flatter
+only because their range is 91-99). So the shipped curve is right for what it was fitted on and
+reads 2.7 ± 0.4 high on an adult finger judged by Nellcor-convention references. Whether an adult
+finger judged by a CO-oximeter would also say so is unknown.
+
+**Where the 2.7 points can come from — candidates by sign.** The Medle on a neonatal foot gives a
+HIGHER R than on an adult finger at the same displayed saturation. Candidates that produce that
+sign: (a) the references: the Mindray in neonatal mode and the home oximeters/Nellcor table are two
+transfer references, each specified at ±2-3 Arms against CO-oximetry (Mindray 518B/520N validated in
+neonates at 2.38/2.88; home devices ±2-3 in adults, worse below 90); a 2.7-point difference between
+two such references at the top of the range is within their combined uncertainty, so it cannot be
+excluded, nor confirmed, with them; (b) venous pulsation in the neonatal foot (dependent, wrapped
+tissue): venous blood pulsing adds a low-saturation component to the AC and raises R; it would also
+affect the Mindray's own foot sensor, so the fit absorbs only the difference between the two feet;
+(c) Philips states that the adult/neonatal patient category "optimizes the calculation of the SpO2";
+if the Mindray applies a neonatal-mode correction its displayed value is not the adult convention
+(not documented for the N17; module type unknown — Mindray uSpO2, Masimo or Nellcor are all sold).
+Candidates that produce the OPPOSITE sign, hence cannot be the cause: differential path-length
+ratio (Monte Carlo of a finger at 660/940 nm gives red/IR 1.25-1.45; thin tissue tends to 1, which
+LOWERS R at the same SaO2 — register, Atuar/Nitzan 2026); regression dilution at low PI (attenuates
+the neonatal R, so adults would read LOW); the Mindray's clipping at 100 (flattens the top of the
+fit, lowering the intercept). Fetal haemoglobin and skin tone (all subjects light-skinned) are
+negligible on the optics. One more constraint: every published neonatal validation of an
+adult-calibrated sensor (MAX-N 2.5, Masimo 2.9, Mindray 2.4-2.9 Arms) is incompatible with a
+sensor-level foot/finger shift of 2.7 points, since Arms contains the bias; so the tissue part of
+our offset is most likely ≤ 1 point and the rest sits in (a) or (c). That is the 2026-10-19
+hypothesis again, now with the sign argument behind it, and still not a measurement.
+
+**Why "a curve per age" was and remains the wrong axis.** Age is not a variable the optics see.
+What varies is the sensor (λ, geometry), the application site (tissue, venous component), the R
+estimator and the reference convention. The register already states the curve as probe × site ×
+method; the open question is whether SITE needs a second entry for this probe, and that question
+is not decidable against transfer references that disagree with each other by the same amount.
+
+**Alternatives.**
+
+1. *Status quo: one curve, neonatal foot, Mindray transfer; adult finger out of its domain.*
+   Pros: the product population is neonatal (IncuNest), the curve is confirmed on a held-out
+   30-week preterm (−0.2 ± 1.2), it agrees with the ward monitor the clinicians act on, nothing
+   changes. Cons: every adult bench session sits at the 100 % clamp (52-84 % of the time on
+   2026-10-23), so the top of the range cannot be tested on an adult; the library tells nobody that
+   the probe is on a site the curve was not fitted for.
+2. *Two labelled curves, selected by site in configuration, never auto-detected* (neonatal foot =
+   default; adult finger = `R-CURVE-STS0163-ADULTFINGER-…` or the MS100 Nellcor table
+   `R-CURVE-STS0163-MS100-20261019`, same slope, intercept −2.9). Pros: matches the physics
+   statement (curve per probe × site); the register supports it; adult bench work becomes
+   meaningful. Cons: the adult curve is referenced to consumer devices (non-traceable, 91-99 % only:
+   intercept known, slope assumed from the neonatal/simulator fits); a wrong selection at the
+   bedside shifts SpO2 by 2.7 points in the NICU target band (SUPPORT/BOOST: 1-2 points changed
+   outcomes); one more configuration surface to keep in `$CFG`, the capture and the spec.
+3. *One curve plus a per-site intercept offset* (slope 39.1 shared, offset 0 for the foot, −2.9 for
+   the finger). Same as 2 with one number instead of two; honest about what the adult data can
+   estimate (an intercept). Same selection risk.
+4. *Replace the default by the Nellcor-convention curve for everyone* (121.06 − 39.11·R). Pros:
+   adult finger, simulator and home devices all agree with it. Cons: reads −2.9 against the ward
+   monitor on the three neonates, i.e. the device would disagree with what the NICU acts on, in the
+   band where the targets live, on the basis of a simulator table and consumer oximeters. Rejected.
+5. *Runtime-selectable curve as tooling* (`$SET spo2_r_curve_a/b/id`, LIB CONFIG row, label in
+   `$CFG` and in every capture; the library has `setSpO2RCurve()` already; boot default unchanged).
+   Orthogonal to 1-4 and needed by 2, 3 and by any bench comparison; today the curve can only be
+   changed by rebuilding (see 2026-10-25 log). Risk: the same mis-selection as 2, mitigated by the
+   label travelling with the data and the boot default.
+6. *Attribute first, decide after.* Cheap, no ethics, in this order: (i) read the N17's SpO2 module
+   type off its menu or sensor connector (Nellcor vs Masimo vs Mindray) — one minute, changes the
+   reading of (a)/(c); (ii) Alex's finger on the N17 adult sensor and a home oximeter at the same time
+   (planned since 2026-10-19): if the N17 reads the adult finger like the home devices, the Mindray's
+   adult convention is Nellcor's and the neonatal offset is site or neonatal-mode; (iii) the Medle on
+   Alex's own foot (toe / lateral foot) with a home oximeter on his finger: site effect in one adult
+   under one convention, free; (iv) the real answer, step 4 of the plan: arterial gases taken
+   clinically in the NICU, paired with our R (GE neonatal protocol: 50 pairs are considered adequate).
+
+**Recommendation recorded (not yet decided by Alex).** Keep the neonatal-foot curve as the boot
+default (1), implement 5 now (bench need, no clinical downside while the default and the label are
+in place), register the adult-finger/Nellcor-convention curve as a labelled bench curve, and run
+6 (i)-(iii) before the next hospital visit. Whether 2/3 enters the library follows from 6: if the
+N17 on an adult finger reads like the home devices, the offset is site or neonatal mode and a
+site-selected second curve is justified; if it reads 2-3 points above them, the offset is the
+Mindray's convention and one curve stays, with the knowledge that "agreeing with the ward monitor"
+and "agreeing with the adult convention" are 2.7 points apart for this probe. The ISO path
+(201.12.1.101 d), Annex DD) eventually produces an adult-calibrated curve for the Medle; the neonatal
+transfer data then measure how far the NICU monitor sits from it.
+
+**Correction to earlier sessions.** On 2026-10-19/20 the 3 points were presented as "most likely
+the reference"; the honest state was and is "reproducible 2.7 ± 0.4 points, unattributed". The sign
+argument above makes the reference the leading candidate, not the established cause.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design
