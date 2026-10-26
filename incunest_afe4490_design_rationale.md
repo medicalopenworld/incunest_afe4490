@@ -1565,7 +1565,9 @@ decision is taken on the numbers rather than on the 2026-10-19 hypothesis.
 | 98 % | 0.650 | 0.665 | 0.580 | 0.585 | 0.590 |
 | 99 % | 0.629 | 0.635 | 0.545 | 0.531 | 0.564 |
 
-(Same probe model, same R-METHOD-2, same 8 s windows; neonatal PI 0.8-1.1 %, adult 3-8 %.) Three
+(Same probe model, same R-METHOD-2, same 8 s windows; PI in today's peak-to-peak units: neonatal
+≈ 2.3-3.2 % — the 2026-09-23 captures recorded the pre-v0.101 RMS PI, 0.8-1.1, ÷2.8 of it, a units
+slip corrected 2026-10-27 —, preterm SUBJ11 2.8 %, adult 3-8 %.) Three
 findings. (1) The three Mindray-referenced neonates agree with each other within 0.02 and the two
 adult sessions agree with the simulator's Nellcor table within 0.02: each convention is internally
 consistent. (2) Between the two groups R differs by 0.05-0.10 at every level, mean 0.07 ≈ 2.7 points
