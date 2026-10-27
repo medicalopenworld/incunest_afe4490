@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.106
+# incunest_afe4490 — Specification v0.111
 
 Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
@@ -3228,6 +3228,11 @@ Key references for each algorithm implemented in this library.
 
 | Version | Description                                                                 |
 |---------|-----------------------------------------------------------------------------|
+| v0.111  | **Rename `WindowBlockClock::step()` → `tick()` (§5.1; Alex 2026-10-27).** A clock ticks |
+|         | once per full-rate sample and the call returns true on the tick that completes a   |
+|         | block; it advances the clock, so a predicate name (`completed()`) was rejected.    |
+|         | `Decimator::step()` unchanged. Same numbers; no wire or config change. Rationale   |
+|         | §12. Spec title brought to the library version (it had stayed at v0.106).          |
 | v0.110  | **Pulse gate (§5.1, §10, rationale §17; decision Alex 2026-10-22):** SpO2 withheld   |
 |         | while `AFE4490Data::hr3` is NaN — `spo2_pulse_gate_enable` (default true),       |
 |         | `setSpO2PulseGateEnable()`. **Hold reason:** `AFE4490Data::spo2_hold_reason`     |

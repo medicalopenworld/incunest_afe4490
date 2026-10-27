@@ -1179,6 +1179,17 @@ sums divide by the samples in the window).
 struct (configured by DURATION, `len` samples per block) replaces them, so the word "decimation" no
 longer appears near the windows and §5.3.1 carries a scope note.
 
+**`step()` → `tick()` (v0.111, 2026-10-27).** Alex proposed renaming `WindowBlockClock::step()` to
+`completed()`. Rejected: the call advances the clock (`++phase`, reset at the block end) and returns
+true once per block, so it is a command with a result, not a query; a participle reads as a
+side-effect-free, `const` predicate, and called twice, or from a log line or an assert, it would
+shift the blocks silently. A verb keeps the mutation visible; `tick` is a clock's verb, and it also
+separates the two structs by name, as they were separated by concept on 2026-10-23
+(`Decimator::step()` discards samples; the block clock discards nothing). Splitting into `tick()`
+plus `completed() const` with a `fired` flag was considered and not taken: one more state for
+`reset()`/`configure()` to clear and two calls per sample, for a three-line struct. No consumer
+outside the library names the method (the lab mirror copies `configure()` and the block length).
+
 **Measured (SUBJ09 HOSPNAV replay, v0.102 vs v0.103, 29 946 common samples):** R mean difference 0,
 SD 0.0006 (max 0.006, the window edge now moving in 100 ms steps), r SD 0.0002, SpO2 SD 0.02 points
 (max 0.19), PI SD 0.02 % (max 0.31 %), median 8 s SD of R 0.00510 → 0.00506. The first estimate

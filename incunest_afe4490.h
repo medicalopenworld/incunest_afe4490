@@ -6,7 +6,7 @@
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.110"
+#define INCUNEST_AFE4490_VERSION "0.111"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1110,8 +1110,10 @@ private:
             if (phase >= len) phase = 0;
         }
         void reset() { phase = 0; }
-        // true when the current block is complete on this call.
-        bool step() {
+        // One full-rate sample has arrived: true when this tick completes the current block.
+        // A verb on purpose (it advances the clock): a predicate name such as completed() would
+        // read as a side-effect-free query, which this is not (v0.111, Alex).
+        bool tick() {
             if (++phase < len) return false;
             phase = 0;
             return true;

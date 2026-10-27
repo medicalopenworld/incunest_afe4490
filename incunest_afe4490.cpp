@@ -2499,7 +2499,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // fixed-cost running totals; between blocks every output keeps its last value (as PI) —
     // except while the window is still filling, where "last value" must be NaN, never a stale or
     // constructed 0 (output contract: sqi == 0 ⇒ spo2, R, r are NaN).
-    if (!_spo2_block_clock.step()) {
+    if (!_spo2_block_clock.tick()) {
         if (_spo2_buf_count < (uint32_t)_spo2_buf_n) {
             _current_data.spo2        = NAN;
             _current_data.spo2_r      = NAN;
@@ -2646,7 +2646,7 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     const float filtered = _pi_bpf.process(ot_ir);
     _pi_ac_block_sum += filtered * filtered;
 
-    if (!_pi_block_clock.step()) {         // block not complete: pi keeps its last value —
+    if (!_pi_block_clock.tick()) {         // no block completed on this sample: pi keeps its last value —
         if (_pi_buf_count < (uint32_t)_pi_buf_n) _current_data.pi = NAN;   // which is NaN while filling
         return;
     }
