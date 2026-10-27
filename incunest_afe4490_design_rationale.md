@@ -1698,6 +1698,23 @@ component locked to the heartbeat — and candidates (a), the reference conventi
 remain. The remaining attribution steps are the N17 module, the adult finger on the N17 and the
 Medle on an adult foot (6 i-iii), and the SUBJ08 vs SUBJ09 slope question (task H, 2026-10-27).
 
+**Learned 2026-10-27: the reference is Nellcor OxiMax.** The unit where SUBJ08-11 were captured
+reports that every one of its N17s carries a Nellcor OxiMax SpO2 module (sticker on the module; not
+verifiable from the screen frames). This does not change a single fitted number — the fit is against
+the displayed value — but it changes what the curve means. Candidate (c) is reduced to the undocumented
+possibility that the OxiMax neonatal sensor memory carries coefficients other than the adult clip's:
+Nellcor's neonatal mode is documented as alarm management only (SatSeconds off, SPD unavailable), not
+a change of the SpO2 computation. Candidate (a) shrinks from "two conventions" to "two implementations
+of Nellcor's adult calibration" (the OxiMax module with its per-sensor RCAL bin, and the MS100's
+"R-curve Nellcor" table; the home oximeter stays unidentified). The applicable neonatal validation is
+Nellcor's (MAX-N: 42 neonates, 63 observations, Arms 2.5 at 85-99 %), not Mindray's 518B/520N. What
+the 2.7-3.2 points can still be: the site under our probe, a bias of Nellcor's adult calibration on
+neonatal feet (bounded by that Arms), or the home oximeter not being Nellcor-like. Attribution step
+6 i is answered; step 6 ii (Alex's finger on the N17's own adult sensor and the Medle at once) now
+compares against the very module the neonates were referenced to and is the decisive cheap test.
+The reference's response mode (Normal 5-7 s / Fast 2-4 s) was not recorded; the 8 s pairing window
+of the fit covers either.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design
