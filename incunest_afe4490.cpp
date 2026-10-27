@@ -2636,12 +2636,36 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
         return;
     }
 
-    // Both sums at the full rate over the current block (v0.103): the raw OT for the DC and the
-    // squared band-passed sample for the AC. DC is a denominator only, never subtracted — it
-    // carries none of the bradycardia-tracking risk an AC-extraction EMA would (header, PI
-    // state block). Until v0.102 the AC took ONE band-passed sample per 20 ms block (a true
-    // 50 Hz decimation); at 100 ms that would alias the 0.5–15 Hz band, and the full-rate sum
-    // is the exact RMS anyway.
+    // ── PI-METHOD-1 (PI_METHOD_ID): the whole computation, in order ──────────────────────────
+    // Input: ot_ir, the reconstructed IR optical transmission (nominally invariant to the HGAC's
+    // RF/ILED moves; the residual step at an RF change is the RF tolerance, rationale §12).
+    //   1. AC waveform: _pi_bpf, one biquad band-pass pi_bp_f_low_hz–pi_bp_f_high_hz (0.5–15 Hz by
+    //      default, setPIFilter()). Each output sample is squared and summed into the current block.
+    //   2. DC: the raw OT summed into the same block. DC is a denominator only, never subtracted
+    //      from the signal, so it carries none of the bradycardia-tracking risk an AC-extraction
+    //      EMA would (header, PI state block).
+    //   3. Window: _pi_block_clock closes a block every alg_window_block_s (100 ms); both block
+    //      sums enter circular buffers of _pi_buf_n blocks (pi_window_s, 6 s by default, 2–12 s,
+    //      setPIWindowS()) kept as fixed-cost running totals (below). Both sums are formed at the
+    //      full AFE rate, so a sum of block sums is the full-rate sum over the window.
+    //   4. Output, on every completed block once the window is full:
+    //        PI = pi_rms_to_pp_ratio · sqrt(Σ AC² / N) / (Σ OT / N) · 100  [%],  N = blocks · len
+    //      i.e. the RMS of the band-passed OT over the window, scaled to peak-to-peak by 2√2
+    //      (exact for a sinusoid; the industry's units, ISO %mod), over the window mean of the raw OT.
+    //   NaN while the probe is not applied or the window is filling. PI has no validity gate of
+    //   its own; SpO2's SQI ramp and spo2_pi_max consume it.
+    // Identity rule: PI_METHOD_ID changes if and only if, for the same input, PI comes out as a
+    // different number (spec §5.1, "PI methods"); the parameters named above travel in the
+    // configuration and do not change it. The next definition that changes the number is
+    // PI-METHOD-2: document it as a delta to steps 1–4, not as a rewrite.
+    // History of this number: v0.100 sqrt(EMA var) / EMA mean inside _spo2_update(), RMS units,
+    // EMA subtraction as AC extraction; v0.101 this function (band-pass, 2√2, one window, decoupled
+    // from SpO2); v0.102 pi_window_s independent of spo2_window_s; v0.103 block sums at 100 ms
+    // (until v0.102 the AC took ONE band-passed sample per 20 ms block, a true 50 Hz decimation —
+    // at 100 ms that would alias the 0.5–15 Hz band, and the full-rate sum is the exact RMS anyway).
+    // Known limits of this method, measured (rationale §11, §14): the 2√2 sinusoid assumption
+    // against a measured crest factor of 2.8–3.2 (under-reads a per-beat Max−Min by 0–12 %), the
+    // biquad's ripple, and the excursion after an HGAC RF step.
     _pi_dc_block_sum += ot_ir;
     const float filtered = _pi_bpf.process(ot_ir);
     _pi_ac_block_sum += filtered * filtered;
