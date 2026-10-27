@@ -1553,6 +1553,24 @@ SpO2 validity), `r` → `reg_corr`, `r_ok` → `reg_corr_ok`. And the three PI d
 citations behind `spo2_pi_max` = 20 % are now in the constant's comment and §10, with the open
 question of where that ceiling really comes from (none of the three discloses its PI estimator).
 
+**Why r cannot be the artefact gate, and two cheap separations measured (2026-10-27).** The
+Masimo/Nellcor prior-art search (`docs/masimo_nellcor_spo2_prior_art.md`, §2) shows that for two
+uncorrelated sources with ratios ra and rv the regression's r cannot fall below
+`2·√(ra·rv)/(ra + rv)` = 0.954 for arterial 95 % plus venous 70 %, whatever the motion power, while
+the error at equal power is −12.5 points: the 0.8 gate catches uncorrelated noise, never coherent
+admixture (SUBJ10: r 0.96, −16 points). The two separations the report simulated on sums the window
+already keeps were then run on the corpus (`experiments/r_estimators_ab_20261027.py`, 21 sessions,
+lib 0.108 OT replays; the Python chain reproduces the library's R to 7·10⁻⁶): (a) Masimo's
+decorrelation constraint (US 5,632,272, expired) solved over six 1 s sub-windows is ill-conditioned
+91-98 % of the time and noisier where it acts (SUBJ08 Arms 2.42 → 3.46 under the gate; SUBJ10
+without the gate 15.7 → 10.2 points median, 70 % still beyond 4); (b) R on ±1 bin around the first
+three harmonics of HR3 (0.5-15 Hz band, Hann, 6 s or 10.24 s) is NaN without a valid HR3, so it
+carries the pulse gate by construction, and under it equals or slightly beats the regression on the
+still neonates (SUBJ09 2.39 → 2.07, SUBJ11 1.23 → 1.08, SUBJ08 2.42 → 2.42 Arms) while being worse
+on the 15 SUBJ10 windows the gate lets through (2.05 → 4.62). Decision: nothing changes; the pulse
+gate stays the artefact criterion; the harmonic estimator is a candidate second R only if a later
+campaign confirms the 0.1-0.3 Arms gain; the decorrelation as formulated is not usable here.
+
 ## 18. One R curve or two? Neonatal foot vs adult finger — the evidence and the alternatives (2026-10-25)
 
 **The question (Alex, several times since 2026-10-19).** Should the library carry one R→SpO2 curve
@@ -1668,6 +1686,17 @@ transfer data then measure how far the NICU monitor sits from it.
 **Correction to earlier sessions.** On 2026-10-19/20 the 3 points were presented as "most likely
 the reference"; the honest state was and is "reproducible 2.7 ± 0.4 points, unattributed". The sign
 argument above makes the reference the leading candidate, not the established cause.
+
+**Measured 2026-10-27: the offset is not venous admixture that the processing can separate.** One
+of the attribution steps of alternative 6 was to recompute R with estimators that discard the
+non-harmonic content (`experiments/r_estimators_ab_20261027.py`, §17). The neonatal-foot vs
+adult-finger intercept at the shared slope 39.13 is 3.25 points with the regression, 3.08 with the
+sub-window decorrelation, 3.10 with the harmonic bins at 6 s and 3.19 at 10.24 s; the per-level
+median R differences (0.04-0.05 at 94 %, 0.09-0.10 at 99 %) do not move. Candidate (b), venous
+pulsation, survives only in the form no linear second-order method can separate — a venous
+component locked to the heartbeat — and candidates (a), the reference convention, and the site
+remain. The remaining attribution steps are the N17 module, the adult finger on the N17 and the
+Medle on an adult foot (6 i-iii), and the SUBJ08 vs SUBJ09 slope question (task H, 2026-10-27).
 
 ## Appendix — source rationale (to distill at consolidation)
 
