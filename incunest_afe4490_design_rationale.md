@@ -1406,76 +1406,6 @@ key, `$SET`, `$M4` field 36 `R_METHOD2_REG_CORR`), capture dictionary and CSV co
 mirror and buffers, the bias-analysis tool, tests, specs. Captures already written keep `R_CORR`
 and `spo2_r_corr_min`: the readers take the old names as synonyms, as they did for `spo2a/b`.
 
-## 17. HR3 — spectrum preprocessing and harmonic combination, measured and not adopted (2026-10-21)
-
-**Context.** HR3 finds the pulse fundamental with the Harmonic Product Spectrum `P[k]·P[2k]·P[3k]`
-on the raw power spectrum (§5.4) and publishes it only while `hr3_sqi > 0`. Alex (2026-10-21):
-a product is a multiplicative AND, one harmonic in the noise kills the candidate, and the
-near-sinusoidal preterm PPG at 160-180 bpm would make that common. Two independent improvements
-were proposed and crossed on the recorded corpus before touching the library
-(`experiments/hr3_spectral_variants_20261021.py` in PulseNest; report
-`captures/sessions/HR3_VARIANTS_20261021/findings.md`):
-
-- **A, preprocessing of the spectrum** (the floor under the peaks: respiration, motion below 1 Hz,
-  broadband noise): A0 none; A1 subtraction of the local floor by convolution with a zero-sum
-  kernel, `S = max(0, P ⊛ h)` — Ricker, difference of Gaussians (1:1.6), CFAR blocks — with a
-  positive half width of 2 bins (the Hann main lobe) either constant or scaled by n for the n-th
-  harmonic term; A2 whitening `S = P / median(P, ±8 bins)`.
-- **B, combination of harmonics**: B0 `S[k]·S[2k]·S[3k]` (today); B1 `S[k]·S[2k]`; B2 Noll's
-  Harmonic Sum Spectrum; B3 Hermes' subharmonic summation (weights 0.84^(n−1)); B4 floored product
-  `Σ log(S[nk] + c)`.
-
-Same spectra for all 40 variants; the library's interpolation, two-bin SQI and `sqi > 0` rule for
-every one. The A0 × B0 mirror reproduces the runner's in-order replay exactly (same value within
-0.05 bpm or same NaN in 100 % of 1939 windows, 3 sessions). References: the pulse rate typed with
-each REF_SPO2 on an MS100 sweep 30-240 bpm (30-bpm plateaus of 90 s), and for the neonates the
-consensus of HR1 and HR2 (both valid, within 3 %), because the ward monitor's pulse rate was never
-captured.
-
-**What was measured.**
-
-1. *The premise does not hold on this corpus.* The neonates' 2nd harmonic sits 10-12 dB and the
-   3rd 18-21 dB below the fundamental (adult −8/−12.5; MS100 −2…−4/−5.5…−9.5 dB): weak, not in
-   the noise. A B4 whose floor was the noise median came out identical to B0 on every session —
-   no harmonic the product needs is at the noise level. Today's HR3 is right in 89.5-92.5 % of the
-   neonates' consensus windows and in 100 % of every MS100 plateau from 30 to 240 bpm (max error
-   0.18 bpm). What it lacks is availability — 69-88 % of the neonates' windows against 99.8 % on the
-   adult finger — and that is the `sqi > 0` rule withholding.
-2. *Every floor-removing preprocessing fills that gap on clean signal* (Ricker/DoG at constant
-   width or whitening: 97.6-99.7 % availability, 99-100 % correct on SUBJ08/09/11) *and on
-   artefact*: SUBJ10 (moving, SpO2 −16 pt against the Mindray) has HR3 valid in 6.8 % of its
-   windows today and in 57-92 % with any A1/A2 variant. Re-run as the 2026-10-20 SpO2 gate
-   "HR3 valid": SUBJ10 published 2.6 % / Arms 2.0 with today's HR3, 57-81 % / Arms 15-16 with any
-   preprocessed one — the no-gate numbers; SUBJ09 likewise returns to 99.4 % / Arms 3.2 / 15 %
-   beyond 4 points. The windows the preprocessing adds back are the artefact windows. **The
-   product on the raw spectrum with the SQI rule is the artefact detector the pending SpO2 gate
-   relies on; removing the floor removes the detector.**
-3. *Sums lose the subharmonic defence*, as reasoned beforehand: B2/B3 admit SUBJ10 windows with
-   SpO2 Arms 10-11 even without preprocessing, and with whitening fall to 84-89 % correct (harmonic
-   errors at 90-150 bpm on the MS100, octaves on the adult).
-4. *Kernel width is bounded by the harmonic spacing.* Kernels scaled by n score 0 % at 30 and
-   60 bpm with the product: the n-th term's negative lobes reach the neighbouring harmonic, 5 bins
-   apart at 30 bpm. CFAR blocks fail at 30 bpm even at constant width. Whitening over ±8 bins
-   drops to 87 % at 120 bpm.
-5. *SQI.* With any A1 kernel and a product the two-bin fraction saturates at 1: a sparse spectrum
-   has nothing outside the peak to divide by. The SQI would have to be re-derived for any A1
-   variant; the artefact class available (10-18 windows per subject, since in motion HR1 and HR2
-   go invalid rather than disagree) is too thin to design it.
-6. *The one measured gain without a gate cost: the two-harmonic product `P[k]·P[2k]` (B1).*
-   Availability on the clean neonates 69.4 → 76.0, 70.6 → 76.5, 88.3 → 94.7 %; harmonic errors
-   2.5 → 0.9, 1.1 → 0.9, 4.7 → 2.4 %; MS100 100 % on every plateau; SUBJ10 gate 2.6 → 2.1 %
-   published; gate Arms on SUBJ08/09/11 within 0.2 of today's. It would also retire the N/6 search
-   cap's reason (3rd harmonic inside Nyquist → N/4). Hermes weights are the most accurate on clean
-   signal (98-99 %) but let 7.5 % of SUBJ10 through at Arms 11.
-
-**Decision.** Nothing from the A axis enters the library while "HR3 valid" is the artefact-gate
-candidate (§9 of the 2026-10-20 gate analysis; decision pending). If a preprocessing is ever
-wanted for availability, the artefact detection must be rebuilt first on another basis (Philips
-FAST's harmonic-family criteria, Nellcor's harmonic energy decreasing with order). B1 is on the
-table for Alex; not adopted in this version. Open: whether true preterm PPG has weaker harmonics
-than these neonates (no gestational age in the sessions; the MS100 cannot emulate it), and the
-monitor's pulse rate for the next campaign (VideoNest's `pr` field exists and stayed empty).
-
 ## 17. The SpO2 artefact gate: HR3's pulse identification, withhold, no hold (2026-10-20 → 2026-10-22)
 
 **The problem.** SUBJ10 (term neonate, moving, 2026-10-13) read −16 points against the Mindray N17
@@ -1570,6 +1500,76 @@ still neonates (SUBJ09 2.39 → 2.07, SUBJ11 1.23 → 1.08, SUBJ08 2.42 → 2.42
 on the 15 SUBJ10 windows the gate lets through (2.05 → 4.62). Decision: nothing changes; the pulse
 gate stays the artefact criterion; the harmonic estimator is a candidate second R only if a later
 campaign confirms the 0.1-0.3 Arms gain; the decorrelation as formulated is not usable here.
+
+### 17.1 HR3 — spectrum preprocessing and harmonic combination, measured and not adopted (2026-10-21)
+
+**Context.** HR3 finds the pulse fundamental with the Harmonic Product Spectrum `P[k]·P[2k]·P[3k]`
+on the raw power spectrum (§5.4) and publishes it only while `hr3_sqi > 0`. Alex (2026-10-21):
+a product is a multiplicative AND, one harmonic in the noise kills the candidate, and the
+near-sinusoidal preterm PPG at 160-180 bpm would make that common. Two independent improvements
+were proposed and crossed on the recorded corpus before touching the library
+(`experiments/hr3_spectral_variants_20261021.py` in PulseNest; report
+`captures/sessions/HR3_VARIANTS_20261021/findings.md`):
+
+- **A, preprocessing of the spectrum** (the floor under the peaks: respiration, motion below 1 Hz,
+  broadband noise): A0 none; A1 subtraction of the local floor by convolution with a zero-sum
+  kernel, `S = max(0, P ⊛ h)` — Ricker, difference of Gaussians (1:1.6), CFAR blocks — with a
+  positive half width of 2 bins (the Hann main lobe) either constant or scaled by n for the n-th
+  harmonic term; A2 whitening `S = P / median(P, ±8 bins)`.
+- **B, combination of harmonics**: B0 `S[k]·S[2k]·S[3k]` (today); B1 `S[k]·S[2k]`; B2 Noll's
+  Harmonic Sum Spectrum; B3 Hermes' subharmonic summation (weights 0.84^(n−1)); B4 floored product
+  `Σ log(S[nk] + c)`.
+
+Same spectra for all 40 variants; the library's interpolation, two-bin SQI and `sqi > 0` rule for
+every one. The A0 × B0 mirror reproduces the runner's in-order replay exactly (same value within
+0.05 bpm or same NaN in 100 % of 1939 windows, 3 sessions). References: the pulse rate typed with
+each REF_SPO2 on an MS100 sweep 30-240 bpm (30-bpm plateaus of 90 s), and for the neonates the
+consensus of HR1 and HR2 (both valid, within 3 %), because the ward monitor's pulse rate was never
+captured.
+
+**What was measured.**
+
+1. *The premise does not hold on this corpus.* The neonates' 2nd harmonic sits 10-12 dB and the
+   3rd 18-21 dB below the fundamental (adult −8/−12.5; MS100 −2…−4/−5.5…−9.5 dB): weak, not in
+   the noise. A B4 whose floor was the noise median came out identical to B0 on every session —
+   no harmonic the product needs is at the noise level. Today's HR3 is right in 89.5-92.5 % of the
+   neonates' consensus windows and in 100 % of every MS100 plateau from 30 to 240 bpm (max error
+   0.18 bpm). What it lacks is availability — 69-88 % of the neonates' windows against 99.8 % on the
+   adult finger — and that is the `sqi > 0` rule withholding.
+2. *Every floor-removing preprocessing fills that gap on clean signal* (Ricker/DoG at constant
+   width or whitening: 97.6-99.7 % availability, 99-100 % correct on SUBJ08/09/11) *and on
+   artefact*: SUBJ10 (moving, SpO2 −16 pt against the Mindray) has HR3 valid in 6.8 % of its
+   windows today and in 57-92 % with any A1/A2 variant. Re-run as the 2026-10-20 SpO2 gate
+   "HR3 valid": SUBJ10 published 2.6 % / Arms 2.0 with today's HR3, 57-81 % / Arms 15-16 with any
+   preprocessed one — the no-gate numbers; SUBJ09 likewise returns to 99.4 % / Arms 3.2 / 15 %
+   beyond 4 points. The windows the preprocessing adds back are the artefact windows. **The
+   product on the raw spectrum with the SQI rule is the artefact detector the pending SpO2 gate
+   relies on; removing the floor removes the detector.**
+3. *Sums lose the subharmonic defence*, as reasoned beforehand: B2/B3 admit SUBJ10 windows with
+   SpO2 Arms 10-11 even without preprocessing, and with whitening fall to 84-89 % correct (harmonic
+   errors at 90-150 bpm on the MS100, octaves on the adult).
+4. *Kernel width is bounded by the harmonic spacing.* Kernels scaled by n score 0 % at 30 and
+   60 bpm with the product: the n-th term's negative lobes reach the neighbouring harmonic, 5 bins
+   apart at 30 bpm. CFAR blocks fail at 30 bpm even at constant width. Whitening over ±8 bins
+   drops to 87 % at 120 bpm.
+5. *SQI.* With any A1 kernel and a product the two-bin fraction saturates at 1: a sparse spectrum
+   has nothing outside the peak to divide by. The SQI would have to be re-derived for any A1
+   variant; the artefact class available (10-18 windows per subject, since in motion HR1 and HR2
+   go invalid rather than disagree) is too thin to design it.
+6. *The one measured gain without a gate cost: the two-harmonic product `P[k]·P[2k]` (B1).*
+   Availability on the clean neonates 69.4 → 76.0, 70.6 → 76.5, 88.3 → 94.7 %; harmonic errors
+   2.5 → 0.9, 1.1 → 0.9, 4.7 → 2.4 %; MS100 100 % on every plateau; SUBJ10 gate 2.6 → 2.1 %
+   published; gate Arms on SUBJ08/09/11 within 0.2 of today's. It would also retire the N/6 search
+   cap's reason (3rd harmonic inside Nyquist → N/4). Hermes weights are the most accurate on clean
+   signal (98-99 %) but let 7.5 % of SUBJ10 through at Arms 11.
+
+**Decision.** Nothing from the A axis enters the library while "HR3 valid" is the artefact-gate
+candidate (§17 above, adopted in v0.110). If a preprocessing is ever
+wanted for availability, the artefact detection must be rebuilt first on another basis (Philips
+FAST's harmonic-family criteria, Nellcor's harmonic energy decreasing with order). B1 is on the
+table for Alex; not adopted in this version. Open: whether true preterm PPG has weaker harmonics
+than these neonates (no gestational age in the sessions; the MS100 cannot emulate it), and the
+monitor's pulse rate for the next campaign (VideoNest's `pr` field exists and stayed empty).
 
 ## 18. One R curve or two? Neonatal foot vs adult finger — the evidence and the alternatives (2026-10-25)
 

@@ -1116,7 +1116,12 @@ or tried, with its data, range, residuals and state, is in the PulseNest registe
 The default pair matches since v0.100 (it raised the mismatch warning by itself from v0.98 to
 v0.99: the only curve was R-METHOD-0's). A curve is for one probe model: this one is for the Medle
 ST-S0163 and says nothing about the UpnMed U401-D. The registry of all curves, with their data and
-fitting method, lives in PulseNest (`docs/spo2_r_curves.md`, planned).
+fitting method, lives in PulseNest (`docs/spo2_r_curves.md`). Medle ST-S0163 wavelengths: red **668 nm**
+measured with a visible spectrometer at 50 mA (667-670 nm across units; datasheet 665 nm), IR 905 nm.
+The HGAC moves the red with the LED current (≈ +8 nm per decade, de Kock 1991), so a curve is fitted
+with the mix of currents of its sessions; against a 660 nm device our R is 6-10 % lower (+1.0 point at
+97 %, +2.2 at 85 %, +3.5 at 70 % if read through a 660 nm curve), one more reason why no published
+660 nm curve is transplantable (PulseNest `docs/r_curve_calibration_survey.md` §6, 2026-10-27).
 
 On the wire (PulseNest fw ≥ 0.16), `$CFG` carries `spo2_r_method_id`, `spo2_r_curve_id`,
 `spo2_r_curve_r_method_id`, `spo2_r_curve_method_match`, `spo2_r_curve_a`, `spo2_r_curve_b`
@@ -1452,6 +1457,8 @@ SQI       = clamp((fraction − baseline) / (1 − baseline), 0, 1)
 Note: `peak_bin` (the HPS search maximum) coincides with either b1 or b2; `hps_at(b1/b2)` reuses `peak_hps` in that case to avoid a redundant computation.
 
 Parameters: `hr3_sqi_local_w = 5` bins (window extends ±5 bins beyond b1 and b2, ~±0.49 Hz). If `hps_win = 0` or `n_win ≤ 2`, SQI = 0 (conservative).
+
+**Load-bearing rule (2026-10-21, rationale §17.1).** `hr3` is published only while `hr3_sqi > 0`, and the HPS is taken on the *raw* power spectrum: that pair is the pulse detector the SpO2 pulse gate (§5.1, rationale §17) relies on. Do not remove the spectral floor before the HPS (zero-sum kernels, whitening, CFAR): measured on 21 sessions, every such preprocessing raises neonatal availability but returns a valid HR3 during motion, and the gate's Arms goes from 2.0 to 15-16 points (SUBJ10).
 
 **Bin-independence:** P[k] and HPS metrics based on a single bin suffer from a half-bin misalignment effect (energy splits across two bins → denominator changes but numerator is halved). By summing two adjacent bins in both numerator and denominator, the effect cancels and SQI is approximately constant regardless of bin alignment.
 
