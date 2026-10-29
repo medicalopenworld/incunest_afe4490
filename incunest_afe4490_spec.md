@@ -72,7 +72,8 @@ only one that still showed a scaling discontinuity whenever HGAC changed RF. See
 
 The library builds unchanged on three targets: **Arduino-ESP32** (PlatformIO — PulseNest, and
 IncuNest motherBoard until its ESP-IDF port merges), **ESP-IDF without Arduino** (CMake component —
-motherBoard after the port) and the **host** (PC — `pio test -e native`, `tools/offline_runner`).
+motherBoard after the port) and the **host** (PC — the unit tests in `test/`, §9.10, and
+`tools/offline_runner`).
 
 **Only what came from `<Arduino.h>` and `<SPI.h>` differs between the two embedded targets.**
 Measured on v0.90b: 18 call sites (GPIO ×7, DRDY interrupt ×2, two 4-byte SPI register
@@ -2724,6 +2725,9 @@ lib/incunest_afe4490/                       (PulseNest: symlink to the library r
   incunest_afe4490_hal_idf.cpp              — active under ESP_PLATFORM && !ARDUINO
   incunest_afe4490_hal_host.cpp / _host.h   — active when !ESP_PLATFORM
   CMakeLists.txt                            — ESP-IDF component registration
+  test/                                     — host unit tests (§9.10)
+  scripts/check_version.py                  — version strings agree (§9.10)
+  .github/workflows/tests.yml               — CI: version check + unit tests (§9.10)
 
 tools/
   offline_runner/
@@ -2782,6 +2786,34 @@ build/incunest_offline_runner path/to/directory/
 ```
 
 Requires C++17 and a standard compiler (g++ ≥ 10, MSVC ≥ 2019, clang ≥ 11). No external libraries.
+
+### 9.10 Host unit tests, version check, CI and release notes (2026-10-30)
+
+**Unit tests** live in the library repo, `test/` (moved from PulseNest `test_lib/` on 2026-10-30,
+rationale §19): one Unity program per `test/test_<name>/` suite, Unity 2.6.0 vendored in
+`test/unity` (MIT). `test/CMakeLists.txt` builds `incunest_afe4490.cpp` + `incunest_afe4490_hal_host.cpp`
+with `UNIT_TEST` and `INCUNEST_TIMING_STATS=1` under `-Wall -Wextra -Werror`, and one executable per
+suite. `python test/run_host_tests.py [filters] [--clean] [--build <dir>]` configures, builds and
+runs them (cmake + ninja + g++; MinGW-w64 on Windows); exit code = failing suites. The directory is
+`test/` because PlatformIO leaves `test/` and `examples/` out when it compiles a library from
+`lib_deps`: a firmware consuming the library never compiles the suites.
+
+**Version check:** `python scripts/check_version.py [vX.Y]` fails unless `INCUNEST_AFE4490_VERSION`,
+the `// Library version:` header comments of `incunest_afe4490.h`, `incunest_afe4490.cpp` and
+`examples/basic/main.cpp`, this spec's title, the first row of §14 and `library.json`'s `version`
+(semantic: `0.111` → `0.111.0`, `0.90b` → `0.90.1`) all name the same version, and, given a tag,
+that version is the tag's.
+
+**CI:** `.github/workflows/tests.yml` (GitHub Actions, Ubuntu) runs the version check (against the
+tag when the push is a tag) and then the unit tests, on every push, every `v*` tag, every pull
+request, and by hand.
+
+**Release notes:** every tag gets a GitHub Release, written when the tag is pushed, from its §14 row:
+
+- **What changes** — two to four lines;
+- **Breaking** — API (renamed or removed functions, setters, types) and data contract (`AFE4490Data`
+  / `AFE4490Config` fields, `$CFG` keys, frame fields), or "nothing";
+- **When upgrading** — what a consumer has to touch (code, `platformio.ini` pin, saved configs).
 
 ---
 

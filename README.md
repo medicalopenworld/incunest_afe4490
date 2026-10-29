@@ -40,11 +40,13 @@ void setup() {
 }
 ```
 
-In your `platformio.ini` (pin to a tag or commit — never `#master` — for a firmware you ship):
+In your `platformio.ini` (pin to a tag or commit — never `#master` — for a firmware you ship; each tag's
+[release notes](https://github.com/medicalopenworld/incunest_afe4490/releases) say what changes and what
+to touch when upgrading):
 
 ```ini
 lib_deps =
-    https://github.com/medicalopenworld/incunest_afe4490.git#v0.91
+    https://github.com/medicalopenworld/incunest_afe4490.git#v0.111
 ```
 
 ### ESP-IDF (no Arduino)
@@ -75,7 +77,18 @@ extern "C" void app_main(void) {
 ```
 
 `-DINCUNEST_AFE4490_HAL_SPI_HOST=SPI3_HOST` if the AFE is not on SPI2. The library builds
-under `-Wall -Wextra -Werror` on both frameworks and on the host (`pio test -e native`).
+under `-Wall -Wextra -Werror` on both frameworks and on the host.
+
+## Tests
+
+Host unit tests (Unity) in [`test/`](test/README), run on the PC with cmake, ninja and g++:
+
+```sh
+python test/run_host_tests.py
+```
+
+GitHub Actions runs them on every push and every tag, after `scripts/check_version.py` (every version
+string in the repository names the same version, and the tag's on a tag).
 
 ## Specification
 

@@ -1,0 +1,28 @@
+# Version check + host unit tests on every push and every tag (a tag must also match every version
+# string, scripts/check_version.py). Same build as on the developer's PC: test/run_host_tests.py
+# (cmake + ninja + g++, the library under -Wall -Wextra -Werror).
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version strings agree (and match the tag, on a tag)
+        run: python3 scripts/check_version.py --tag-from-ref "$GITHUB_REF"
+
+      - name: Install cmake, ninja, g++
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      - name: Build and run the host unit tests
+        run: python3 test/run_host_tests.py

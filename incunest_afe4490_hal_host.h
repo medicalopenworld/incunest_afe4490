@@ -3,8 +3,8 @@
 // Spec: incunest_afe4490_spec.md §1.4 "Hardware abstraction layer", §9 "Offline runner"
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
-// Included by incunest_afe4490.h when ESP_PLATFORM is NOT defined, i.e. for `pio test -e native`
-// and for tools/offline_runner. It provides, with their REAL names, the handful of FreeRTOS,
+// Included by incunest_afe4490.h when ESP_PLATFORM is NOT defined, i.e. for the unit tests in
+// test/ and for tools/offline_runner. It provides, with their REAL names, the handful of FreeRTOS,
 // esp_log and esp_timer symbols the library calls, so that the library source compiles unchanged
 // on a PC. Nothing here is Arduino: the Arduino-only calls went behind incunest_afe4490_hal.h,
 // whose host implementation is incunest_afe4490_hal_host.cpp.

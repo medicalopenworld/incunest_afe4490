@@ -8,7 +8,7 @@
 // The library runs on three build targets:
 //   * Arduino-ESP32   (PulseNest bench today; IncuNest motherBoard until its ESP-IDF port merges)
 //   * ESP-IDF, no Arduino (IncuNest motherBoard after the port; PulseNest after phase 1)
-//   * host (PC)       (unit tests under `pio test -e native`, the offline capture runner)
+//   * host (PC)       (unit tests in test/, the offline capture runner)
 //
 // Measured on v0.90b: the ONLY symbols that differ between the two embedded targets come from
 // <Arduino.h> and <SPI.h> — 18 call sites in the .cpp (GPIO, the DRDY interrupt, two 4-byte SPI

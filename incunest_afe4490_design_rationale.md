@@ -1715,6 +1715,39 @@ compares against the very module the neonates were referenced to and is the deci
 The reference's response mode (Normal 5-7 s / Fast 2-4 s) was not recorded; the 8 s pairing window
 of the fit covers either.
 
+## 19. Tests, version check and release notes in the library's own repository (2026-10-30)
+
+**Problem.** Until 2026-10-30 the host unit tests lived in PulseNest (`test_lib/`), not here. The
+published repository, the one IncuNest pins in `platformio.ini`, could not verify a tag by itself:
+whether `v0.111` passed its tests was knowable only from a PulseNest checkout of the same day. On the
+same day three strings that must agree did not (`library.json` at 0.104.0 with the library at 0.111;
+the `.h`, `.cpp` and example header comments at v0.102, v0.104 and v0.99), and no tag had release
+notes: a consumer moving from `v0.94` to `v0.111` had to read seventeen rows of §14 to learn which
+`AFE4490Data` fields had been renamed.
+
+**Decision (Alex, 2026-10-30).**
+
+- Tests move to `test/` (spec §9.10). The name is load-bearing: PlatformIO's default source filter
+  for a library excludes `test/`, `tests/`, `example/` and `examples/`, so IncuNest's `lib_deps`
+  build never sees the suites' `main()` or Unity. A directory named otherwise (`test_lib/`) would be
+  compiled into the firmware and fail to link.
+- PulseNest keeps a thin wrapper with the same command as before (`test_lib/runner/run_host_tests.py`):
+  it fetches the pinned library (`scripts/get_lib.py`) and runs `test/run_host_tests.py` with its
+  build directory inside PulseNest. *Alternative rejected:* deleting `test_lib/` from PulseNest and
+  running the library's script directly — one command fewer, but the habit, the README and the
+  sessions' rules all name the PulseNest command, and the build directory would land inside the
+  library working copy.
+- `scripts/check_version.py` checks every version string against the others and against the tag;
+  CI (GitHub Actions, Ubuntu, cmake + ninja + g++) runs it before the tests on every push and tag.
+  *Alternative not taken:* a single source of the version (the others generated from it) — it would
+  need a generation step in three build systems (PlatformIO, ESP-IDF, host CMake) for a value that
+  changes once per tag; a check that fails is enough.
+- Every tag gets a GitHub Release in a fixed short format (what changes / breaking / when
+  upgrading). §14 stays the full history; the release is the consumer's summary.
+- `v0.111` was already tagged without tests or CI. No new tag for this (not a functional change,
+  versioning policy); `v0.112` is the first tag the CI verifies, and the CI was run by hand on
+  master, whose library sources equal `v0.111`'s except for the three header comments.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

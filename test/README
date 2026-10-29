@@ -1,0 +1,25 @@
+incunest_afe4490 host unit tests (Unity)
+========================================
+
+One directory per suite: test/test_<name>/test_<name>.cpp. Each suite is a plain Unity program
+(setUp/tearDown/main with UNITY_BEGIN/RUN_TEST/UNITY_END) that includes only incunest_afe4490.h,
+unity.h and the C standard library, so it builds and runs on the host PC.
+
+The library is compiled for the host with -DUNIT_TEST (opens the test_* accessors) together with
+incunest_afe4490_hal_host.cpp (no-op GPIO/SPI, fake FreeRTOS/esp_log/esp_timer).
+
+Build and run everything (needs cmake, ninja and a host g++ on PATH — MinGW-w64 on Windows):
+
+    python test/run_host_tests.py
+    python test/run_host_tests.py hr1 spo2    # only suites matching a filter
+    python test/run_host_tests.py --clean     # rebuild from scratch
+
+Build system: test/CMakeLists.txt (Unity 2.6.0 vendored in test/unity, MIT, test/unity/LICENSE.txt).
+GitHub Actions runs the version check (scripts/check_version.py) and these tests on every push and
+every tag: .github/workflows/tests.yml.
+
+The directory is named test/ on purpose: PlatformIO leaves test/ and examples/ out when it compiles a
+library, so a firmware that lists this repository in lib_deps never builds the suites' main().
+
+Moved from PulseNest test_lib/ on 2026-10-30 (PulseNest commit 285fca7); their earlier history is in
+that repository.
