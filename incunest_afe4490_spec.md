@@ -1,6 +1,6 @@
 # incunest_afe4490 — Specification v0.111
 
-Medical Open World proprietary library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
+Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
 Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
 Coexists with `protocentral-afe4490-arduino` for behavioral comparison.
 

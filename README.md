@@ -4,6 +4,10 @@ AFE4490 PPG/SpO2/PI driver for ESP32-S3 (Arduino-ESP32 or ESP-IDF, FreeRTOS) —
 
 Part of the [IncuNest](https://github.com/medicalopenworld/IncuNest) neonatal incubator project.
 
+> **Not validated for clinical use.** This library is research and development software. It is not a
+> certified medical device and has not been clinically validated: do not use its SpO2, heart-rate or
+> perfusion-index outputs to diagnose, monitor or treat patients.
+
 ## Features
 
 - Non-blocking FreeRTOS task: DRDY ISR → SPI read → signal processing → queue
@@ -84,4 +88,5 @@ The spec and the library are versioned together (same semantic version).
 
 ## License
 
-Proprietary — Medical Open World. All rights reserved.
+[MIT](LICENSE) — Copyright (c) 2026 medicalopenworld. Provided "as is", without warranty of any kind;
+see the clinical-use notice above.

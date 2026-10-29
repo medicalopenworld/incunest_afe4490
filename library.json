@@ -12,7 +12,7 @@
     "url": "http://medicalopenworld.org",
     "email": "contact@medicalopenworld.org"
   },
-  "license": "proprietary",
+  "license": "MIT",
   "homepage": "https://github.com/medicalopenworld/incunest_afe4490",
   "frameworks": ["arduino", "espidf", "*"],
   "platforms": ["espressif32", "native"],
