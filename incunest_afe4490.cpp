@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.112 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.113 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -2463,7 +2463,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _current_data.spo2_r      = NAN;
         _current_data.spo2_r_method2_reg_corr = NAN;
         _current_data.spo2_sqi    = 0.0f;
-        _current_data.spo2_hold_reason = SpO2HoldReason::PROBE;
+        _current_data.spo2_hold_reason = SpO2HoldReason::HOLD_PROBE;
         return;
     }
 
@@ -2505,7 +2505,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
             _current_data.spo2_r      = NAN;
             _current_data.spo2_r_method2_reg_corr = NAN;
             _current_data.spo2_sqi    = 0.0f;
-            _current_data.spo2_hold_reason = SpO2HoldReason::WINDOW;
+            _current_data.spo2_hold_reason = SpO2HoldReason::HOLD_WINDOW;
         }
         return;
     }
@@ -2540,7 +2540,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _current_data.spo2_r      = NAN;
         _current_data.spo2_r_method2_reg_corr = NAN;
         _current_data.spo2_sqi    = 0.0f;
-        _current_data.spo2_hold_reason = SpO2HoldReason::WINDOW;
+        _current_data.spo2_hold_reason = SpO2HoldReason::HOLD_WINDOW;
         return;
     }
 
@@ -2571,7 +2571,7 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     if (!eps_valid) {
         _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
-        _current_data.spo2_hold_reason = SpO2HoldReason::DIV_EPS;
+        _current_data.spo2_hold_reason = SpO2HoldReason::HOLD_EPS;
         return;
     }
 
@@ -2598,11 +2598,11 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // Task C's first commit after boot _current_data.hr3 is 0.0, which would open the gate.
     const bool pulse_ok = !_spo2_pulse_gate_enable || (_current_data.hr3_sqi > 0.0f && !isnan(_current_data.hr3));
     _current_data.spo2_hold_reason =
-        !reg_corr_ok ? SpO2HoldReason::REG_CORR :
-        !pi_ok       ? SpO2HoldReason::PI :
-        !range_ok    ? SpO2HoldReason::RANGE :
-        !pulse_ok    ? SpO2HoldReason::PULSE : SpO2HoldReason::NONE;
-    if (_current_data.spo2_hold_reason == SpO2HoldReason::NONE) {
+        !reg_corr_ok ? SpO2HoldReason::HOLD_REG_CORR :
+        !pi_ok       ? SpO2HoldReason::HOLD_PI :
+        !range_ok    ? SpO2HoldReason::HOLD_RANGE :
+        !pulse_ok    ? SpO2HoldReason::HOLD_PULSE : SpO2HoldReason::HOLD_NONE;
+    if (_current_data.spo2_hold_reason == SpO2HoldReason::HOLD_NONE) {
         _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
         // PI < spo2_pi_sqi_lo → SQI = 0 (very weak signal). PI ≥ spo2_pi_sqi_hi → SQI = 1

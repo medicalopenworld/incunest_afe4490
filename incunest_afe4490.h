@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.112 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.113 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.112"
+#define INCUNEST_AFE4490_VERSION "0.113"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -120,31 +120,33 @@ inline bool isProbeAbsent(ProbeState s) {
 
 // ── SpO2 hold reason (v0.110) ────────────────────────────────────────────────
 // Why AFE4490Data::spo2 is NaN right now: the FIRST gate that failed, in the order _spo2_update()
-// checks them. NONE = published. A consumer can show "pulse search" instead of a mute dash, and a
-// capture records why each value was withheld. Not a DiagCode bit: any DiagCode bit forces RSQI to
+// checks them. HOLD_NONE = published. A consumer can show "pulse search" instead of a mute dash, and
+// a capture records why each value was withheld. Not a DiagCode bit: any DiagCode bit forces RSQI to
 // 0 and would invalidate HR and PI, which have their own rules. Codes are stable (wire: $M4 field
 // 37, CSV column SPO2_HOLD_REASON); add new ones at the end.
+// Every enumerator carries the HOLD_ prefix (v0.113), as ProbeState::PROBE_* and AFE4490ChState::CH_*:
+// `enum class` scopes the name for the compiler but not for the preprocessor, and bare words collide
+// with system macros (`EPS` in xtensa/specreg.h under ESP-IDF, `PI` in Arduino.h).
 enum class SpO2HoldReason : uint8_t {
-    NONE     = 0,   // SpO2 published
-    PROBE    = 1,   // ProbeState != PROBE_APPLIED (state reset every sample)
-    WINDOW   = 2,   // the spo2_window_s sliding window is still filling
-    DIV_EPS  = 3,   // division safety: a window sum below spo2_reg_eps / spo2_div_eps (not `EPS`: an
-                    // Xtensa register macro in ESP-IDF, specreg.h — v0.112)
-    REG_CORR = 4,   // R-METHOD-2: regression correlation below spo2_r_method2_reg_corr_min
-    PI       = 5,   // PI unknown (its window filling) or above spo2_pi_max (DC transient)
-    RANGE    = 6,   // a − b·R outside [spo2_min, spo2_max + spo2_clamp_margin]
-    PULSE    = 7    // pulse gate (spo2_pulse_gate_enable): HR3 has not identified a pulse
+    HOLD_NONE     = 0,   // SpO2 published
+    HOLD_PROBE    = 1,   // ProbeState != PROBE_APPLIED (state reset every sample)
+    HOLD_WINDOW   = 2,   // the spo2_window_s sliding window is still filling
+    HOLD_EPS      = 3,   // division safety: a window sum below spo2_reg_eps / spo2_div_eps
+    HOLD_REG_CORR = 4,   // R-METHOD-2: regression correlation below spo2_r_method2_reg_corr_min
+    HOLD_PI       = 5,   // PI unknown (its window filling) or above spo2_pi_max (DC transient)
+    HOLD_RANGE    = 6,   // a − b·R outside [spo2_min, spo2_max + spo2_clamp_margin]
+    HOLD_PULSE    = 7    // pulse gate (spo2_pulse_gate_enable): HR3 has not identified a pulse
 };
 inline const char* afeSpO2HoldReasonToStr(SpO2HoldReason r) {
     switch (r) {
-        case SpO2HoldReason::NONE:     return "none";
-        case SpO2HoldReason::PROBE:    return "probe";
-        case SpO2HoldReason::WINDOW:   return "window";
-        case SpO2HoldReason::DIV_EPS:  return "eps";
-        case SpO2HoldReason::REG_CORR: return "reg_corr";
-        case SpO2HoldReason::PI:       return "pi";
-        case SpO2HoldReason::RANGE:    return "range";
-        case SpO2HoldReason::PULSE:    return "pulse";
+        case SpO2HoldReason::HOLD_NONE:     return "none";
+        case SpO2HoldReason::HOLD_PROBE:    return "probe";
+        case SpO2HoldReason::HOLD_WINDOW:   return "window";
+        case SpO2HoldReason::HOLD_EPS:      return "eps";
+        case SpO2HoldReason::HOLD_REG_CORR: return "reg_corr";
+        case SpO2HoldReason::HOLD_PI:       return "pi";
+        case SpO2HoldReason::HOLD_RANGE:    return "range";
+        case SpO2HoldReason::HOLD_PULSE:    return "pulse";
     }
     return "?";
 }
@@ -157,9 +159,9 @@ inline const char* afeSpO2HoldReasonToStr(SpO2HoldReason r) {
 // with: a curve is only valid for that method. Registry of both: spec §5.1, "R methods and R curves".
 // Since v0.100 the library implements two methods, selected with setSpO2RMethod() (default 2);
 // getConfig().spo2_r_method_id names the one in force.
-inline constexpr char SPO2_R_METHOD_1_ID[] = "R-METHOD-1";   // RMS ratio: (σ_red/μ_red)/(σ_ir/μ_ir)
-inline constexpr char SPO2_R_METHOD_2_ID[] = "R-METHOD-2";   // regression on derivatives of the band-passed, DC-normalised OT
-inline constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, terminator included
+constexpr char SPO2_R_METHOD_1_ID[] = "R-METHOD-1";   // RMS ratio: (σ_red/μ_red)/(σ_ir/μ_ir)
+constexpr char SPO2_R_METHOD_2_ID[] = "R-METHOD-2";   // regression on derivatives of the band-passed, DC-normalised OT
+constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, terminator included
 
 // ── PI method identifier (v0.106) ────────────────────────────────────────────
 // Names HOW this library computes the Perfusion Index, by the same rule as the R method ids: it
@@ -167,7 +169,7 @@ inline constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curv
 // DC estimator, units, band) — never for a parameter that already travels in the configuration
 // (pi_window_s, pi_bp_f_*). Registry: spec §5.1, "PI methods". There is one method; the id exists
 // so that a capture says which definition its PI column holds (PI-METHOD-0 was 3× smaller).
-inline constexpr char PI_METHOD_ID[] = "PI-METHOD-1";   // 2√2·RMS(band-pass 0.5–15 Hz) / mean OT, one sliding window
+constexpr char PI_METHOD_ID[] = "PI-METHOD-1";   // 2√2·RMS(band-pass 0.5–15 Hz) / mean OT, one sliding window
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
 // Multiple bits may be set simultaneously.

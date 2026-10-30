@@ -200,7 +200,7 @@ void test_spo2_pulse_gate_withholds_without_hr3() {
     feed_spo2_sine(afe, 5000.0f, a_red_for(96.0f), 1.0f, CONVERGED_SAMPLES);
     TEST_ASSERT_TRUE(afe.getConfig().spo2_pulse_gate_enable);
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 96.0f, afe.test_spo2());
-    TEST_ASSERT_EQUAL(SpO2HoldReason::NONE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_NONE, afe.test_spo2_hold_reason());
     afe.test_set_hr3(0.0f, 0.0f);                        // Task C: no pulse (fed by hand: the helper re-arms HR3)
     for (int i = 0; i < 2 * DECIM_RAW; i++) {            // two blocks: the gate is evaluated per block
         afe.test_feed_pi(OT_DC, ProbeState::PROBE_APPLIED);
@@ -210,7 +210,7 @@ void test_spo2_pulse_gate_withholds_without_hr3() {
     }
     TEST_ASSERT_TRUE(isnan(afe.test_spo2()));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, afe.test_spo2_sqi());
-    TEST_ASSERT_EQUAL(SpO2HoldReason::PULSE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_PULSE, afe.test_spo2_hold_reason());
     TEST_ASSERT_FALSE(isnan(afe.test_spo2_r()));          // R and r stay on record
     TEST_ASSERT_FALSE(isnan(afe.test_spo2_r_method2_reg_corr()));
 }
@@ -227,7 +227,7 @@ void test_spo2_pulse_gate_off_publishes_without_hr3() {
                            ProbeState::PROBE_APPLIED);
     }
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 96.0f, afe.test_spo2());
-    TEST_ASSERT_EQUAL(SpO2HoldReason::NONE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_NONE, afe.test_spo2_hold_reason());
 }
 
 // The SpO2 window keeps running while the gate is closed: when HR3 returns, SpO2 is back in the
@@ -242,7 +242,7 @@ void test_spo2_pulse_gate_returns_in_the_next_block() {
                            OT_DC + a_red_for(96.0f) * 1.4e-10f * sinf(2.0f * (float)M_PI * i / 500.0f),
                            ProbeState::PROBE_APPLIED);
     }
-    TEST_ASSERT_EQUAL(SpO2HoldReason::PULSE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_PULSE, afe.test_spo2_hold_reason());
     afe.test_set_hr3(60.0f, 1.0f);                                   // Task C: pulse again
     for (int i = 0; i < DECIM_RAW; i++) {                            // one block
         afe.test_feed_pi(OT_DC, ProbeState::PROBE_APPLIED);
@@ -250,7 +250,7 @@ void test_spo2_pulse_gate_returns_in_the_next_block() {
                            OT_DC + a_red_for(96.0f) * 1.4e-10f * sinf(2.0f * (float)M_PI * i / 500.0f),
                            ProbeState::PROBE_APPLIED);
     }
-    TEST_ASSERT_EQUAL(SpO2HoldReason::NONE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_NONE, afe.test_spo2_hold_reason());
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 96.0f, afe.test_spo2());
 }
 
@@ -258,11 +258,11 @@ void test_spo2_pulse_gate_returns_in_the_next_block() {
 void test_spo2_hold_reason_order() {
     INCUNEST_AFE4490 afe;
     feed_spo2_sine(afe, 5000.0f, 2000.0f, 1.0f, 10, ProbeState::PROBE_DISCONNECTED);
-    TEST_ASSERT_EQUAL(SpO2HoldReason::PROBE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_PROBE, afe.test_spo2_hold_reason());
     feed_spo2_sine(afe, 5000.0f, 2000.0f, 1.0f, WINDOW_RAW / 2);
-    TEST_ASSERT_EQUAL(SpO2HoldReason::WINDOW, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_WINDOW, afe.test_spo2_hold_reason());
     feed_spo2_sine(afe, 5000.0f, a_red_for(115.0f), 1.0f, CONVERGED_SAMPLES);   // > 110: range
-    TEST_ASSERT_EQUAL(SpO2HoldReason::RANGE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_RANGE, afe.test_spo2_hold_reason());
     afe.test_set_hr3(0.0f, 0.0f);                                    // range fails before pulse
     for (int i = 0; i < 2 * DECIM_RAW; i++) {
         afe.test_feed_pi(OT_DC, ProbeState::PROBE_APPLIED);
@@ -270,7 +270,7 @@ void test_spo2_hold_reason_order() {
                            OT_DC + a_red_for(115.0f) * 1.4e-10f * sinf(2.0f * (float)M_PI * i / 500.0f),
                            ProbeState::PROBE_APPLIED);
     }
-    TEST_ASSERT_EQUAL(SpO2HoldReason::RANGE, afe.test_spo2_hold_reason());
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_RANGE, afe.test_spo2_hold_reason());
 }
 
 // ── Test 7 (new, OT-domain-specific): R is invariant to a fixed gain scale ───

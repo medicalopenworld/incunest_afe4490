@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.112
+# incunest_afe4490 — Specification v0.113
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -1030,9 +1030,11 @@ applying the probe waits for HR3's buffer (median 10.5 s, p90 36.6 s).
 
 **Hold reason (v0.110).** `AFE4490Data::spo2_hold_reason` (`SpO2HoldReason`, `afeSpO2HoldReasonToStr()`)
 names the FIRST gate that withheld SpO2, in the order the library checks them: 0 none (published), 1 probe
-(ProbeState ≠ APPLIED), 2 window (filling), 3 eps (`DIV_EPS`: a window sum below its epsilon), 4 reg_corr, 5 pi (unknown
+(ProbeState ≠ APPLIED), 2 window (filling), 3 eps (a window sum below its epsilon), 4 reg_corr, 5 pi (unknown
 or > `spo2_pi_max`), 6 range (outside 70–110), 7 pulse (the gate above). It is not a DiagCode bit (any DiagCode
 bit forces RSQI to 0 and would invalidate HR and PI). Wire: `$M4` field 37; CSV column `SPO2_HOLD_REASON`.
+Enumerators carry the `HOLD_` prefix (`HOLD_NONE` … `HOLD_PULSE`, v0.113), as `ProbeState::PROBE_*` and
+`AFE4490ChState::CH_*`: `enum class` does not shield a bare name from a system macro (`EPS`, `PI`).
 
 #### PI methods (v0.106)
 
@@ -3274,6 +3276,14 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.113  | 2026-10-30    | **`SpO2HoldReason` enumerators prefixed `HOLD_` (§5.1; Alex 2026-10-30):** `HOLD_NONE`,  |
+|         |               | `HOLD_PROBE`, `HOLD_WINDOW`, `HOLD_EPS`, `HOLD_REG_CORR`, `HOLD_PI`, `HOLD_RANGE`,         |
+|         |               | `HOLD_PULSE`. `PI` is the `Arduino.h` macro for 3.14159… (the `EPS` clash of v0.112 again); |
+|         |               | the prefix on all eight follows `ProbeState::PROBE_*` and closes the class of bug instead |
+|         |               | of renaming one word at a time (`DIV_EPS` of v0.112 is gone). Same codes 0–7 and strings. |
+|         |               | **`inline constexpr` → `constexpr`** on `SPO2_R_METHOD_1_ID`, `SPO2_R_METHOD_2_ID`,       |
+|         |               | `SPO2_R_ID_LEN` and `PI_METHOD_ID`: inline variables need C++17 and the Arduino-ESP32   |
+|         |               | 2.0.14 core builds the library in gnu++11 with warnings as errors. No wire/config change. |
 | v0.112  | 2026-10-30    | **`SpO2HoldReason::EPS` → `DIV_EPS` (§5.1).** `EPS` is a macro of the Xtensa register   |
 |         |               | headers that ESP-IDF includes (`xtensa/specreg.h`: `EPC`, `EPS`, `EXCSAVE`), so the        |
 |         |               | enumerator did not compile on the ESP32-S3 target. Same code 3, same string `eps`;       |
