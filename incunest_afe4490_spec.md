@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.113
+# incunest_afe4490 — Specification v0.114
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -2819,6 +2819,21 @@ request, and by hand.
   / `AFE4490Config` fields, `$CFG` keys, frame fields), or "nothing";
 - **When upgrading** — what a consumer has to touch (code, `platformio.ini` pin, saved configs).
 
+**Release assets (v0.114):** on a tag, once the tests pass, the `release-assets` job of the same
+workflow uploads to the tag's release the source archive `incunest_afe4490-vX.Y.zip` (`git archive`
+of the tag, one top-level directory) and its `incunest_afe4490-vX.Y.zip.sha256`. They are the frozen,
+framework-agnostic artefact: what an auditor files, and what a build without network installs. The
+job waits up to 15 minutes for the release to exist (the maintainer creates it right after pushing
+the tag) and otherwise fails; re-run it by hand after creating the release.
+
+**A tag never moves.** The distribution channel of this library is a git URL plus a tag
+(`lib_deps = …git#vX.Y` in PlatformIO, `git:` + `version:` in the IDF component manager), and a
+consumer's build is reproducible only if `vX.Y` always names the same commit. A tag that is wrong
+is left in place and followed by a new one (`vX.Yb` for a quick fix, §14); it is never deleted,
+re-pointed or force-pushed, and neither is its release. GitHub's immutable-releases setting of the
+repository, where available, enforces this mechanically for the release and its assets. Rationale:
+PulseNest `docs/product_publishing_alternatives.md` (2026-10-30).
+
 ---
 
 ## 10. Parameters Reference
@@ -3276,6 +3291,9 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.114  | 2026-10-30    | **Release assets and tag rule (§9.10; Alex 2026-10-30).** The CI uploads the tag's source    |
+|         |               | archive and its SHA-256 to the GitHub Release; a tag never moves. No change to the code:  |
+|         |               | same sources as v0.113. Rationale: PulseNest `docs/product_publishing_alternatives.md`.  |
 | v0.113  | 2026-10-30    | **`SpO2HoldReason` enumerators prefixed `HOLD_` (§5.1; Alex 2026-10-30):** `HOLD_NONE`,  |
 |         |               | `HOLD_PROBE`, `HOLD_WINDOW`, `HOLD_EPS`, `HOLD_REG_CORR`, `HOLD_PI`, `HOLD_RANGE`,         |
 |         |               | `HOLD_PULSE`. `PI` is the `Arduino.h` macro for 3.14159… (the `EPS` clash of v0.112 again); |

@@ -1,6 +1,9 @@
 # Version check + host unit tests on every push and every tag (a tag must also match every version
 # string, scripts/check_version.py). Same build as on the developer's PC: test/run_host_tests.py
 # (cmake + ninja + g++, the library under -Wall -Wextra -Werror).
+# On a tag, once the tests pass, the source archive of that tag and its SHA-256 are uploaded as
+# assets of the tag's GitHub Release (spec §9.10). The release is created by the maintainer right
+# after pushing the tag; this job waits up to 15 minutes for it, then fails (re-run it by hand).
 name: tests
 
 on:
@@ -26,3 +29,34 @@ jobs:
 
       - name: Build and run the host unit tests
         run: python3 test/run_host_tests.py
+
+  release-assets:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: host-tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Source archive of the tag + SHA-256
+        run: |
+          name="incunest_afe4490-$TAG"
+          git archive --format=zip --prefix="$name/" -o "$name.zip" "$TAG"
+          sha256sum "$name.zip" > "$name.zip.sha256"
+          cat "$name.zip.sha256"
+
+      - name: Wait for the tag's GitHub Release (created by the maintainer)
+        run: |
+          for i in $(seq 1 30); do
+            gh release view "$TAG" --json tagName >/dev/null 2>&1 && exit 0
+            sleep 30
+          done
+          echo "No release for $TAG after 15 minutes: create it, then re-run this job." >&2
+          exit 1
+
+      - name: Upload the assets to the release
+        run: gh release upload "$TAG" incunest_afe4490-"$TAG".zip incunest_afe4490-"$TAG".zip.sha256 --clobber
