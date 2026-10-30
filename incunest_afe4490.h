@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.111 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.112 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.111"
+#define INCUNEST_AFE4490_VERSION "0.112"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -128,7 +128,8 @@ enum class SpO2HoldReason : uint8_t {
     NONE     = 0,   // SpO2 published
     PROBE    = 1,   // ProbeState != PROBE_APPLIED (state reset every sample)
     WINDOW   = 2,   // the spo2_window_s sliding window is still filling
-    EPS      = 3,   // division safety: a window sum below spo2_reg_eps / spo2_div_eps
+    DIV_EPS  = 3,   // division safety: a window sum below spo2_reg_eps / spo2_div_eps (not `EPS`: an
+                    // Xtensa register macro in ESP-IDF, specreg.h — v0.112)
     REG_CORR = 4,   // R-METHOD-2: regression correlation below spo2_r_method2_reg_corr_min
     PI       = 5,   // PI unknown (its window filling) or above spo2_pi_max (DC transient)
     RANGE    = 6,   // a − b·R outside [spo2_min, spo2_max + spo2_clamp_margin]
@@ -139,7 +140,7 @@ inline const char* afeSpO2HoldReasonToStr(SpO2HoldReason r) {
         case SpO2HoldReason::NONE:     return "none";
         case SpO2HoldReason::PROBE:    return "probe";
         case SpO2HoldReason::WINDOW:   return "window";
-        case SpO2HoldReason::EPS:      return "eps";
+        case SpO2HoldReason::DIV_EPS:  return "eps";
         case SpO2HoldReason::REG_CORR: return "reg_corr";
         case SpO2HoldReason::PI:       return "pi";
         case SpO2HoldReason::RANGE:    return "range";

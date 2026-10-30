@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.111
+# incunest_afe4490 — Specification v0.112
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -1030,7 +1030,7 @@ applying the probe waits for HR3's buffer (median 10.5 s, p90 36.6 s).
 
 **Hold reason (v0.110).** `AFE4490Data::spo2_hold_reason` (`SpO2HoldReason`, `afeSpO2HoldReasonToStr()`)
 names the FIRST gate that withheld SpO2, in the order the library checks them: 0 none (published), 1 probe
-(ProbeState ≠ APPLIED), 2 window (filling), 3 eps (a window sum below its epsilon), 4 reg_corr, 5 pi (unknown
+(ProbeState ≠ APPLIED), 2 window (filling), 3 eps (`DIV_EPS`: a window sum below its epsilon), 4 reg_corr, 5 pi (unknown
 or > `spo2_pi_max`), 6 range (outside 70–110), 7 pulse (the gate above). It is not a DiagCode bit (any DiagCode
 bit forces RSQI to 0 and would invalidate HR and PI). Wire: `$M4` field 37; CSV column `SPO2_HOLD_REASON`.
 
@@ -3274,6 +3274,10 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.112  | 2026-10-30    | **`SpO2HoldReason::EPS` → `DIV_EPS` (§5.1).** `EPS` is a macro of the Xtensa register   |
+|         |               | headers that ESP-IDF includes (`xtensa/specreg.h`: `EPC`, `EPS`, `EXCSAVE`), so the        |
+|         |               | enumerator did not compile on the ESP32-S3 target. Same code 3, same string `eps`;       |
+|         |               | no wire or config change. `library.json` and `INCUNEST_AFE4490_VERSION` both say 0.112. |
 | v0.111  | 2026-10-29    | **Rename `WindowBlockClock::step()` → `tick()` (§5.1; Alex 2026-10-27).** A clock ticks |
 |         |               | once per full-rate sample and the call returns true on the tick that completes a   |
 |         |               | block; it advances the clock, so a predicate name (`completed()`) was rejected.    |
