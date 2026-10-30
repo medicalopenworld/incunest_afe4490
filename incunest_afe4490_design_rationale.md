@@ -1748,6 +1748,17 @@ notes: a consumer moving from `v0.94` to `v0.111` had to read seventeen rows of 
   versioning policy); `v0.112` is the first tag the CI verifies, and the CI was run by hand on
   master, whose library sources equal `v0.111`'s except for the three header comments.
 
+**Date of the specification (2026-10-30).** The spec carried no date: it was only knowable from
+`git log` of the tag, which a reader of a downloaded release or of a copy without `.git` does not
+have. Two places were weighed. A date in the title ("Specification v0.111, 2026-10-29") is one more
+hand-kept string, and the title had just drifted (v0.106 while the library was at v0.111) until
+`check_version.py` caught it. The §14 table already has one row per version and is the place a reader
+asks "when": it got a *Date* column, filled once from git (the tag's commit; before tags, the first
+commit carrying the version, reaching into PulseNest's history for v0.1 to v0.17), and the first row
+must carry a date or `check_version.py` fails. Version and date in the same table is the usual form of
+document control. The title paragraph was rewritten at the same time: it still described the library
+as Arduino-only and "coexisting with protocentral-afe4490-arduino", the state of April 2026.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

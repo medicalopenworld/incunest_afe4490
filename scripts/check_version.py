@@ -12,7 +12,7 @@ Places (all must name the same version, e.g. 0.111 or 0.90b):
   incunest_afe4490.cpp        "// Library version: v0.111"
   examples/basic/main.cpp     "// Library version: v0.111"
   incunest_afe4490_spec.md    title "# incunest_afe4490 — Specification v0.111" and the first row of
-                              the §14 version history table
+                              the §14 version history table, which must also carry a date (YYYY-MM-DD)
   library.json                "version": "0.111.0" (semantic version: 0.111 -> 0.111.0, 0.90b -> 0.90.1)
 
 Exit code 0 when everything agrees. Run by .github/workflows/tests.yml before the unit tests.
@@ -63,6 +63,11 @@ def main(argv):
         "spec section 14 first row": find("incunest_afe4490_spec.md", r"^## 14\. Version history$.*?^\|\s*v" + VERSION_RE + r"\s*\|", re.M | re.S),
     }
     lib_json = json.loads(read("library.json")).get("version")
+    # The first row of section 14 is the date of the specification: version | date | description.
+    first_row = re.search(r"^## 14\. Version history$.*?^\|\s*v\d+\.\d+[a-z]?\s*\|([^|\n]*)\|",
+                          read("incunest_afe4490_spec.md"), re.M | re.S)
+    first_row_date = first_row and re.fullmatch(r"\s*(\d{4}-\d{2}-\d{2})\s*", first_row.group(1))
+    first_row_date = first_row_date and first_row_date.group(1)
 
     expected = places["incunest_afe4490.h #define"]
     if tag is not None:
@@ -77,13 +82,16 @@ def main(argv):
             errors.append(f"{name}: {'not found' if found is None else 'v' + found} (expected v{expected})")
     if expected is None or lib_json != semver(expected):
         errors.append(f"library.json version: {lib_json} (expected {expected and semver(expected)})")
+    if first_row_date is None:
+        errors.append("spec section 14 first row: no date (YYYY-MM-DD) in the Date column")
 
     if errors:
         print(f"version check FAILED{' against tag ' + tag if tag else ''}:", file=sys.stderr)
         for e in errors:
             print("  " + e, file=sys.stderr)
         return 1
-    print(f"version check OK: v{expected} everywhere (library.json {lib_json})" + (f", matches tag {tag}" if tag else ""))
+    print(f"version check OK: v{expected} everywhere (library.json {lib_json}, spec dated {first_row_date})"
+          + (f", matches tag {tag}" if tag else ""))
     return 0
 
 

@@ -1,8 +1,10 @@
 # incunest_afe4490 — Specification v0.111
 
-Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2 pulse oximeter).
-Designed for ESP32-S3 with Arduino + FreeRTOS. Phase 2 of the AFE4490 test project.
-Coexists with `protocentral-afe4490-arduino` for behavioral comparison.
+Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
+end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
+and on the host (unit tests, §9.10). Part of the [IncuNest](https://github.com/medicalopenworld/IncuNest)
+neonatal incubator; developed and validated with [PulseNest](https://github.com/medicalopenworld/PulseNest).
+The date of this version is the first row of §14.
 
 **Primary hardware reference:** [AFE4490 Datasheet (Texas Instruments)](https://www.ti.com/lit/ds/symlink/afe4490.pdf)
 
@@ -2802,7 +2804,7 @@ runs them (cmake + ninja + g++; MinGW-w64 on Windows); exit code = failing suite
 the `// Library version:` header comments of `incunest_afe4490.h`, `incunest_afe4490.cpp` and
 `examples/basic/main.cpp`, this spec's title, the first row of §14 and `library.json`'s `version`
 (semantic: `0.111` → `0.111.0`, `0.90b` → `0.90.1`) all name the same version, and, given a tag,
-that version is the tag's.
+that version is the tag's. It also fails when the first row of §14 carries no date (`YYYY-MM-DD`).
 
 **CI:** `.github/workflows/tests.yml` (GitHub Actions, Ubuntu) runs the version check (against the
 tag when the push is a tag) and then the unit tests, on every push, every `v*` tag, every pull
@@ -3265,1415 +3267,1420 @@ Key references for each algorithm implemented in this library.
 
 ## 14. Version history
 
-| Version | Description                                                                 |
-|---------|-----------------------------------------------------------------------------|
-| v0.111  | **Rename `WindowBlockClock::step()` → `tick()` (§5.1; Alex 2026-10-27).** A clock ticks |
-|         | once per full-rate sample and the call returns true on the tick that completes a   |
-|         | block; it advances the clock, so a predicate name (`completed()`) was rejected.    |
-|         | `Decimator::step()` unchanged. Same numbers; no wire or config change. Rationale   |
-|         | §12. Spec title brought to the library version (it had stayed at v0.106).          |
-| v0.110  | **Pulse gate (§5.1, §10, rationale §17; decision Alex 2026-10-22):** SpO2 withheld   |
-|         | while `AFE4490Data::hr3` is NaN — `spo2_pulse_gate_enable` (default true),       |
-|         | `setSpO2PulseGateEnable()`. **Hold reason:** `AFE4490Data::spo2_hold_reason`     |
-|         | (`SpO2HoldReason` 0–7, first failing gate). PI 20 % ceiling: sources cited (§10). |
-|         | `_spo2_update()` locals renamed `eps_valid`, `reg_corr`, `reg_corr_ok` (Alex).  |
-|         | Tests: pulse gate on/off, return in the next block, reason order (test_spo2 21). |
-| v0.109  | **Test hook `test_run_pending_hr_computations()` (§9):** runs the HR2/HR3 slow paths |
-|         | Task A signalled, synchronously, as the task bodies do. Host builds have no Task  |
-|         | B/C, so a raw replay through `test_feed_sample()` never produced HR2/HR3 (flag  |
-|         | stuck after the first interval). No change on the device. Runner v0.28 calls it. |
-| v0.108  | **Rename: the R-METHOD-2 correlation is `spo2_r_method2_reg_corr`** (was          |
-|         | `spo2_r_corr`): `AFE4490Data::spo2_r_method2_reg_corr`, `spo2_r_method2_reg_corr_min`, |
-|         | `setSpO2RMethod2RegCorrMin()`, `$CFG` key `spo2_r_method2_reg_corr_min`, `$M4` field 36 |
-|         | `R_METHOD2_REG_CORR`. Same numbers. Under `spo2_r_` only R and its own quantities  |
-|         | live, and `r_corr` read as "R's correlation". Rationale §16.                     |
-| v0.107  | **`spo2_clamp_margin` 3 → 10 % (§5.1, §10):** a − b·R up to 110 % is published  |
-|         | as 100; only beyond that is SpO2 withheld. With 3 % a curve offset of +3 pt     |
-|         | (the neonatal-foot curve on an adult finger; the MS100 at setpoint 100) made   |
-|         | SpO2 vanish at SaO2 100 % with r 0.999 and PI 7 %. Rationale §15.              |
-| v0.106  | **The PI definition gets a name (§5.1, *PI methods*): `PI_METHOD_ID` =         |
-|         | `PI-METHOD-1`, `AFE4490Config::pi_method_id`; `PI-METHOD-0` is the ≤ v0.100     |
-|         | EMA/RMS definition. Traceability only — no setter, no alternative. Default R   |
-|         | curve relabelled `R-CURVE-STS0163-HOSPNAV-20261004` (same 123.98 − 39.13·R;   |
-|         | label date = fit date). Curve registry → PulseNest `docs/spo2_r_curves.md`.   |
-|         | Rationale §14.                                                                  |
-| v0.105  | **HGAC gate half-open under `PROBE_ONLY_LED_SATURATING` (§5.8, §5.6.2): slow     |
-|         | step-down only (no fast guard, no raise). Closes the v0.90 open check: a thin    |
-|         | tissue clipping at a high RF was absent → gated off → RF never lowered → locked  |
-|         | until power cycle (bench, 2026-10-17). `_hgac_track(..., slow_step_down_only)`.       |
-|         | `isProbeAbsent()` unchanged for RSQM/diagnostics. Rationale §13.                 |
-| v0.104  | **Bench switch `afe_settle_freeze_enable` (§5.8.4): `setSettleFreezeEnable(false)` |
-|         | lets the real switched-RC transient after a gain change reach the algorithms so    |
-|         | a host can measure it (default `true`; `AFE4490Config` field; diagnostics freeze |
-|         | unaffected). For the RF tap characterisation bench of 2026-10-08.               |
-| v0.103  | **SpO2/PI window blocks of 100 ms (`alg_window_block_s`) instead of the 50 Hz |
-|         | cadence inherited from HR2/HR3 (§5.1, §5.3.1 scope note, rationale §12).**  |
-|         | New `WindowBlockClock` (a block clock by duration, not a `Decimator`) replaces     |
-|         | `_spo2_decim`/`_pi_decim` and their `*_decim_target_rate_hz`; buffers 600 →  |
-|         | 120 (≈ 3.4 KB). PI's AC² is now summed at the full rate over each block (one |
-|         | band-passed sample per 20 ms block until v0.102 — at 100 ms it would alias). |
-|         | Outputs refresh every 100 ms; the first estimate comes one block after the  |
-|         | window is full (6.1 s instead of 6.02 s). Measured on the SUBJ09 HOSPNAV      |
-|         | replay against v0.102: R mean diff 0, SD 0.0006 (max 0.006 at the window    |
-|         | edge), SpO2 SD 0.02 points (max 0.19), PI SD 0.02 % (max 0.31 %), noise of R |
-|         | unchanged. Test accessors renamed `test_spo2_block_rate_hz()`,                |
-|         | `test_pi_block_len()`, `test_pi_block_rate_hz()`.                             |
-| v0.102  | **SpO2 averaged over a true sliding window; window lengths runtime and      |
-|         | independent for SpO2 and PI (§5.1, §10.3, §10.3b, rationale §12).**         |
-|         | R-METHOD-2's Σ(dx·dy)/Σ(dx²)/Σ(dy²) and R-METHOD-1's AC² are block sums at   |
-|         | the 50 Hz cadence of a new `_spo2_decim` chain, kept in circular buffers    |
-|         | with fixed-cost running totals (rebuilt at every wrap: float32 drift guard);       |
-|         | R, r and SpO2 refresh per block and are valid from the first full window.   |
-|         | Replaces the EMAs with τ = 6 s, equivalent to a 12 s window in noise and    |
-|         | delay and 18 s to settle; measured on HOSPNAV: same accuracy, +36 % noise   |
-|         | at equal nominal length, ~2 s less lag, exact purge after one window.       |
-|         | New `spo2_window_s` (6 s) / `setSpO2WindowS()` and `pi_window_s` (6 s) /    |
-|         | `setPIWindowS()`, both clamped 2–12 s, independent; a length change empties |
-|         | the window. **Removed:** `spo2_warmup_s`/`setSpO2WarmupS()` (the window is  |
-|         | the warm-up) and `spo2_ema_var_tau_s`/`setSpO2EmaVarTauS()`; the SpO2       |
-|         | `EmaChannel`s keep only the mean (var_tau = mean_tau). `AFE4490Config`      |
-|         | gains `spo2_window_s`, `pi_window_s`. Tests: test_spo2 16 (window exactness, |
-|         | setter clamps/reset), test_pi 7, test_sample_rate asserts both windows in   |
-|         | seconds across the PRF catalogue. Firmware: no `$SET` key yet (defaults).   |
-| v0.101  | **PI (Perfusion Index) decoupled from SpO2 and redefined in the industry's   |
-|         | units (§5.1, §10.3b, rationale §11).** `_pi_update_sample()` replaces the    |
-|         | `sqrt(EmaChannel.var)/EmaChannel.mean` computed inside `_spo2_update()`.     |
-|         | AC from a private band-pass 0.5–15 Hz (`pi_bp_f_low_hz`/`_high_hz`,          |
-|         | `setPIFilter()`; the HR3 ceiling, since a 5 Hz one made PI fall 25 % from 60 |
-|         | to 220 BPM), not an EMA subtraction. AC² and DC (block means of the raw OT)  |
-|         | from the SAME 6 s sliding window (`pi_buf_len` = 300 @ 50 Hz, fixed-cost running |
-|         | sums): settles EXACTLY at 6 s, no EMA, no seed, no lead/lag between          |
-|         | numerator and denominator. **PI is now peak-to-peak** (`2√2·RMS`, Nellcor/   |
-|         | Masimo's definition, ISO *%mod*): the old RMS-based PI was ÷2.8–3.2 of it,   |
-|         | so `spo2_pi_sqi_lo/hi` (0.5/2.0, copied from those manufacturers) fired ~3×  |
-|         | too early — HOSPNAV SUBJ08 scored SQI 0.08 at a normal 1.8 % (pp). **PI      |
-|         | upper bound** `spo2_pi_max` = 20 % (third parameter of                        |
-|         | `setSpO2PiSqiThresholds()`, `AFE4490Config::spo2_pi_max`): above it SpO2 is  |
-|         | withheld — the ramp's output-only clamp used to publish SQI = 1 on the DC    |
-|         | transient of a probe coming off (closes the 2026-08-22 finding). `_spo2_     |
-|         | update()`'s SQI also guards a not-yet-valid (`NaN`) PI explicitly instead of |
-|         | relying on `fmaxf`/`fminf`'s NaN pass-through. New suite `test_pi` (6);      |
-|         | `test_spo2` feeds PI in lockstep, amplitudes halved to keep PI under the new |
-|         | bound, `test_spo2_pi_above_max_invalidates` added (14).                      |
-| v0.100  | **R-METHOD-2 in the library, default (§5.1).** `setSpO2RMethod(1|2)`: 2 = causal    |
-|         | regression on the first differences of the band-passed (0.5–5 Hz, one biquad),  |
-|         | DC-normalised OT, R = EMA(dx·dy)/EMA(dx²), with its correlation r as validity  |
-|         | gate (`spo2_r_corr_min` 0.8, `setSpO2RCorrMin()`) and `AFE4490Data::spo2_r_corr`; |
-|         | 1 = the RMS ratio of v0.38–v0.99, still selectable (both run every sample, no   |
-|         | warm-up on switch). The port is bit-identical to the runner's `R_CAND` on all  |
-|         | 24 HOSPNAV parts. New default curve `R-CURVE-STS0163-HOSPNAV-20260923`        |
-|         | (R-METHOD-2): SpO2 = 123.98 − 39.13·R, fitted on the library's own replay of   |
-|         | the two HOSPNAV campaigns (scatter 1.65 points, ρ −0.80; R-METHOD-1 with the   |
-|         | MS100 curve read −10 points there). `AFE4490Config::spo2_r_method`,            |
-|         | `spo2_r_corr_min`. Tests: `test_spo2_method2_equals_method1_on_clean_sines`,   |
-|         | `test_spo2_method2_low_r_invalidates`, `test_spo2_method_switch_is_immediate`.  |
-|         | Rationale §9–§10.                                                             |
-| v0.99   | **HR valid range floor 40 → 30 BPM (§5.2).** `hr_min_bpm` 40 → 30, so          |
-|         | `hr_search_min_bpm` 37 → 27 and the HR2 lag sweep 81 → 111 lags (caps 137/199  |
-|         | still inactive); HR3's `search_min` stays bin 5. Meets WHO-UNICEF 2019 §6.5    |
-|         | (pulse-rate range to include 30–240 bpm); with 40 a bradycardia at 35 BPM was  |
-|         | reported as no valid signal. Measured on the host build (rationale §8): HR2    |
-|         | locks at 30 BPM with its 0.5 Hz band-pass corner unchanged — the               |
-|         | autocorrelation is normalised, so the −3 dB there is harmless; a 0.35 Hz       |
-|         | corner was tried and rejected (no gain, SQI under drift 0.89 → 0.84, and a     |
-|         | 30.0 BPM sine reads 29.91 → below the gate). HR3 holds 30 BPM clean but loses  |
-|         | < 35 BPM under 2× baseline wander; HR1 needs ~11 s at 30 BPM. The range's      |
-|         | provenance (no normative source; ISO §201.12 only requires disclosure) and the |
-|         | SVT basis of the 260 ceiling are now written where the constants are. Tests:   |
-|         | `test_hr2_30bpm_lower_bound`, `test_hr2_27bpm_guard_band_is_invalid`,          |
-|         | `test_hr2_decimated_rate_invariant_to_sample_rate` (now 30 BPM at 1000 Hz),    |
-|         | `test_hr3_30bpm_lower_bound`, `test_hr1_30bpm_lower_bound`.                    |
-| v0.98   | **R method and R curve get names (§5.1, *R methods and R curves*).**           |
-|         | `SPO2_R_METHOD_ID = "R-METHOD-1"` names how R is computed; it changes only     |
-|         | when R would. The coefficients become an R curve with an id and the R method   |
-|         | it was fitted with: `setSpO2Coefficients(a, b)` → `setSpO2RCurve(id,           |
-|         | r_method_id, a, b)` (rejects empty/oversized ids and non-finite values,        |
-|         | keeping the current curve whole); `AFE4490Config::spo2_a/spo2_b` →             |
-|         | `spo2_r_method_id`, `spo2_r_curve_id`, `spo2_r_curve_r_method_id`,             |
-|         | `spo2_r_curve_method_match`, `spo2_r_curve_a`, `spo2_r_curve_b`. Same root in    |
-|         | every layer (lib, PulseNest `$CFG` fw 0.16, capture header, PILAB). Default    |
-|         | curve labelled `R-CURVE-U401D-MS100-20260323`, fitted with `R-METHOD-0` (the   |
-|         | 2026-03-23 library: adc_code inputs, DC τ 1.6 s, AC τ 1.0 s), so it raises the  |
-|         | **mismatch warning** by itself — warning mode: logged and reported in the       |
-|         | config, never a `diag_code` bit (that would zero `rsqi`). SpO2 values are       |
-|         | unchanged (same coefficients, same R). Tests: `test_spo2` +3 (default labelled  |
-|         | and warning, a matching curve applies, bad input rejected whole); 9/9 suites.  |
-| v0.97   | **HR3 anti-alias low-pass: 2nd → 4th-order Butterworth, 15 Hz (§5.3.1, §5.4).**   |
-|         | Closes the weak point recorded in v0.83: −9.4 dB at the 25 Hz Nyquist of the ×10  |
-|         | decimation becomes −18.0 dB (at a 500 Hz PRF), so less folded noise lifts the     |
-|         | spectral floor that `hr3_sqi` pays for, and flatter over the harmonics the HPS    |
-|         | uses (13 Hz: −1.2 vs −1.9 dB). New `LowPass4` (two cascaded biquads,              |
-|         | Q = 0.5412 / 1.3066, −3 dB at the corner); `BiquadFilter::init_lp()` takes an     |
-|         | optional Q (default 1/√2, unchanged behaviour for any other caller). Member        |
-|         | `_hr3_bpf` renamed `_hr3_lp`: it is not a bandpass, and its comment ("0.4–15 Hz")  |
-|         | had been false since v0.83. Public API unchanged (`setHR3Filter()`,               |
-|         | `hr3_f_high_hz`). Tests: `test_biquad` +4 (pulse band passes, −3 dB at the corner, |
-|         | < 0.14 at 25 Hz where the 2nd order leaves > 0.30, unity DC gain + precharge);    |
-|         | all 9 host suites pass (87 tests). Behaviour change: HR3 only.                    |
-| v0.96   | **Offline replay accessors (§9).** `test_last_ot_led2()`, `test_probe_state()`,    |
-|         | `test_pi()` (UNIT_TEST only), so `incunest_offline_runner` can feed raw ADC codes   |
-|         | through `test_feed_sample()` (the full `_process_sample()` path: analog state →     |
-|         | RSQM → SpO2/HR) and read back OT, probe state, R, PI and SpO2 exactly as the       |
-|         | firmware would produce them — e.g. to replay the 2026-09-23 HOSPNAV captures with   |
-|         | the v0.95 `rsqm_ot_thr` and recover the stretches discarded as PROBE_OT_HIGH.       |
-|         | No behavioral change; test surface only.                                            |
-| v0.95   | **`rsqm_ot_thr` 1.0e-4 → 1.5e-4 — first real-patient calibration (§5.6.2, §10).** |
-|         | HOSPNAV campaign 2026-09-23, SUBJ08: probe applied read OT_LED1 mean ≈ 120 ppm /  |
-|         | max ≈ 145 ppm and kept forcing PROBE_OT_HIGH (resetting SpO2/HR) on an applied     |
-|         | probe — exactly the thin-tissue case the v0.44 note anticipated. Margin ×1.03      |
-|         | above the observed max (n=1 patient, recalibrate with more campaigns); ×5.3 below  |
-|         | the theoretical probe-in-air OT (~8e-4), which ONLY_LED_SATURATING also detects    |
-|         | independently. No code path changed — default value and comments only.             |
-| v0.94   | **HGAC announces its RF moves to the host (§5.8.4).** `_hgac_change_rf()` stamps    |
-|         | `_hgac_rf_change_ts_us` (esp_timer, the row clock) then increments               |
-|         | `_hgac_rf_change_count`; new lock-free getter `hgacRfChangeCount(uint64_t*)`.      |
-|         | The library emits nothing (measurement task never calls the network); the         |
-|         | consumer's command task polls it. Prerequisite 6 of PulseNest's                   |
-|         | `capture_csv_format_spec.md` (R21a: RF as a change-event, not a column).          |
-|         | test_hgac: `test_hgac_rf_change_is_counted_and_stamped`.                          |
-| v0.93   | **`hr1_max_decay_tau_s` 20 s → 1.5 s — the first measured value this          |
-|         | parameter has ever had (§10.4).** The 20 s was the inherited `0.9999`         |
-|         | per-sample literal written in seconds at 500 Hz, and v0.87 said as much.      |
-|         | A threshold held up by a peak seconds old loses any beat whose amplitude has  |
-|         | since fallen, and **one lost beat costs five**: its doubled RR interval sits  |
-|         | in the 5-interval buffer until it is pushed out, so `hr1_sqi` is 0 for five   |
-|         | beats — 5.8 s at 52 bpm, which is exactly what the bench showed on 2026-09-15 |
-|         | on two of three boards while HR2/HR3 never flinched. Note what did NOT fail:  |
-|         | the SQI. Averaging that buffer gives 43 bpm, and publishing it would have     |
-|         | been a false bradycardia — the alarm this monitor exists to raise. The gate   |
-|         | was right; the detector fed it a bad interval. Evidence: the perturbed MS100  |
-|         | sweep (flat optimum 1–3 s, collapse at 0.5 s) and the three-board probe       |
-|         | capture (every missed beat recovered, zero extra detections). No API or       |
-|         | format change: `setHR1MaxDecayTauS()` already existed and the value is a      |
-|         | default. Mirrored in PulseNest's `HR1Variant.FW_MAX_DECAY_TAU_S`.             |
-| v0.92   | **`$TIMING` gains `spi_mean,spi_max` (appended last) and the HAL gains a console   |
-|         | tee.** `_ts_spi` times the six 4-byte SPI frames of one sample on their own — the |
-|         | measurement the ESP-IDF port of PulseNest exists to make (Arduino 4 ×            |
-|         | `SPI.transfer(uint8_t)` per frame vs one polling transmit under IDF). `hal_console_ |
-|         | set_sink()`: every `hal_console_printf` line is also handed to an app sink,     |
-|         | NUL-terminated, on the calling task (must only queue) — PulseNest forwards       |
-|         | `$TIMING`/`$TASK` to its UDP data queue, so the ESP32 TIMING window needs no UART. |
-|         | The idf and host `console_printf` now format into a buffer (`fwrite`) like the   |
-|         | Arduino one. motherBoard: no behaviour change (`INCUNEST_TIMING_STATS` off, no    |
-|         | sink).                                                                           |
-| v0.91   | **Hardware abstraction layer (§1.4): the library builds unchanged on            |
-|         | Arduino-ESP32, ESP-IDF (as a CMake component) and the host.** Phase 0 of the     |
-|         | ESP-IDF port of IncuNest. Measured first: only `<Arduino.h>`/`<SPI.h>` differed  |
-|         | between the embedded targets — 18 call sites — while FreeRTOS, esp_timer and     |
-|         | IRAM_ATTR are the same API on both, so those are not wrapped; the host gets them |
-|         | from `incunest_afe4490_hal_host.h`. New: `incunest_afe4490_hal.h` (7 functions), |
-|         | `_hal_arduino.cpp` (pure forwarding, byte-for-byte the v0.90b bus sequence),    |
-|         | `_hal_idf.cpp` (driver/gpio + spi_master, ONE polling transmit per 4-byte       |
-|         | frame instead of four), `_hal_host.cpp`, root `CMakeLists.txt`. Selection by    |
-|         | detection (`ARDUINO` / `ESP_PLATFORM` / neither), no macro to set. Removed: the |
-|         | 63 `INCUNEST_OFFLINE` conditionals, `incunest_afe4490_platform_stub.h`, and     |
-|         | PulseNest's `test/stubs/`. `constrain()` → own `clampf()` (gnu++11 has no       |
-|         | std::clamp). `_rsqm_update()` lost the four raw-channel parameters it stopped   |
-|         | reading in v0.35. `begin()` now calls `hal_spi_attach()` and checks the ISR      |
-|         | attach; `stop()` calls `hal_spi_detach()`.                                       |
-|         | **Found while proving the refactor pure:** Arduino-ESP32 redefines `ESP_LOGx`   |
-|         | (`esp32-hal-log.h`); dropping `Arduino.h` silently switched the library to IDF's |
-|         | `esp_log_write` on Arduino. Fixed by including `esp32-hal-log.h` under ARDUINO.  |
-|         | **Evidence:** compiler output identical for 102/113 functions, the 11 others     |
-|         | being exactly the touched ones; 10 Arduino symbols out, 8 HAL symbols in.       |
-|         | Verified on Arduino (V17, -Werror), ESP-IDF v6.0.1 (esp32s3, -Werror, GCC 15.2),|
-|         | host (link + run) and `pio test -e native` (76/77, unchanged).                   |
-|         | No behavioural change on Arduino. On ESP-IDF the library now exists at all.     |
-| v0.90b  | **Warning cleanup: the library compiles clean under `-Wall -Wextra -Werror`, |
-|         | and `library.json` now enforces it for every PlatformIO build of the library.** |
-|         | Prompted by the ESP-IDF port of motherBoard (IncuNest branch                 |
-|         | `refactor/idf-native-port`), whose vendored copy of v0.81 silences seven      |
-|         | `-Wno-error=` classes. Reproduced on xtensa GCC 8.4 (Arduino) and host GCC 15 |
-|         | (C++17 and C++20): only **three** were ours. (1) `-Wreorder`: the constructor |
-|         | initialised `_hr1_dc_alpha` before `_spo2_warmup_samples`, against            |
-|         | declaration order — list reordered; no dependency between the members.        |
-|         | (2) `-Wvolatile` ×2: `--` on the volatile countdowns                            |
-|         | `_switched_rc_settling_countdown` and `_diag_holdoff_samples`, deprecated in   |
-|         | C++20 — rewritten as `x = x - 1`, the same non-atomic read-modify-write.       |
-|         | (3) `-Wunused-parameter` ×4: `_rsqm_update()` still took the raw LED/ALED      |
-|         | values it stopped reading in v0.35 (everything arrives via `AFE4490AnalogState`)|
-|         | — removed from the private signature and its single call site.               |
-|         | The other four (`missing-field-initializers`, `unused-variable`,               |
-|         | `format-truncation`, `deprecated`) do not reproduce on either compiler and have|
-|         | no candidate in the code (the only `snprintf`s live under                     |
-|         | `INCUNEST_TIMING_STATS`, off in motherBoard; aggregates use `{}`; no          |
-|         | deprecated IDF API): the same list is applied verbatim to every vendored       |
-|         | component of that port. **No behavioural change.** Also re-syncs the four     |
-|         | file headers that still read v0.88.                                            |
-| v0.90   | **ProbeState renamed and split; `isProbeAbsent()`.** `PROBE_SATURATING` → |
-|         | `PROBE_AMB_SATURATING`: the old name suggested "any saturation", but since |
-|         | v0.61 LED-only saturation never came here — engineers (and this spec's     |
-|         | author) read the name and concluded the opposite of what the code does.   |
-|         | `PROBE_NOT_APPLIED` split into its two physical causes, which were         |
-|         | indistinguishable in frames, CSVs and the bench: `PROBE_OT_HIGH` (keeps    |
-|         | value 1 — the usual cause in historical captures, so old CSVs still read   |
-|         | correctly) and `PROBE_ONLY_LED_SATURATING` (new value 4). Names describe   |
-|         | what is measured, not what is inferred: "probe in air" was an inference    |
-|         | that fails on thin tissue at high RF.                                     |
-|         | `isProbeAbsent()` is now the one definition of "no patient", used by HGAC's|
-|         | gate G0 and the diagnostics task instead of two explicit lists — the trap  |
-|         | G0's own comment warned about. **No behavioural change**: the LED-only    |
-|         | case is absent, exactly as it was inside NOT_APPLIED.                      |
-|         | **Recorded, not fixed — open check:** thin tissue at high RF →             |
-|         | ONLY_LED_SATURATING → absent → HGAC gated off → RF never lowered → stays  |
-|         | absent (§5.6.2). Alex observed the sequential-RF symptom on the bench; the |
-|         | capture-based verification (`tools/probe_state_saturation_check.py`) is    |
-|         | pending. **Second check, recorded because the split creates it:** the      |
-|         | debounce counts consecutive identical requests, so alternation between the|
-|         | two absent states near the saturation boundary could keep either from     |
-|         | committing (see `_rsqm_request_probe_state`). Alex doubts it occurs; if    |
-|         | seen, debounce by class.                                                   |
-|         | **Vocabulary (same version):** the design labels "Gate G0" and "axiom A6"  |
-|         | are gone from live text and code comments — "HGAC gate" and "the RSQM/HGAC |
-|         | separation axiom" say what they are without a lookup. The old labels stay  |
-|         | once each, in parentheses at the definitions (§5.8, `_hgac_update()`), so |
-|         | earlier documents remain traceable. History rows keep their wording.      |
-|         | External consumers: motherBoard uses only `==`/`!= PROBE_APPLIED` (9 sites) |
-|         | and is unaffected. PulseNest script/tests/tools updated in the same commit.|
-| v0.89   | **Presence by OT requires BOTH channels (`OR` → `AND`), §5.6.2.** With    |
-|         | OR, whichever channel read higher decided alone, so one channel drifting  |
-|         | over `rsqm_ot_thr` declared the probe absent while the other still saw    |
-|         | tissue. On thin tissue (preterm foot, MS100 simulator) a correctly        |
-|         | applied probe read as absent, resetting SpO2/HR1/HR2/HR3 every sample —   |
-|         | the failure mode with no downstream safety net. AND requires two          |
-|         | independent channels to agree; in air neither is attenuated by tissue, so |
-|         | both stay high and NOT_APPLIED holds. Margin gained on thin tissue, none  |
-|         | given back on air.                                                       |
-|         | *Corrected 2026-09-07:* this entry first justified the change by claiming |
-|         | RED is absorbed more than IR so `ot_led1 > ot_led2` always. Measured on   |
-|         | the MS100, probe applied: IR 91 ppm, RED 112 ppm — the opposite. OT is    |
-|         | the whole electro-optical ratio, not tissue transmittance. The AND does   |
-|         | not depend on the ordering, so the change stands. Both channels sit       |
-|         | within 12 % of the threshold: working, not robust.                       |
-|         | **No threshold changed** — `rsqm_ot_thr` stays at 1.0e-4 and still lacks  |
-|         | a calibrated value.                                                       |
-|         | **New failure mode, accepted knowingly:** one channel persistently low    |
-|         | (weak LED, obstructed PD) now forces APPLIED. The LED-only-saturation     |
-|         | branch and DISCONNECTED's four-channel check limit but do not remove it.  |
-|         | Chosen over raising the threshold because raising it spends margin on the |
-|         | air side, and because the estimate that would justify a new value carries |
-|         | uncertainty wider than the decision it would settle: neonatal optical     |
-|         | path length is **not published** (the 5–10 mm figure in use is an         |
-|         | engineering estimate, never measured), and OT is the whole                |
-|         | electro-optical ratio, not tissue transmittance alone.                    |
-| v0.88   | **Two buried literals become named parameters.** Prompted by an inventory  |
-|         | of what actually conditions the algorithms: of ~45 configurable values     |
-|         | plus internal constants, ~15 condition a result and 7 have no documented   |
-|         | provenance — but two were not even parameters.                             |
-|         | **`0.6f` → `hr1_threshold_fraction`**, now configurable via                |
-|         | `setHR1ThresholdFraction()` and exposed in `AFE4490Config`. It is the      |
-|         | single value that most determines whether a beat is counted, and it had no |
-|         | name, no presence in the config or the spec, and could not be swept        |
-|         | without recompiling — which blocked precisely the sensitivity study it     |
-|         | most needs. The setter rejects anything outside (0, 1]: at 0 every sample  |
-|         | crosses and above 1 nothing does, so both extremes silence HR1 rather than |
-|         | degrade it.                                                                |
-|         | **`3.0f` → `hr_guard_band_bpm`**, one constant replacing the same literal  |
-|         | at four sites across HR2's lag sweep and HR3's bin sweep, where changing   |
-|         | one and forgetting another would have desynchronised the two estimators    |
-|         | silently. Kept as an internal constant: nothing suggests a caller should   |
-|         | tune it.                                                                   |
-|         | No behavioural change — both keep their previous values.                   |
-| v0.87   | **Every time-valued parameter is expressed in seconds and derived from the |
-|         | rate (rationale §6).** Audit prompted by the question "are there more       |
-|         | unresolved sample-rate dependencies?" — there were two live and one latent. |
-|         | **`_hr1_running_max *= 0.9999f`** was a per-sample literal: tau 10 000      |
-|         | samples, i.e. 20 s at 500 Hz but **6.25 s at 1600 Hz**, relaxing HR1's      |
-|         | detection threshold 3.2× faster at the top of the catalogue and inviting    |
-|         | false positives. Now `hr1_max_decay_tau_s` (20 s, which reproduces 0.9999   |
-|         | exactly at 500 Hz, so default behaviour is unchanged) with a setter.        |
-|         | **`ts_emit_interval`** was 2500 samples — its own comment admitted "5 s at  |
-|         | 500 Hz", so 1.56 s at 1600 — now derived from `ts_emit_period_s`.          |
-|         | **`setHR2UpdateInterval`/`setHR3UpdateInterval` → `…IntervalS(float s)`**:  |
-|         | they were the only two time-valued setters in the API taking samples, and   |
-|         | immune to the AFE rate only because the decimated rate is the invariant.    |
-|         | **`hr1_ma_cutoff_hz` → `hr1_lp_cutoff_hz`** (and `setHR1MaCutoffHz` →      |
-|         | `setHR1LpCutoffHz`): "ma" stops being literal once the filter type is under |
-|         | review, and "lp" is true of both. All breaking, all with zero external      |
-|         | callers (checked in src/, tests and the lab script).                        |
-|         | **The lasting part is the net, not the fixes:** two catalogue-sweeping      |
-|         | tests assert every duration is preserved in seconds. Both had to be         |
-|         | rewritten after passing with the defects reintroduced — a test must observe |
-|         | the EFFECT (not the derived coefficient, which stays correct while unused)  |
-|         | and must exercise the setter with a NON-DEFAULT value (a constant equal to  |
-|         | the default is indistinguishable otherwise).                                |
-| v0.86b  | **HR1 moving-average length 64 → 160 samples, clamp no longer silent      |
-|         | (§7.4).** 64 samples covered only up to 640 Hz, so four of the five        |
-|         | catalogue rates ran with an effective cutoff of 6.2–12.5 Hz instead of the |
-|         | configured 5 Hz — and said nothing. That filter exists to keep the dicrotic |
-|         | notch away from HR1's threshold detector; too wide, the notch is           |
-|         | double-counted and HR reads double. The 0.185 s refractory mitigates it     |
-|         | unevenly and least of all in bradycardia, where the notch arrives later     |
-|         | and falls outside the refractory — i.e. it fails in the clinically         |
-|         | critical case. 160 = worst case of the catalogue at the default cutoff.     |
-|         | Cost is RAM only (+384 B measured: 60 444 → 60 828 B): the average is       |
-|         | incremental so the CPU cost does not grow with N, and group delay stays ≈ 50 ms at any PRF.  |
-|         | Since `setHR1MaCutoffHz()` is public and unvalidated no fixed capacity can  |
-|         | cover every case (2 Hz at 1600 Hz would need 400 samples), so the clamp now    |
-|         | emits `logE` with the length needed, the length available and the effective |
-|         | by `test_hr1_ma_not_clamped_across_catalogue` (verified to fail with the    |
-|         | cap back at 64: 64 samples instead of 80 at 800 Hz).                       |
-| v0.86   | **A PRF change now tears down state accumulated at the previous rate       |
-|         | (§7.4 "Changing the rate at runtime").** `setSampleRate()` recalculated    |
-|         | coefficients but left four things belonging to the old rate in play: the   |
-|         | biquad state (`init_bp`/`init_lp` deliberately do not reset it), the EMA   |
-|         | state (`init()` recomputes α but keeps mean/var), the decimated HR2/HR3    |
-|         | buffers (an 8 s window mixing two rates until it refilled) and the         |
-|         | decimation phase. It also did not arm switched-RC settling, even though a  |
-|         | rate change rewrites all four sampling windows — a signal-chain change in  |
-|         | the sense of datasheet §7.7 t5, and the same reason RF, CF, ILED, AMBDAC,  |
-|         | RG and Stage2En arm it. Now: no-op when the rate is unchanged, otherwise   |
-|         | `_reset_algorithms()` plus an arm, under both mutexes.                     |
-|         | **Lock order defined: `_spi_mutex` → `_state_mutex`** — the only place     |
-|         | holding both at once, hence the order for the whole library. Holding       |
-|         | `_state_mutex` across the mutation is also why settling can be armed AFTER |
-|         | the reset here (which clears the countdown) rather than before the         |
-|         | mutation as §5.8.4 requires of setters that do not hold it.                |
-|         | Pinned by `test_rate_change_tears_down_old_state` (verified to fail with   |
-|         | the fix reverted: buffer count 400 instead of 0) and                       |
-|         | `test_same_rate_is_a_no_op`. **Recorded, NOT fixed:** HR1's moving average |
-|         | saturates at 64 samples above 640 Hz, so four entries run with an          |
-|         | effective cutoff of 6.2–12.5 Hz instead of 5 Hz.                           |
-| v0.85   | **`AFE4490SampleRate`: the supported PRFs become a closed catalogue        |
-|         | {500, 800, 1000, 1250, 1600 Hz} enforced by the type system (§7.4).**      |
-|         | `setSampleRate()` previously accepted 63–5000 Hz while checking only the   |
-|         | numeric bounds: above ~2487 Hz a legal call wrote INVERTED timer-compare   |
-|         | pairs (`ALEDxSTC` > `ALEDxENDC`) into the chip, silently, and below        |
-|         | 500 Hz the anti-alias margin collapses (§7.3). Both ends are now closed.   |
-|         | Primary form takes the enum, so an unvalidated rate is inexpressible; the  |
-|         | numeric overload is kept for the bench and `$SET sr` and accepts only      |
-|         | catalogue values. The acceptance policy lives in ONE predicate,            |
-|         | `isValidSampleRateHz()`. Introspection (`sampleRateCount()`,               |
-|         | `sampleRateHz()`) is static, so a host application or a validation report  |
-|         | can enumerate every supported rate before `begin()`.                      |
-|         | **Present-day benefit: certifiability.** A finite set can be validated     |
-|         | exhaustively — new `test_sample_rate` walks the whole catalogue asserting  |
-|         | exact `q`, integer decimation factor, both sampling windows ≥ TI's 50 µs,  |
-|         | non-inverted ambient timer pair and NUMAV_max ≥ 1, plus that rejected      |
-|         | rates leave the configuration untouched and that both analysis chains hold |
-|         | 50 Hz at every entry. A continuous range cannot be covered that way.       |
-|         | **Designed to widen:** a FractionalDecimator would drop the `hz % 50`      |
-|         | condition — the only one excluding an otherwise valid rate (625 Hz) — so   |
-|         | widening means adding table entries or relaxing that predicate. No public  |
-|         | signature changes, which is why the numeric overload was kept.             |
-|         | `test_hr2`'s off-grid case (700 Hz) was retired: it is no longer reachable |
-|         | through the API, by design. The rounding branch in `Decimator::configure()` |
-|         | stays as defensive code and as the hook for that future decimator.        |
-| v0.84c  | **`_hr2_seg` → `_hr2_snapshot`, `_hr2_linearize()` →                       |
-|         | `_hr2_take_snapshot()`, `_hr3_linearize()` → `_hr3_prepare_fft_input()`.** |
-|         | No functional change. `seg` said nothing, and `linearize` named the         |
-|         | mechanism (walking a circular buffer) rather than the purpose: the copy    |
-|         | exists so Task B sees a COHERENT window while Task A keeps writing         |
-|         | `_hr2_buf` — the isolation that `_hr2_computing` guards. The comments       |
-|         | already called it a "snapshot"; now the identifier does too, and a future  |
-|         | memcpy-based implementation would still be a snapshot while no longer      |
-|         | being a "linearize". The twin names also implied the two functions did the |
-|         | same thing: HR2's only copies, HR3's copies AND subtracts the mean AND     |
-|         | applies the Hann window, which `_hr3_prepare_fft_input()` now states.      |
-| v0.84b  | **Decimation chains renamed `_pulse_band_decim` / `_harmonic_band_decim` → |
-|         | `_hr2_decim` / `_hr3_decim`** (with their target-rate constants and test    |
-|         | accessors). No functional change. The band-based names described a split    |
-|         | that does not exist: a "pulse band" reaching 5 Hz covers the 5th harmonic   |
-|         | of a 60 BPM pulse, and a "harmonic band" includes the fundamental. Naming   |
-|         | after the consumer is accurate for all three lag estimators, since          |
-|         | HR2_ACF / HR2_MPM / HR2_YIN share HR2's chain and buffer. Accepted risk,    |
-|         | recorded in §5.3.1: the name goes stale if a non-HR2_* estimator ever feeds |
-|         | off that chain, and the honest rename would then be after what each chain   |
-|         | PRESERVES (HR2's: the fundamental across [30, 300] BPM; HR3's: up to the    |
-|         | 3rd harmonic of 260 BPM, which its HPS multiplies).                        |
-| v0.84   | **One decimation chain per filtered path (§5.3.1).** The single             |
-|         | `_decim_factor` served both HR2 and HR3, implying a coupling that does not  |
-|         | exist: the two paths share no filter, no buffer and no phase counter, so    |
-|         | nothing forces a common rate and running them at one rate saves nothing —   |
-|         | no shared convolution, no shared buffer, not one CPU cycle. Replaced by a   |
-|         | `Decimator` struct (factor, phase, achieved rate) instantiated twice:       |
-|         | `_hr2_decim` (BP 0.5–5 Hz → HR2_ACF, and MPM/YIN when they land)     |
-|         | and `_hr3_decim` (LP 15 Hz → HR3), each deriving its factor from  |
-|         | its own target. Both target 50 Hz today, so **no behavioural change** — but |
-|         | §5.3.1 now records that this is a coincidence of requirements, not a        |
-|         | constraint: only the harmonic chain needs 50 Hz (its 15 Hz low-pass stops   |
-|         | protecting the decimation below that); the pulse chain has 5× of spare      |
-|         | margin and at 25 Hz would cut the autocorrelation cost (N × lags) by 3.9×,        |
-|         | tripled once three estimators sweep the same buffer. What holds that back   |
-|         | is lag resolution (4.8 vs 2.4 BPM at 120 BPM), which is precisely what MPM  |
-|         | and YIN depend on — to be settled with the offline replay experiment, not   |
-|         | by reasoning, and not during the campaign that compares the three.          |
-|         | New `test_decim_chains_derive_independently` pins per-chain derivation at   |
-|         | 500, 1000 and 700 Hz (the last one off-grid, to check the achieved rate is  |
-|         | reported honestly rather than as the nominal target).                       |
-|         | §5.5 now expands ACF / NSDF / MPM / CMND / YIN / HPS.                       |
-| v0.83   | **The decimated analysis rate is now the invariant; the factor derives from |
-|         | it (§5.3.1).** `_decim_factor = round(sample_rate / decim_target_rate_hz)`, |
-|         | with `decim_target_rate_hz = 50 Hz` as the contract. Four constants are     |
-|         | calibrated against that rate (`hr2_buf_len` = 8 s, `hr3_buf_len` = 10.24 s, |
-|         | the update intervals = 0.5 s, `hr2_acorr_lag_cap` = 22 BPM); with the       |
-|         | previous fixed factor of 10, changing the AFE rate moved all four at once   |
-|         | and silently — at 1000 Hz the lag cap made 40 BPM unreachable, reporting    |
-|         | real bradycardia as "no periodicity". Pinned by the new                     |
-|         | `test_hr2_decimated_rate_invariant_to_sample_rate` (40 BPM at 1000 Hz — the |
-|         | discriminating case; a 60 BPM check passes either way).                     |
-|         | **§5.3.1 is new** and records, for the first time, WHY 50 Hz: it is the GCD |
-|         | of the validated PRF grid (the highest rate with an integer factor at every |
-|         | admissible PRF); below it HR3's 15 Hz low-pass stops protecting the         |
-|         | decimation (Nyquist falls under the filter corner) and the windows grow     |
-|         | into physiological non-stationarity; above it the fixed buffers grow too    |
-|         | short in time. Weak point recorded: −9.4 dB of anti-alias attenuation at    |
-|         | Nyquist, paid in `hr3_sqi`; the lever would be a 4th-order low-pass.        |
-|         | **Naming (no functional change):** `fs2` (HR2) and `fs_dec` (HR3), two      |
-|         | spellings of the same quantity, become `_decim_sample_rate_hz`, symmetric   |
-|         | with `_afe_sample_rate_hz`; `hr2_decim_factor` + `hr3_decim_factor` become  |
-|         | one `_decim_factor` (a third, dead copy lived in the .cpp anonymous         |
-|         | namespace, shadowed); the local `fs` — which meant *full scale in mA* in    |
-|         | two places and *sample rate in Hz* in another — becomes `full_scale_mA` /   |
-|         | `sample_rate_hz`. Version checklist: the .cpp header still read v0.80, so   |
-|         | it had been missed in v0.81 and v0.82 too.                                  |
-|         | **API cleanup (breaking, deliberate):** `setHR3Filter()` loses its         |
-|         | `f_low_hz` argument and `AFE4490Config` loses `hr3_f_low_hz`. Both were    |
-|         | inert — `init_lp()` never reads a lower corner — and actively misleading:  |
-|         | the reported value was a plausible 0.4 Hz left over from the constructor,  |
-|         | so a caller passing another value got 0.4 back and could believe a         |
-|         | bandpass was in effect. HR3 is a pure low-pass BY DESIGN (§5.4): the FFT   |
-|         | needs the harmonics preserved in phase for the HPS, and the DC is removed  |
-|         | by mean subtraction in `_hr3_prepare_fft_input()`. Neither field crossed the wire  |
-|         | (no $CFG/$LCFG frame carried it), so no protocol or script change.        |
-|         | Spec §5.4 also corrected: the low-pass corner is 15 Hz, documented as      |
-|         | 10 Hz, and the parameter table claimed the filter "removes DC/baseline     |
-|         | drift" — it does not; a low-pass passes DC.                                |
-| v0.82   | **HR2 autocorrelation lag sweep: upper bound derived from `hr_min_bpm`      |
-|         | instead of a hardcoded 137 samples (§5.3).** The constant dated from v0.11, |
-|         | when the HR range was [25, 300] BPM (guard band 22 BPM at 50 Hz); the range |
-|         | later moved to [40, 260] BPM but the lag bound was never revisited. Being   |
-|         | fixed in *samples* while `fs2` is not, it also silently encoded a 50 Hz     |
-|         | assumption. Now `max_lag = 60/(hr_min_bpm-3)*fs2`, symmetric with the       |
-|         | existing `min_lag`, capped by storage (`hr2_acorr_max_lag` renamed to       |
-|         | `hr2_acorr_lag_cap`) and by `hr2_buf_len/2-1` (unbiased-ACF noise limit),   |
-|         | plus an explicit guard when fewer than 3 lags remain. **No output change at |
-|         | 500 Hz** — peaks beyond the old bound were rejected by the `hr >=           |
-|         | hr_min_bpm` check anyway — but the sweep drops from 127 to 71 lags, ~39 %   |
-|         | less work in the N × lags inner loop, and now tracks `setHrRange()`.       |
-|         | New test `test_hr2_40bpm_lower_bound` pins the bottom of the range.         |
-|         | **Documentation added in the same version (no code change):** new §7.3      |
-|         | (anti-aliasing — the effective Rx bandwidth is the duty-cycled corner,      |
-|         | `f_c,eff ≈ f_c,nominal × D` ≈ 70–110 Hz, not the nominal 500 Hz; margin     |
-|         | 2.3–3.6× over Nyquist at PRF 500 Hz; datasheet Fig. 54) and new §7.4        |
-|         | (the validated PRF grid {500, 800, 1000, 1250, 1600} Hz, the thermal        |
-|         | headroom the PRF leaves under the LED duty, and two recorded non-criteria). |
-|         | §7.2 corrected: it claimed the pre-sampler filter left "no out-of-band      |
-|         | noise to alias" — false for a first-order pole; the CF conclusion stands.   |
-| v0.81   | **Rename: `AFE4490DebugData::hgac_rf_led1/led2` → `rf_led1/led2` (§3d).**  |
-|         | Alex, reviewing the new PulseNest `HGAC_RF1/RF2` CSV columns: the name      |
-|         | implies HGAC computed the value, but it's just the live RF config          |
-|         | (identical to `_afe_tia_rf_led1/led2`) — it can equally come from a manual  |
-|         | `$SET`. Consumer-side rename in PulseNest (`main.cpp`, `pulsenest_lab.py`,  |
-|         | `pulsenest_lab_spec.md`) done in the same pass. No behaviour change.        |
-| v0.80   | **Bug fix: cross-thread race let a manual `$SET` gain/current/AMBDAC       |
-|         | change get combined with a stale raw ADC code before the settling window    |
-|         | was even armed (§5.8.4).** Distinct from v0.79: that fix covered            |
-|         | *recomputing* while already frozen; this one covers how the frozen snapshot |
-|         | gets *saved* in the first place. The six arming setters mutated their live  |
-|         | circuit-parameter member, *then* called `_arm_switched_rc_settling()` —     |
-|         | protected only by `_spi_mutex`, never `_state_mutex` (`_process_sample()`'s |
-|         | lock). A manual `$SET` runs on `Cmd_Task`, a different FreeRTOS task; if    |
-|         | `_task_body()` ran `_process_sample()` in the mutate→arm gap, it saw the    |
-|         | countdown still at 0, recomputed fresh, and combined an old raw code with   |
-|         | the already-new parameter — latching the wrong value into                  |
-|         | `_last_valid_analog_state` for the whole settling window. HGAC was never    |
-|         | exposed (mutates+arms sequentially, single-threaded, under `_state_mutex`). |
-|         | Suspected by Alex from a real capture ("a veces FW_OT_LED1 parece congelado |
-|         | con la RF nueva"). Fix: reorder to arm-before-mutate in all six setters     |
-|         | (`setTIAGainLED1/2`, `setLED1/2Current`, `setAmbDac`,                       |
-|         | `setStage2Gain`/`setStage2GainLED1/2`, `setStage2En1/2`) — safe because the |
-|         | countdown value depends only on `_afe_sample_rate_hz`, never on which       |
-|         | parameter changed. No new locks (rejected taking `_state_mutex` in the      |
-|         | setters: `_hgac_change_rf()` already nests a setter call under a           |
-|         | caller-held `_state_mutex`, so `Cmd_Task` acquiring `_spi_mutex` then       |
-|         | `_state_mutex` would invert the lock order → deadlock). Not covered by a    |
-|         | new automated test — the native suite is single-threaded and can't          |
-|         | reproduce cross-thread interleaving; the fix rests on the ordering argument |
-|         | above. Verified: `pio test -e native` 63/64 (unrelated pre-existing         |
-|         | `test_biquad` failure untouched); ESP32-S3 build (`incunest_V16`) SUCCESS.  |
-| v0.79   | **Bug fix: freezing raw ADC codes during switched-RC settling wasn't        |
-|         | enough — `_compute_analog_state()` still combined them with LIVE (already   |
-|         | changed) circuit parameters, producing a stepped `OT` instead of a flat one |
-|         | (§5.8.4).** Found by Alex from a real capture: `ppg_disp` showed an abrupt  |
-|         | pulse (two steps bracketing the settle window) instead of the intended      |
-|         | smooth decay — RSQM/SpO2/HR1-3 were silently exposed to the same wrongly-   |
-|         | scaled `OT` for the whole window, not just the display. Fix: new member    |
-|         | `_last_valid_analog_state` (the full `AFE4490AnalogState`, not just raw     |
-|         | codes) saved every normal cycle; `_process_sample()` reuses it verbatim     |
-|         | while `_should_freeze_input()` instead of recomputing from stale-code +    |
-|         | live-parameter combinations. Chosen over freezing all 9 individual circuit  |
-|         | parameters (RF/RG/EN/AMBDAC/ILED separately) — fixes the mismatch by       |
-|         | construction, one new member instead of nine, `_compute_analog_state()`     |
-|         | untouched. New test `test_analog_state_stays_flat_during_settle_window`     |
-|         | (PulseNest `test_hgac.cpp`) proves it the strong way: feeds a bogus raw     |
-|         | code while frozen and asserts `OT` doesn't move. Verified: `pio test -e     |
-|         | native` 63/64 (unrelated pre-existing `test_biquad` failure untouched);     |
-|         | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
-| v0.78   | **Docs only: comment on `_apply_analog_regs()` explaining why it's always   |
-|         | called unconditionally, even when a setter's value didn't change** — asked  |
-|         | by Alex while reviewing the `changed` guards added in v0.74-v0.77. Several  |
-|         | fields share one register (e.g. `TIAGAIN` packs `RF_LED1`+`CF_LED1`+        |
-|         | `STG2GAIN1`+`STAGE2EN1`+`ENSEPGAIN`), so any SPI write already retransmits  |
-|         | unchanged neighbours; rewriting the same bits has no physical effect (no    |
-|         | voltage step, nothing re-settles) and doubles as a forced resync — unlike   |
-|         | `_arm_switched_rc_settling()`, which IS guarded because it has a real cost  |
-|         | (freezes live data ~16 ms). No code change.                                |
-| v0.77   | **`setStage2En1()`/`setStage2En2()` also arm switched-RC settling (§5.8.4)  |
-|         | — the follow-up decision left open in v0.76.** Bypassing Stage 2            |
-|         | (`STAGE2EN=0` → unity gain) vs. enabling it (`STAGE2EN=1` → gain `RG`)      |
-|         | steps the effective gain exactly like `setStage2Gain()` itself, so the same |
-|         | protection applies (same no-op guard: toggling to the current enable state  |
-|         | doesn't re-arm). New tests `test_stage2_en_toggle_arms_settling`,           |
-|         | `test_setting_same_stage2_en_does_not_rearm_settling` (PulseNest            |
-|         | `test_hgac.cpp`). Verified: `pio test -e native`; ESP32-S3 build            |
-|         | (`incunest_V16`) SUCCESS.                                                    |
-| v0.76   | **Switched-RC settling extended to ILED, AMBDAC, and RG — not just RF       |
-|         | (§5.8.4).** Datasheet §7.7 t5 footnote (1) names "LED current setting, TIA  |
-|         | gain, and so forth" as triggers — RF was the only one wired up through      |
-|         | v0.75. `setLED1Current()`/`setLED2Current()`, `setAmbDac()`, and            |
-|         | `setStage2Gain()`/`setStage2GainLED1/2()` now call                          |
-|         | `_arm_switched_rc_settling()` themselves too, with the same no-op guard as  |
-|         | RF (re-applying the same value doesn't re-arm). AMBDAC and RG sit in the    |
-|         | identical feedback path as RF (Eq. 2) — a step in either produces the same  |
-|         | kind of transient. `setTIACF*()` deliberately excluded: CF only shapes      |
-|         | transient response, not the DC operating point (no CF term in Eq. 2).       |
-|         | `setStage2En1/2()` (which also steps effective gain, unity↔RG) noticed but  |
-|         | left for a follow-up decision, not folded in silently. New tests            |
-|         | `test_led_current_change_arms_settling`, `test_ambdac_change_arms_settling`,|
-|         | `test_stage2_gain_change_arms_settling`,                                    |
-|         | `test_setting_same_led_ambdac_rg_does_not_rearm_settling` (PulseNest        |
-|         | `test_hgac.cpp`). Verified: `pio test -e native`; ESP32-S3 build            |
-|         | (`incunest_V16`) SUCCESS.                                                    |
-| v0.75   | **Rename: `_rsqm_settling_countdown`/`RSQM_DIAG_HW_SETTLING`/               |
-|         | `_arm_settling()`/`_compute_afe_settle_samples()` → their                   |
-|         | `*_switched_rc_settling_*` equivalents (§5.8.4).** Found by Alex: "settling"|
-|         | alone was ambiguous among three unrelated phenomena in this library — the   |
-|         | TIA's own RC pole (τ=RF·CF, one sample), the LED/cable transient (also one  |
-|         | sample), and this one (several PRP cycles, the datasheet's 3 ms minimum).   |
-|         | "Switched RC" is the datasheet's own term (§7.7 t5 footnote (1): "four      |
-|         | switched RC filters"), chosen over `gain_settling` (names the trigger, not  |
-|         | the mechanism — would misdescribe a future ILED-triggered case, since ILED  |
-|         | is a current, not a gain) and `sample_hold_settling` (not the datasheet's   |
-|         | term). Also fixed the `RSQM_DIAG_*` bit comment (§3) to explain the         |
-|         | distinction from the other two settling phenomena. Historical changelog    |
-|         | rows below (v0.35–v0.72) intentionally still use the old names — they      |
-|         | describe what those commits did at the time, not the current identifiers.  |
-|         | Internal-only, no behaviour change. Verified: `pio test -e native`;         |
-|         | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
-| v0.74   | **A manual RF change now arms the settle window too, not just an HGAC one   |
-|         | (§5.8.4).** Found by Alex: `_rsqm_settling_countdown` was only armed inside |
-|         | `_hgac_change_rf()` — calling `setTIAGainLED1/2()`/`setTIAGain()` directly  |
-|         | (e.g. a manual `$SET,tiagain1,...` from the host) changed RF with zero      |
-|         | input-freeze protection (v0.72), even though the same physical transient   |
-|         | occurs regardless of who initiated the change. New `_arm_settling()`        |
-|         | (guarded: re-applying the same value is a no-op) is now called from the     |
-|         | three public setters; `_hgac_change_rf()`'s own separate arm removed (gets  |
-|         | it for free through the setter it already calls).                          |
-|         | **`_rsqm_settling_countdown` is now `volatile`** — with the arm reachable   |
-|         | from any caller, it can be written from a different thread (e.g. `Cmd_Task` |
-|         | on a manual `$SET`) than the one that reads/decrements it (`_task_body()`). |
-|         | No mutex: both sides only ever do a plain 32-bit store or decrement, never  |
-|         | a cross-thread read-modify-write, so the worst-case race is benign (±1     |
-|         | sample of settle duration) — same reasoning already applied to             |
-|         | `_diag_active`/`_diag_holdoff_samples`.                                     |
-|         | New tests `test_manual_rf_change_also_arms_settling` and                   |
-|         | `test_setting_same_gain_does_not_rearm_settling` (PulseNest `test_hgac.cpp`). |
-|         | Verified: `pio test -e native`; ESP32-S3 build (`incunest_V16`) SUCCESS.    |
-| v0.73   | **Docs only: `tia_settle_min` PRF dependence reviewed (§7.2).** Confirmed   |
-|         | it does NOT scale with PRF (flat `constexpr`, always 12.5 µs regardless of  |
-|         | `_afe_sample_rate_hz`) — and that this is almost certainly the right shape, |
-|         | since its purpose (LED/cable turn-on settling, §8.3.1.3) is a hardware      |
-|         | property independent of pulse rate. Sharpened the existing provenance note  |
-|         | (`9fb2831`): datasheet Table 2's own footnote (1), p.36, states its values  |
-|         | are "based off PRF = 500 Hz and duty cycle = 25%" — the "50" `tia_settle_min` |
-|         | was lifted from is TI's single worked example, never stated as a rule for  |
-|         | any other rate. No code change: the formula's structure (fixed floor +     |
-|         | PRF-proportional term) was already correct, only the exact magnitude has   |
-|         | weak provenance, same class of finding as `tia_settle_fraction`/`tia_n_tau`. |
-| v0.72   | **`RSQM_DIAG_HW_SETTLING` is now enforced, not just labelled** (found by    |
-|         | Alex from a visible spike in `ppg_disp` whenever HGAC changes RF).         |
-|         | `_task_body()`'s freeze condition — `_diag_active \|\| _diag_holdoff_samples`|
-|         | `> 0 \|\| _rsqm_settling_countdown > 0` — now also covers the settling window |
-|         | opened by `_hgac_change_rf()` (§5.8.4), reusing the exact same frozen-      |
-|         | last-valid-input mechanism already used for the post-diagnostic holdoff:   |
-|         | "same physical phenomenon (analog front-end re-settling), two different    |
-|         | triggers." Before this, the bit was set in `diag_code` but nothing         |
-|         | actually stopped SpO2/HR1/HR2/HR3/`ppg_disp` from processing the real      |
-|         | (transient) values during that window — only HGAC's own Gate G0 checked    |
-|         | it, to pause its own actuation. `_rsqm_settling_countdown` is decremented   |
-|         | inside `_process_sample()` (`_rsqm_update()`) unconditionally, whether fed  |
-|         | frozen or fresh inputs, so no extra bookkeeping was needed beyond the OR    |
-|         | term. Renamed `_diag_last_*` → `_last_valid_*` (no longer diagnostics-      |
-|         | specific) across `.h`/`.cpp`. Fixes `ppg_disp`'s visible spike AND a        |
-|         | latent, previously-unreported issue: SpO2/HR1/HR2/HR3 were silently        |
-|         | exposed to the same RF-change transient. Verified: `pio test -e native`;   |
-|         | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
-| v0.71   | **Docs only: plausible physical derivation of `tia_axis::LIN_V` = 1.8 V**   |
-|         | (§3c), previously purely empirical (`tia_linearity_sweep.py`, no theory     |
-|         | recorded). Alex connected two independently-documented datasheet facts      |
-|         | never linked before: §8.3.4 regulates the receive analog rail to 1.8 V      |
-|         | internally, and §8.3.1.1's ambient-DAC common-mode (0.9 V, "set             |
-|         | internally", p.11) is exactly half of it. A symmetric fully-differential    |
-|         | output centred at 0.9 V on a 0–1.8 V rail reaches its maximum differential  |
-|         | swing (one node at 1.8 V, the other at 0 V) at exactly 1.8 V — matching     |
-|         | `LIN_V` exactly, with `FS_V` (1.0 V, TI-guaranteed) sitting inside it as    |
-|         | guardband, and the measured hard clip (~1.94 V) slightly past it as         |
-|         | expected real-silicon headroom, not a contradiction. Not verified against a |
-|         | schematic — recorded as the most plausible explanation found, not a         |
-|         | certainty. No code change.                                                  |
-| v0.70   | **500 Hz post-stage2 filter pole vs. settle window (§5.8.4) reviewed —      |
-|         | closes the last open item from the v0.65 settling work.** Computed          |
-|         | numerically across the full `setSampleRate()` range (63–5000 Hz): at every  |
-|         | rate this library is actually used at (500 Hz default), the settle window  |
-|         | covers the filter's 5τ (1.59 ms) with 10×–39× margin. Docs only, no code    |
-|         | change for this part.                                                       |
-|         | **Found in the process (docs only, not fixed):** the settle-window          |
-|         | calculation itself collapses above ~2487 Hz (still within the documented   |
-|         | valid range of `setSampleRate()`) — a more severe, now-quantified           |
-|         | re-statement of the pre-existing "Valid for PRF ≤ ~2 kHz" caveat already on |
-|         | `ambient_margin`. Above that threshold `_compute_ambient_sample_window_counts()` |
-|         | returns 0, collapsing `_compute_afe_settle_samples()` to its 1-sample floor  |
-|         | (under even the raw 3 ms datasheet requirement) and, at the register level,  |
-|         | `_apply_timing_regs()` would write an inverted `ALEDxSTC > ALEDxENDC` pair.  |
-|         | Out of scope here (this project only runs at 500 Hz) — tracked in memory.   |
-| v0.69   | **`ppg_disp` migrated to the OT domain — the last consumer of raw           |
-|         | `led1_sub`/`led2_sub` joins the gain-invariance migration HR1/HR2/HR3/SpO2  |
-|         | already went through (§5.1/§5.2, since v0.38).** Found by Alex: `ppg_disp`  |
-|         | was the only signal still scaled by RF, so it visibly jumped whenever HGAC  |
-|         | changed gain — the exact artefact OT fixed everywhere else.                 |
-|         | `AFE4490Data::ppg_disp`: `int32_t` → `float` (OT magnitude ~1e-5..1e-6      |
-|         | truncates to 0 as an int). Source: bandpass-filtered `ot_led1`/`ot_led2`    |
-|         | (was `led1_sub`/`led2_sub`). `AFE4490Channel` enum shrunk from 6 values to  |
-|         | 2 (`LED1`/`LED2`): the four single-ended raw options (bare LED1/LED2/       |
-|         | ALED1/ALED2) have no OT equivalent — OT is structurally an ambient-         |
-|         | corrected ratio (`AFE4490AnalogState` has no `ot_aled1`/`ot_aled2`) — and   |
-|         | `setPPGChannel()` was their only consumer, so they were dropped rather than |
-|         | kept meaningless. NOT normalized for display (deliberately deferred — a    |
-|         | candidate `ppg_disp_norm`, PI-weighted [0..1], is backlog, not this         |
-|         | change). §1.3/§2.1/§3 corrected in the same pass: fixed pre-existing spec   |
-|         | drift found while touching this code — stale field names                   |
-|         | (`led2_aled2`/`led1_aled1`, actual code has used `led2_sub`/`led1_sub` for  |
-|         | some time), a phantom `int32_t ppg` struct field that no longer exists in   |
-|         | the header, and a processing-chain diagram that still routed HR1 through    |
-|         | `setPPGChannel()` when it has consumed `ot_led1` directly since v0.38.      |
-|         | PulseNest: wire frames `$M1`-`$M4` change `PPG_DISP`'s format from `%ld`    |
-|         | to `%.4e` (units A/A, was ADC counts); `channel_str()` in `main.cpp`        |
-|         | updated for the 2-value enum. `pulsenest_lab.py`/`pulsenest_lab_spec.md`:   |
-|         | `PPG_DISP` tooltip/type corrected (parsing was already `float(x)`, no      |
-|         | code change needed there); `LED1_SUB`/`LED2_SUB` tooltips also corrected    |
-|         | in the same pass — they still claimed to feed HR1/HR2/HR3/SpO2, another    |
-|         | pre-existing drift from the same v0.38 OT migration that was never         |
-|         | reflected in the lab's tooltips.                                            |
-| v0.68   | **CF/RF atomicity reviewed (§5.8.4) — no bug, closes an open question from  |
-|         | the v0.65 settling work.** `RF_LEDx`/`CF_LEDx` share the same 24-bit         |
-|         | register (`TIAGAIN`/`TIA_AMB_GAIN`), and `setTIAGainLED1/2()` recomputes CF  |
-|         | for the new RF *before* the single SPI write in `_apply_analog_regs()` — the |
-|         | chip never observes a transient RF-new/CF-old combination, and `getConfig()` |
-|         | reads both fields under the same `_spi_mutex` (no torn read either).         |
-|         | Documented inline in `_hgac_change_rf()` and in §5.8.4. New regression test  |
-|         | `test_hgac_change_rf_recalculates_cf` (PulseNest `test_hgac.cpp`) exercises  |
-|         | CF recalculation through the HGAC entry point specifically (previously only  |
-|         | covered via the public `setTIAGain()` in `test_tia_cf.cpp`). Also fixes      |
-|         | `INCUNEST_AFE4490_VERSION` macro, stuck at "0.64" since v0.65 (comment/      |
-|         | `library.json` were bumped correctly each time, this `#define` was missed). |
-|         | Comments/tests only, no behaviour change.                                    |
-| v0.67   | **Rename: `_compute_settle_margin()` → `_compute_led_on_to_sample_margin_counts()`** |
-|         | (found by Alex reviewing v0.66). "Settle" was ambiguous two ways: (1) the    |
-|         | datasheet's stated cause is LED/cable settling (§8.3.1.3), but the library   |
-|         | also reuses the same figure as the TIA-τ budget for auto-CF — a name        |
-|         | asserting either cause alone would be partly wrong for the other call site;  |
-|         | (2) it collided with the unrelated `_compute_afe_settle_samples()` (v0.65,   |
-|         | the datasheet-t5 post-register-change wait) — same word, different          |
-|         | timescale (µs-level per-phase margin vs. ms-level post-config countdown).    |
-|         | New name describes what the value structurally IS (`LEDxSTC = LEDxLEDSTC +` |
-|         | this margin) without taking a side on WHY, and adds the `_counts` suffix    |
-|         | for consistency with `_compute_led_sample_window_counts()` /                |
-|         | `_compute_ambient_sample_window_counts()` (v0.66). Internal-only, no        |
-|         | behaviour change.                                                           |
-| v0.66   | **Rename: `_compute_sample_window_counts()` only ever covered the LED phase** |
-|         | (found by Alex reviewing v0.65) — renamed to `_compute_led_sample_window_counts()`, |
-|         | paired with a new symmetric `_compute_ambient_sample_window_counts()` (was  |
-|         | inline arithmetic duplicated inside `_compute_afe_settle_samples()`). Both now |
-|         | delegate to a shared `_window_counts(margin)` clamp, removing the duplicated |
-|         | `(q > margin+2) ? q-2-margin : 0` formula. `_compute_afe_settle_samples()` is  |
-|         | now `min(led(), ambient())` — no inline `q`/margin arithmetic left in it.    |
-|         | `getCFMaxEq1PF()` updated to the new LED-window name (datasheet Eq. 1's "Rx  |
-|         | Sample Time" is specifically the LED window, per Fig. 58 — never ambient).   |
-|         | Internal-only, no behaviour change; `pio test -e native` unaffected.        |
-| v0.65   | **`afe_settle_time_s` (0.15 s fixed guess) replaced by `_compute_afe_settle_samples()`,** |
-|         | derived from datasheet §7.7 t5 (p.17): "> 3 ms of cumulative sampling time  |
-|         | in each phase" after any signal-chain change, footnote (1) naming "TIA     |
-|         | gain" explicitly. New private method computes `ceil(3 ms / phase_window_s)` |
-|         | from the shorter of the LED/ambient sample windows (both symmetric between  |
-|         | LED1/LED2, so one figure covers either HGAC color domain); depends only on  |
-|         | `_afe_sample_rate_hz`, recomputed live instead of hardcoded. At the default  |
-|         | 500 Hz config this yields 8 samples (~16 ms) vs. the old 150 ms — ≈9×       |
-|         | shorter and, unlike the old value, traceable to the datasheet instead of an |
-|         | undocumented guess (§5.8.4, §7.2). New named constant                      |
-|         | `afe_ambient_margin_counts` (was a bare `400` literal in                    |
-|         | `_apply_timing_regs()`) shared by both call sites. §5.8.4 total-delay        |
-|         | figures (guard/leveling re-arm after an RF step) updated accordingly.       |
-| v0.64   | **HGAC: `hgac_v_tia_low1` default 0.25→0.20 V** (§5.8.1). Widens the        |
-|         | leveling dead-band by lowering LOW1, not raising HIGH1: HIGH1 is capped by   |
-|         | its 0.15 V margin to HIGH2/GUARD (safety against saturation), while LOW1 has |
-|         | no symmetric lower guard (`v_tia_diff ≥ 0` always) — widening there only     |
-|         | costs SNR, never safety. Also fixes the tightest anti-hunting margin (0.05 V |
-|         | at the RF ×2.5 step boundaries) found for the old value; new stability      |
-|         | invariant `HIGH1/LOW1 = 3.75 > 2.5×` (was 3.0). PulseNest's `test_hgac.cpp`  |
-|         | no longer hardcodes a raw ADC code for its weak-signal case — it derives it  |
-|         | from the object's own `hgac_v_tia_low1` (via `getConfig()`), so this default |
-|         | can move again without silently breaking the test.                          |
-| v0.63   | **Datasheet Equation 1 exposed as a check (no behaviour change).** New       |
-|         | `getCFMaxEq1PF(rf)` returns the chip's own CF ceiling                         |
-|         | (`RF × CF ≤ Rx Sample Time / 10`, §8.3.1.1), plus private                     |
-|         | `_compute_sample_window_counts()` (= q − 2 − margin). Auto-CF is ≈4.5×        |
-|         | stricter and provably stays inside Eq. 1 (`test_autocf_always_within_eq1`);   |
-|         | a MANUAL `setTIACF*()` can exceed it and is deliberately not clamped —        |
-|         | PulseNest now emits `# WARN … applied anyway` after such a $SET.              |
-|         | Spec §7.2 documents that `tia_settle_fraction` and Eq. 1's `/10` govern       |
-|         | DIFFERENT decisions and must not be substituted: per §8.3.1.3 the sample-     |
-|         | start delay exists for **LED/cable** settling, not TIA settling, so Eq. 1     |
-|         | (which only bounds CF) cannot supply a criterion for it. Both numbers kept    |
-|         | unchanged: the margin is conservative but free, and shrinking it without      |
-|         | measuring the LED/cable transient risks sampling before the LED settles.      |
-|         | Also corrects the strictness ratio stated in v0.62: ≈4.5×, not ~10×.          |
-|         | `test_tia_cf` grows 9 → 13 cases.                                            |
-|         | §7.2 additionally records the provenance of all three settle constants:       |
-|         | NONE comes from the datasheet. `tia_settle_min`=50 is TI's Table 2 example    |
-|         | value; `tia_settle_fraction`=0.10 is probably Eq. 1's `/10` misapplied;       |
-|         | `tia_n_tau`=5.0 is the generic five-time-constants rule of thumb (its         |
-|         | "< 0.7% error" comment is circular — 0.7% IS e⁻⁵). The datasheet's implied    |
-|         | count is 10τ, so raising `tia_n_tau` 5→10 "to match TI" while keeping the     |
-|         | margin basis would make the criterion twice as STRICT, not laxer — the three  |
-|         | constants only make sense together. All kept unchanged.                       |
-| v0.62   | **TIA CF: expose all 32 register codes (was 6).** Found by Alex reviewing     |
-|         | `_recalc_afe_tia_cf_led1()` against datasheet Figure 114. `CF_LED[4:0]` is    |
-|         | not a 6-value enum: it switches five capacitors in parallel over a fixed 5 pF |
-|         | base (weights 5/15/25/50/150 pF), so all 32 combinations are legal —          |
-|         | 5…250 pF. The old `enum class AFE4490TIACF` covered only the six single-bit   |
-|         | settings; its values were CORRECT but the grid was incomplete, making auto-CF |
-|         | under-select. Changes: `AFE4490TIACF` → `using AFE4490CFCode = uint8_t` (the  |
-|         | code IS the value); `kAFE_CF_PF[6]` → `[32]`; new `kAFE_CF_STR[32]`,          |
-|         | `afeCFCodeToPF()`, `afeCFPFToCode()` (quantise DOWN — never overshoot the 5τ  |
-|         | budget); `cf_code[]` LUT deleted (now `(code & 0x1F) << 3`); setters take pF  |
-|         | (`setTIACF(float)`), mirroring `_quantize_led_mA()`; `AFE4490Config` exposes  |
-|         | `afe_tia_cf_ledN_code` + `_pF`. `afeStrToCF()` still accepts the six pre-v0.62 |
-|         | strings → no $CFG/$SET protocol break. `kAFE_CF_MATCH_TOL` (1e-4) added: the  |
-|         | budget computes 99.9999924 instead of 100.0 in float, which would have        |
-|         | silently dropped a whole step and negated the change. **Behaviour change:**   |
-|         | auto-CF at the default 500 Hz / RF_100K now picks **100 pF (was 55 pF)**;     |
-|         | f_pole ≈ 15.9 kHz, far above the PPG band. Every RF/Fs combination improves   |
-|         | or is unchanged; none violates 5τ.                                            |
-|         | New `test_tia_cf` (9 cases) covers the LUT vs. datasheet weights, quantise-   |
-|         | down, round-trips, legacy strings and the float-tolerance regression.         |
-|         | **Verified on 16.A (2026-08-17):** sweeping CF over its full 5–250 pF range   |
-|         | changes neither V_TIA (±1 mV = drift) nor `LED1_SUB` %SD/Mean (0.01 → 0.01).  |
-|         | An earlier claim in this changelog that the change bought "~1.8× more noise   |
-|         | filtering" was NOT supported by measurement and has been removed: the         |
-|         | internal 500 Hz filter (FLTRCNRSEL) dominates the noise bandwidth and sits    |
-|         | before the sampler. v0.62's value is fixing an incomplete register grid, not  |
-|         | improving SNR. See §7.2 "Measured behaviour" for the data, the write-path     |
-|         | control, and why the auto-CF criterion is ≈4.5× stricter than datasheet Eq.1. |
-| v0.61-experiment (doc fix) | **§5.8.4 corrected: `afe_settle_time_s` and the EMA warmup are SEQUENTIAL, not overlapped.** |
-|         | No code change — the spec previously claimed the 3·τ EMA warmup "comfortably absorbs"  |
-|         | the 150 ms settling window (implying they run in parallel). Wrong: Gate G0             |
-|         | (`_hgac_update()`) closes off while `RSQM_DIAG_HW_SETTLING` is active and `reset()`s the |
-|         | four EMAs on EVERY sample during that window (not once) — `count` stays pinned at 0, so  |
-|         | `EmaChannel::update()` is never called and the warmup counter cannot advance until the  |
-|         | settling countdown reaches 0. Corrected total delay after an RF change: guard operative  |
-|         | again at `afe_settle_time_s` + 3×τ_fast = 0.45 s (was documented as 0.3 s); leveling/    |
-|         | ambient at + 3×τ_slow = 6.15 s (was 6 s). Found by Alex while reviewing the design.      |
-| v0.61-experiment | **ProbeState classifier: discriminate saturation by phase (probe-in-air vs external light).** |
-|         | Fixes HGAC driving RF to the floor when the finger is removed. Was: *any* positive     |
-|         | saturation → PROBE_SATURATING → HGAC acts. Now (`_rsqm_update`): if not saturated, OT   |
-|         | classifies presence as before; if saturated, look at WHICH phase clips — an ambient    |
-|         | (ALED) phase also clipping → external light → PROBE_SATURATING (HGAC corrects); only    |
-|         | LED phases clipping, ambient clean → the LED's own light hits the PD with no tissue →   |
-|         | **PROBE_NOT_APPLIED** (probe in air), so HGAC freezes RF instead of chasing it down.    |
-|         | OT is the discriminator's basis (ambient-invariant, subtracts ALED). Limitation:       |
-|         | LED-only clip can't tell air from a rare no-ambient tissue over-saturation → assumed    |
-|         | air. Spec §5.6.2 rewritten; PROBE_SATURATING enum comment updated. HGAC unchanged.      |
-|         | test_hgac: the old "LED-dominated → descend" test became "LED-only sat = probe in air → |
-|         | HGAC frozen". 38/38 native tests, ESP32-S3 V16 build OK.                                 |
-| v0.60-experiment | **Move the ambient alarm out of `_hgac_track()` (separate actuation/diagnostic).** |
-|         | `_hgac_track()` is pure actuation again (returns void); the AMBIENT_HIGH condition moves|
-|         | to a new `_hgac_ambient_high(color, ambient)` evaluated in `_hgac_update()`. Same        |
-|         | producer (HGAC — depends on RF state, so not RSQM), but no longer nested in the guard   |
-|         | branch. Behaviour change: the alarm no longer requires the LED guard (`fast`) to have    |
-|         | tripped — condition is now just `RF==floor && ambient≥HIGH2` (ALED is the direct ambient |
-|         | indicator). Cleaner separation and drops the spurious `fast` dependency. Tests unchanged |
-|         | (8/8), ESP32-S3 V16 build OK.                                                            |
-| v0.59-experiment | **HGAC ambient-light alarm (`RSQM_DIAG_AMBIENT_HIGH`, bit 14).**            |
-|         | When the guard is tripped but RF is already at the floor, HGAC now discriminates the  |
-|         | cause with a third per-domain EMA on the **ALED** phase (`hgac_ema_ambient_tau_s`,     |
-|         | default 2 s, sustained): if ambient alone ≥ HIGH2, lowering RF/ILED can't help         |
-|         | (`v_tia_led ≥ v_tia_aled`) → raise bit 14 "TOO MUCH AMBIENT LIGHT" (global OR across    |
-|         | domains). Reuses the bit freed by SIGNAL_WEAK's removal; distinct from `AMB_SAT`        |
-|         | (per-sample hard rail). `_hgac_track()` returns the alarm and `_hgac_update()` publishes|
-|         | it into `_current_data.diag_code`. Consumer: pulsenest_lab DiagCode tooltip (operator-  |
-|         | actionable). test_hgac +2 (alarm at floor; no alarm when LED-dominated). 38/38 native   |
-|         | tests, ESP32-S3 V16 build OK.                                                           |
-| v0.58-experiment | **HGAC rebuilt: RF-only, two EMA per gain domain (guard + leveling).**      |
-|         | Replaces the single TIAGUARD guard + debounce + descent-only design. Per domain (LED |
-|         | phase only): a **fast** EMA (τ 0.1 s) drives an urgent HIGH2 guard (0.90 V), a **slow**|
-|         | EMA (τ 2 s) drives a bidirectional HIGH1/LOW1 leveling dead-band (0.75/0.25 V) — so RF |
-|         | now both descends AND ascends. No debounce (the EMA τ is the temporal filter).        |
-|         | `EmaChannel` gains optional `warmup_s` + `valid()`; HGAC uses 3·τ warmup, and          |
-|         | `_hgac_change_rf()` **resets** the domain's EMAs on a gain step (warmup doubles as     |
-|         | cooldown; no analytic rescale). Renames: `tia_axis::GUARD_V`→`HIGH2_V`;                |
-|         | `hgac_v_tia_thr`→`hgac_v_tia_high2`; added `hgac_v_tia_high1`, `hgac_v_tia_low1`,      |
-|         | `hgac_ema_fast_tau_s`, `hgac_ema_slow_tau_s`; removed `hgac_tiaguard_debounce_min_s`.  |
-|         | Setters renamed/added accordingly; `_hgac_step_rf_down`/`_hgac_check_tiaguard` →       |
-|         | `_hgac_change_rf`/`_hgac_track`. Only led1/led2 tracked (ALED reserved for the         |
-|         | deferred ambient alarm). API-breaking (config fields, setters, wire keys). test_hgac   |
-|         | rewritten (6 behavioural tests: guard→floor, warmup, disabled, leveling→raises RF,     |
-|         | reset+rewarm, SpO2-EMA-untouched). 36/36 native tests, ESP32-S3 V16 build OK.          |
-| v0.57-experiment | **Remove RSQM's EMA estimators, the `ready` gate, and the RSQM EMA τ config.** |
-|         | Follow-on to v0.56: once SIGNAL_WEAK was gone, `_rsqm_led1/2_sub_ema` fed only their   |
-|         | sample `.count` (the `ready = count ≥ rsqm_ready_count` gate), and `ready` fed only     |
-|         | `rsqi`'s 12 s warm-up — itself a vestige of SIGNAL_WEAK (no statistic left to mature).   |
-|         | Removed: the two `EmaChannel`s, `rsqm_ready_count`, `ready`, and (cascade) the now-inert |
-|         | `rsqm_ema_mean_tau_s`/`rsqm_ema_var_tau_s` config + `setRsqmEmaTau()` + `getConfig()`    |
-|         | copies + `$LCFG`/`$SET` wiring + LIBConfig controls. `rsqi` is now                        |
-|         | `PROBE_APPLIED && diag_code==0` (responsive, no warm-up — probe-state is instantaneous,  |
-|         | and SpO2/HR keep their own warm-ups). Spec §5.6.1 rewritten. API-breaking (config fields  |
-|         | + setter + wire keys). 36/36 native tests, ESP32-S3 V16 build OK.                         |
-| v0.56-experiment | **Remove `RSQM_DIAG_SIGNAL_WEAK` (bit 14) end-to-end.**                    |
-|         | No actionable consumer (only the aggregate `rsqi` gate + display), not fixable by |
-|         | gain (RF scales AC and DC together → PI/ratio invariant), and redundant with the  |
-|         | PI-based `spo2_sqi`. Removed: the bit, `rsqm_signal_weak_std` config field + `2000`|
-|         | default + `setRsqmSignalWeakStd()` + `getConfig()` copy, the producer block in     |
-|         | `_rsqm_update()`, and the `$LCFG`/`$SET` wiring + LIBConfig control in PulseNest.  |
-|         | Bit 14 (0x4000) left free — reintroduce as `RSQM_DIAG_AC_LOW` if a pulsatile-      |
-|         | amplitude flag is ever needed. API-breaking (config field + setter + bit + wire).  |
-|         | Note: `_rsqm_led1/2_sub_ema` now feed only `.count` (for `ready`); their var/mean   |
-|         | are unconsumed (candidate to reduce to a plain sample counter). 36/36 native tests, |
-|         | ESP32-S3 V16 build OK.                                                              |
-| v0.55-experiment | **`EmaChannel::update()` seeds on the first sample.**                      |
-|         | `count == 0` → `mean = x`, `var = 0` (was: ramp `mean` from 0). Ramping from 0 left    |
-|         | `d = x − mean ≈ x` for ~3·τ, spuriously inflating `var` (→ PI, RSQM SIGNAL_WEAK) during |
-|         | warm-up. Fixes the start-up bias; does NOT shorten `spo2_warmup_s` / `rsqm_ready_count` |
-|         | (var still needs ~3·τ_var to be representative). Steady state unchanged. Behaviour      |
-|         | change only in the transient after construction/`reset()`. Affects all EmaChannel users |
-|         | (RSQM, SpO2). 36/36 native tests (same as baseline), no regression.                     |
-| v0.54-experiment | **Remove the `IDEAL` (0.6 V) v_tia threshold — unused.**                    |
-|         | `tia_axis::IDEAL_V` and the `hgac_v_tia_ideal` config field (default + `getConfig()` |
-|         | copy) deleted; the ascending `static_assert` drops the `IDEAL_V <` term. It was      |
-|         | telemetry-only in v1 and never consumed by any control logic. RF is a discrete 7-step |
-|         | actuator (×2–3 jumps) → no fine setpoint is reachable, so a "target DC" is meaningless: |
-|         | v1 control is a dead-band `[LOW, HIGH]` + `GUARD`, no attractor at the centre. Would    |
-|         | only matter for a future feed-forward jump (Phase 5). API-breaking: `AFE4490Config`     |
-|         | loses a field (no wire/firmware consumer — `$CFG` never sent it). 36/36 native tests,   |
-|         | ESP32-S3 (incunest_V16) build OK.                                                       |
-| v0.53-experiment | **Consolidate ADC constants into `namespace adc`.**                        |
-|         | `kAFE_ADC_FS_CODE`/`kAFE_ADC_FSR` (file-scope) and `kAdcSatPos`/`kAdcSatNeg`     |
-|         | (`AFE4490AnalogState`) moved to `namespace adc`: `FS_CODE`/`FSR`/`SCALE`, NOMINAL |
-|         | vs ACTUAL code rails, and guarded `SAT_POS`/`SAT_NEG` (guard now explicit).      |
-|         | Removed `tia_axis::ADC_SAT_V` (duplicate 1.2 V) — `tia_axis` references          |
-|         | `adc::FSR`. Internal reorg, no API consumer outside the library.                 |
-| v0.52-experiment | **Rename `v_tia_diff` → `v_tia` (drop the `_diff` suffix).**                |
-|         | All identifiers, config fields (`hgac_v_tia_thr`/`hgac_v_tia_ideal`), the       |
-|         | setter (`setHgacVTiaThr`), comments and CSV column headers (`V_TIA_*`).          |
-|         | Rationale (Alex): only the differential value exists, so `_diff` is redundant   |
-|         | and falsely implies a `v_tia_branch` that is nowhere in the code. Removed the    |
-|         | old "naming rule 4b". API-breaking: config/setter renamed; CSV headers change    |
-|         | from `V_TIA_DIFF_*` to `V_TIA_*` (breaks by-name parsing of older captures).      |
-| v0.51-experiment | **Removed `AFE4490AnalogState::kVTiaDiffFs`/`kVTiaDiffLin` aliases.**       |
-|         | They only re-exposed `tia_axis::FS_V`/`LIN_V` (the single source of truth); the   |
-|         | `tia_over_fs`/`tia_over_lin` masks now compare against `tia_axis::` directly.     |
-| v0.50-experiment | **PROBE_SATURATING checks POSITIVE saturation only (`anyPositiveSaturation`).**|
-|         | RSQM's saturation branch changed from `!allValidRange()` to                     |
-|         | `anyPositiveSaturation() = (adc_sat_pos \| tia_over_fs)`. Rationale (Alex): the  |
-|         | probe can only saturate from above (photocurrent unipolar); the ADC only rails  |
-|         | NEGATIVE via AMBDAC (unused in v1, and its neg rail was itself characterised via |
-|         | an AMBDAC sweep), and a negative rail wouldn't be cleared by reducing RF/ILED.   |
-|         | Identical behaviour today (AMBDAC=0 → adc_sat_neg always 0); differs only if     |
-|         | AMBDAC is enabled (layer v2). New helper `anyPositiveSaturation()`;              |
-|         | `allValidRange()` removed. No behaviour change. 36/36 tests, build OK.        |
-|         | Also renamed `_rsqm_set_probe_state()` to `_rsqm_request_probe_state()`:    |
-|         | a debounce gate that commits a state only after N consecutive identical     |
-|         | requests, not an imperative setter; the name now matches its `requested`    |
-|         | parameter and contract. Private method, no signature/behaviour change.      |
-|         | Removed the diag-task on-state-change trigger (`xTaskNotify` from           |
-|         | `_rsqm_request_probe_state`); `_diag_task_body` now polls via `vTaskDelay`  |
-|         | every rsqm_diag_period_ms (5 s). The notification only advanced the first   |
-|         | diagnostic by <=5 s while no patient was present (no value) and woke the    |
-|         | task pointlessly on transitions into APPLIED/SATURATING. Behaviour change.  |
-|         | Detector: the two `_rsqm_request_probe_state()` call sites (DISCONNECTED    |
-|         | branch + else) collapsed into one flat if/else-if priority ladder with a    |
-|         | single call, matching the priority order already in §5.6.                   |
-|         | Readability only, no behaviour change.                                      |
-|         | Diag task gate is now a whitelist (DISCONNECTED || NOT_APPLIED) instead     |
-|         | of a blacklist (not APPLIED, not SATURATING). Runs runAfeDiagnostics only   |
-|         | in states with no patient confirmed. Any future ProbeState defaults to      |
-|         | NOT diagnosing → never silently interrupts acquisition. Equivalent for      |
-|         | today's four states; no behaviour change.                                   |
-|         | Gate G0 in _hgac_update() rewritten to an explicit gate-OFF blacklist:      |
-|         | `NOT_APPLIED || DISCONNECTED || HW_SETTLING` instead of the `probe_active`  |
-|         | helper + double negation. Equivalent today (4 states); readability per      |
-|         | Alex. Trade-off recorded: a future ProbeState is NOT gated off (fail-open), |
-|         | unlike the diag-task whitelist above — revisit the list when adding states. |
-|         | Also in _hgac_check_tiaguard(): removed the single-use `tiaguard` bool +    |
-|         | `!tiaguard`; the early-return now tests the condition directly (De Morgan). |
-|         | Removed HGAC gain-floor signal end-to-end: bit HGAC_DIAG_GAIN_FLOOR         |
-|         | (0x10000), members _hgac_alarm_gain_floor_led1/2, param alarm_flag of       |
-|         | _hgac_check_tiaguard, AFE4490DebugData.hgac_alarm_gain_floor, getter        |
-|         | test_hgac_alarm_gain_floor, the $M4 HGAC_ALARM field (frame 37->36 cols),   |
-|         | and §5.8.6. No consumer ever decoded the bit (script parses <=col33;        |
-|         | motherBoard only prints diag_code). Behaviour change (bit gone from         |
-|         | diag_code, one fewer $M4 field). test_hgac Test 5 repurposed to assert      |
-|         | RF reaches the floor (RF_10K).                                              |
-|         | Renamed hgac_settle_time_s -> afe_settle_time_s: it arms the RSQM settling  |
-|         | countdown and models AFE front-end re-settling after any register change,   |
-|         | not an HGAC-specific quantity (comment already anticipates config-change    |
-|         | producers). Private constexpr, no public API break.                         |
-| v0.49-experiment | **Rename TIASAT → TIAGUARD + debounce naming; `adc_code` convention.**  |
-|         | The HGAC over-threshold condition was named "TIASAT" (TIA saturation) — it   |
-|         | collided with RSQM's `PROBE_SATURATING` and misled: the guard trips at        |
-|         | `GUARD_V`=0.9 V, BELOW full-scale, so it is *preventive*, not saturation.     |
-|         | Renamed the condition to **TIAGUARD**. Debounce state/threshold renamed to    |
-|         | drop the count/samples ambiguity: `_hgac_tiasat_count_led1/2` →               |
-|         | `_hgac_tiaguard_debounce_count_led1/2`, `_hgac_tiasat_min_samples`  |
-|         | → `_hgac_tiaguard_debounce_min_samples`, `hgac_tiasat_persist_s` /            |
-|         | `setHgacTiasatPersistS()` → `hgac_tiaguard_debounce_min_s` /                  |
-|         | `setHgacTiaguardDebounceMinS()`, `_hgac_check_tiasat()` →                     |
-|         | `_hgac_check_tiaguard()`. `$SET`/`$LCFG` wire key updated in `src/main.cpp`   |
-|         | (no consumer in `pulsenest_lab.py`). Naming rule adopted: ADC output uses     |
-|         | `adc_code`, NEVER `count`; `count` freed for dynamic sample counters (project  |
-|         | convention, e.g. `_sample_count`) → state `_hgac_tiaguard_debounce_count`;     |
-|         | fixed sample thresholds use `_min_samples`. No behaviour change.              |
-|         | 36/36 native tests, ESP32-S3 (incunest_V16) build OK.                         |
-| v0.48-experiment | **Single source of truth for the v_tia axis: `namespace tia_axis`.**|
-|         | The five ordered thresholds (IDEAL 0.6 / GUARD 0.9 / FS 1.0 / ADC_SAT 1.2 / LIN  |
-|         | 1.8 V) were scattered across `AFE4490AnalogState` (physics constexpr) and        |
-|         | `AFE4490Config` (HGAC policy defaults). Now defined ONCE in `tia_axis`, with a    |
-|         | `static_assert` enforcing the strict ascending order at compile time.            |
-|         | `kVTiaFs/Lin` and the `hgac_v_tia_thr/ideal` defaults derive from it.    |
-|         | `setHgacVTiaThr()` now clamps to ≤ FS_V (guard can't sit above the reliable   |
-|         | range at runtime). Values unchanged → no behaviour change except that clamp.     |
-|         | ADC_SAT_V is nominal; `kAdcSatPos` stays the empirical adc_code rail. 36/36 tests.  |
-| v0.47b-experiment | **Readability: RSQM's PROBE_SATURATING check uses `allValidRange()`.** |
-|         | `_rsqm_update()` classified saturation via `!otLed1Valid() \|\| !otLed2Valid()`  |
-|         | (two locals). Replaced by `!as.allValidRange()` — exact equivalent, but asks the |
-|         | channels' RANGE directly instead of borrowing OT-validity semantics (a separate  |
-|         | concern that may evolve independently of "in range"). Aligns the code with its   |
-|         | own comment ("channel not CH_VALID_RANGE → SATURATING"). No behaviour change.     |
-|         | `otLed1Valid()`/`otLed2Valid()` removed — unused after this change, no dead API.  |
-|         | 36/36 native tests, build OK.                                                     |
-| v0.47-experiment | **Default LED current 20 mA → 50 mA (preliminary, dev-phase).** Both**  |
-|         | `_afe_led1/2_current_mA` = 50.0 → DAC code 85 (0x55), ~49.8 mA. Purpose:    |
-|         | gain field experience at higher drive. Rationale (2026-07-27): the LED      |
-|         | rating is NOT the limit — at the AFE's pulsed ~25 % duty, 50 mA peak sits    |
-|         | ≪ I_FP 100 mA and ~23 mW ≪ Pd, so there is ample margin (datasheet Medle,    |
-|         | reliability-caveated). Side-effects: (a) TIA does NOT saturate — measured   |
-|         | v_tia < 0.5 V, finger, 50 mA/RF_100K (neonatal case uncharacterised); |
-|         | (b) §8 timing note,                                                         |
-|         | ambient settling t5/t11 raised 200→400 counts (100 µs) for the 50 mA drive |
-|         | (longer LED extinction / CF discharge tail); (c) skin-thermal envelope      |
-|         | (ISO ≤41 °C) still uncharacterised. Spec §3/§8 default+timing tables updated.|
-|         | Also: **inlined Gate G0 into `_hgac_update()`** — removed the single-use    |
-|         | `_hgac_gate_ok()` helper so the gate's condition and its consequences (reset |
-|         | TIAGUARD debounce + return) read together; the design rationale lives here in  |
-|         | §5.8, not in a 12-line code comment. No behaviour change.                    |
-| v0.46-experiment | **Rename `AFE4490ChState` to an increasing-range scale (all suffixed**  |
-|         | `_RANGE`): `CH_CLEAN`→`CH_VALID_RANGE`, `CH_OFF_SPEC`→`CH_EXTENDED_RANGE`,  |
-|         | `CH_CLIPPED`→`CH_CLIPPED_RANGE`; helpers `chClean()`→`chValidRange()` and    |
-|         | `allClean()`→`allValidRange()`. Motivation (Alex, 2026-07-26): the old       |
-|         | `CLEAN`/`OFF_SPEC` mix wasn't parallel; the new trio reads as one monotone   |
-|         | scale of `v_tia` bands and drops the earlier `chInValidRange` proposal  |
-|         | (ambiguous "in-valid"). "VALID" = TI's guaranteed-linear range (±1.0 V), NOT |
-|         | that EXTENDED is invalid — enum comment clarifies the nuance. Pure rename:   |
-|         | no behavior change. Propagated to `pulsenest_lab.py`, `pulsenest_lab_spec.md`|
-|         | and `test_hgac.cpp`. 36/36 native tests, ESP32-S3 (incunest_V16) build OK.  |
-| v0.45-experiment | **New `ProbeState::PROBE_SATURATING` — splits the TIAGUARD condition out**|
-|         | of `PROBE_NOT_APPLIED`, resolving the open question from v0.44d/§5.8.2      |
-|         | about HGAC's gate (Alex, 2026-07-23: "no entiendo por qué un fallo en la    |
-|         | detección de PROBE_APPLIED se deba corregir modificando RF o ILED").        |
-|         | `_rsqm_update()`: `!as.otLed1Valid()`/`!as.otLed2Valid()` (channel not      |
-|         | `CH_VALID_RANGE`) now yields `PROBE_SATURATING` directly, checked BEFORE the      |
-|         | `rsqm_ot_thr` comparison — no longer OR'd into the same `NOT_APPLIED` as    |
-|         | "OT valid but reads high" (genuine no-tissue). Enum value appended (0-2    |
-|         | unchanged) to keep `$M2`/`$M3`/`$M4` wire encoding stable. Consumers:       |
-|         | SpO2/HR1/HR2/HR3/RSQI need no change (already gate on `!= PROBE_APPLIED`); |
-|         | `_hgac_gate_ok()` simplified to `== PROBE_APPLIED \|\| == PROBE_SATURATING` |
-|         | (§5.8.2) — no longer needs the coarse `!= PROBE_DISCONNECTED` and no       |
-|         | longer opens during ordinary probe-idle `NOT_APPLIED`; `_diag_task_body()` |
-|         | (§5.7) updated to also skip periodic diagnostics during `PROBE_SATURATING` |
-|         | (a real saturation event may involve a real patient, and HGAC needs to act |
-|         | undisturbed). `pulsenest_lab.py`: `PROBE_SATURATING=3` added to the 4      |
-|         | mirror TestCalc classes and the `AFESweepTestWindow` combo; new dedicated  |
-|         | background color in SIGNAL STATS (orange, distinct from NOT_APPLIED's     |
-|         | amber). Test stimulus in `test_hgac.cpp` (`SAT_LED1_CODE`) raised from     |
-|         | ~0.973 V to ~1.087 V so it actually trips `PROBE_SATURATING` under the new |
-|         | gate (the old value stayed CH_VALID_RANGE, which now yields plain NOT_APPLIED —  |
-|         | correctly excluded from HGAC's gate, so the old tests would otherwise      |
-|         | fail). Verified: 36/36 native tests (`test_biquad` pre-existing unrelated  |
-|         | failure), ESP32-S3 V16 build OK.                                          |
-| v0.44d-experiment | **Renamed "descent" → "TIASAT" (TIA saturation) for the condition,**    |
-|         | kept a plain action verb for the response. Alex: the "descent" concept      |
-|         | conflated the CONDITION being debounced (TIA saturating) with the ACTION    |
-|         | taken in response (step RF down) — and doesn't appear in the datasheet.    |
-|         | Split cleanly: `_hgac_descent_count_led1/2` → `_hgac_tiasat_count_led1/2`,  |
-|         | `hgac_descent_persist_s`/`setHgacDescentPersistS()` →                      |
-|         | `hgac_tiasat_persist_s`/`setHgacTiasatPersistS()`, `_hgac_descent_min_      |
-|         | samples` → `_hgac_tiasat_min_samples`, `_hgac_check_descent()` →            |
-|         | `_hgac_check_tiasat()` (condition side); `_hgac_descend_rf()` →             |
-|         | `_hgac_step_rf_down()` (action side, unrelated to TIASAT — a plain verb).   |
-|         | `$SET`/`$LCFG` wire key `hgac_descent_persist_s` → `hgac_tiasat_persist_s`   |
-|         | *(these `tiasat` names were later renamed to `tiaguard` in v0.49 — see below)* |
-|         | in PulseNest `src/main.cpp` (no consumer in `pulsenest_lab.py` yet, so no   |
-|         | Python-side break). Test accessors `test_hgac_descend_rf_led1/2` →         |
-|         | `test_hgac_step_rf_down_led1/2`. Test *function names* (e.g.               |
-|         | `test_hgac_descent_after_persistence`) and prose describing the general    |
-|         | English action ("descent"/"step down") were left alone — only the         |
-|         | conflated identifier family was in scope. Verified: 36/36 native tests     |
-|         | (`test_biquad` pre-existing unrelated failure), ESP32-S3 V16 build OK.     |
-| v0.44c-experiment | **Removed `_hgac_invalid_ema` — Gate G0's invalid-fraction clause was**|
-|         | self-defeating, not just redundant (§5.8.2). It gated HGAC's corrective     |
-|         | action on the EMA'd fraction of `!allValidRange()` samples — the same signal    |
-|         | HGAC exists to fix — with a faster time constant (0.2 s window, crosses    |
-|         | 0.5 after ~139 ms of continuous saturation) than the descent debounce it   |
-|         | gates (0.5 s persistence), so sustained saturation closed the gate and     |
-|         | reset the descent counters before the debounce could ever complete —      |
-|         | blocking the fix exactly when needed most. Never caught by tests: the only |
-|         | descent test uses a stimulus that stays below `kVTiaFs` so `allValidRange()`|
-|         | never went false. Removed: `_hgac_invalid_ema` member, `hgac_gate_invalid_ |
-|         | frac_max`/`hgac_gate_window_s` config fields + `setHgacGateInvalidFracMax()`|
-|         | setter + its `$SET`/`$LCFG` wiring in PulseNest `src/main.cpp`. `_hgac_gate_|
-|         | ok()` keeps only the `probe_state`/`HW_SETTLING` clauses (§5.8.2 deviation  |
-|         | discussion unchanged, still open). Verified: 36/36 native tests (`test_    |
-|         | biquad` pre-existing unrelated failure), ESP32-S3 V16 build OK.            |
-| v0.44b-experiment | **Readability refactor of `_hgac_check_descent()`, no behavior change**|
-|         | (`incunest_afe4490.cpp`). The O8.1 debounce increment/check was duplicated  |
-|         | across the "at gain floor → alarm" and "not at floor → descend" branches,   |
-|         | with two different increment idioms (capped vs unconditional pre-increment) |
-|         | that made the two paths hard to compare. Hoisted the debounce check once,  |
-|         | shared by both outcomes; the `cur_rf == RF_10K` branch now only decides     |
-|         | alarm-vs-descend after debounce is already satisfied. Verified equivalent:  |
-|         | 6/6 `test_hgac.cpp` (incl. `test_hgac_descent_debounce`,                    |
-|         | `test_hgac_alarm_at_gain_floor`), ESP32-S3 V16 build OK.                    |
-| v0.44-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): `rsqm_ot_thr` widened**|
-|         | 8.5e-5 → 1.0e-4 (§5, §10). First real-HW test (CONTEC MS100 simulator,      |
-|         | probe applied) found `probe_state` never reached PROBE_APPLIED at the       |
-|         | theoretical 8.5e-5 estimate — the simulator is very sensitive to probe      |
-|         | placement and reads OT above that value routinely. Practical mitigation,   |
-|         | not an empirical calibration with a real neonatal probe/patient.           |
-| v0.43-experiment | **Naming cleanup, no behavior change: `_verb_algorithm()` → `_algorithm_verb()`**|
-|         | across the whole class, matching the prefix convention already used by     |
-|         | every member variable (`_hr2_buf`, `_spo2_a`, `_rsqm_led1_sub_ema`, ...)    |
-|         | and by the HR2/HR3 task methods (`_hr2_task_body`). 15 renames: `_update_rsqm`|
-|         | → `_rsqm_update`; `_update_hgac` → `_hgac_update`; `_update_spo2` →         |
-|         | `_spo2_update`; `_update_hr1` → `_hr1_update`; `_update_hr2_sample` →       |
-|         | `_hr2_update_sample`; `_linearize_hr2` → `_hr2_take_snapshot`; `_compute_hr2`   |
-|         | → `_hr2_compute`; `_update_hr2` (test-only sync wrapper) →                 |
-|         | `_hr2_update_for_test` (name now signals it is never called from           |
-|         | production — see §5.3); `_hr2_calc_sem` → `_hr2_compute_sem` (names the    |
-|         | function it gates, `_hr2_compute()`, instead of a generic "calc"); same    |
-|         | 5 renames mirrored for HR3 (`_update_hr3_sample`/`_linearize_hr3`/         |
-|         | `_compute_hr3`/`_update_hr3`/`_hr3_calc_sem`); `_set_probe_state` →        |
-|         | `_rsqm_set_probe_state` (RSQM's debounce gate — previously had no          |
-|         | algorithm prefix at all). Pure rename: no signatures, semantics, or        |
-|         | timings changed. Verified: 36/36 native tests (`test_biquad` pre-existing  |
-|         | unrelated failure), ESP32-S3 V16 build OK (18.4% RAM / 30.1% flash).       |
-|         | Living spec sections (§1, §3d, §5, §9, §11) updated to the new names;      |
-|         | this table (historical record) keeps the old names as they were at each   |
-|         | past version. Spec §1.3, §3d, §5.1-§5.4, §5.6-§5.8, §9.3/§9.7, §11, §14.  |
-| v0.42-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): same `probe_state`  |
-|         | design as v0.41's SpO2 applied to HR1/HR2/HR3.** `_update_hr1(float ir,    |
-|         | ProbeState probe_state)`, `_update_hr2_sample(...)`, `_update_hr3_sample(  |
-|         | ...)` all gained the `probe_state` parameter — consumed, never computed.  |
-|         | While `probe_state != PROBE_APPLIED`: all internal state (HR1's DC filter/ |
-|         | running max/threshold flag/peak+interval indices/RR buffer/MA buffer;     |
-|         | HR2's bandpass filter + circular buffer; HR3's low-pass filter + circular  |
-|         | buffer) resets every sample (idempotent, same pattern as SpO2 — no stored |
-|         | "previous state" needed), and `hr1/hr2/hr3` + their `_sqi` fields are     |
-|         | forced to `NaN`/`0`, unifying the sentinel across all 4 algorithms. For   |
-|         | HR2/HR3 the gate lives in the fast per-sample path (shared by the         |
-|         | production call site and the sync test wrapper), so the slow autocorr/FFT |
-|         | task (Task B/C) is never signalled while not applied. Test wrappers       |
-|         | `test_feed_hr1/hr2/hr3()` gained the `probe_state` parameter. New tests   |
-|         | `test_hr1/hr2/hr3_not_applied_resets` (reset + fresh-buffer/interval-count |
-|         | on reapply). `pulsenest_lab.py` mirrors: `HR1TestCalc`/`HR2TestCalc`/      |
-|         | `HR3TestCalc.update()` all gained `probe_state`, resetting + returning    |
-|         | `NaN`/`0` identically; all call sites (offline CSV loaders, live feeds,   |
-|         | `PPGMonitor`) updated — the unrelated `HRFFTCalc`/`self.hr3_calc`         |
-|         | (HR3LAB diagnostic window) deliberately left untouched (separate class,  |
-|         | no inheritance, out of scope). Verified: 36/36 native tests (test_biquad  |
-|         | pre-existing unrelated failure), `py_compile` clean. Spec §5.2-§5.4, §14. |
-| v0.41-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): presence detection  |
-|         | fully delegated to RSQM — `spo2_min_ot_dc` removed too.** `_update_spo2()`  |
-|         | gained a third parameter, `ProbeState probe_state` (RSQM's classification, |
-|         | consumed — never computed internally). While `probe_state != PROBE_APPLIED`|
-|         | (covers both `PROBE_NOT_APPLIED` and `PROBE_DISCONNECTED`): both EMAs are  |
-|         | reset every sample (idempotent — no stored "previous state" needed; warmup |
-|         | restarts naturally via `ir_ema.count` once `PROBE_APPLIED` resumes), and   |
-|         | `pi`/`spo2`/`spo2_r` are set to `NaN` (not `-1.0f` — a forgotten `sqi`      |
-|         | check on `NaN` fails safe: comparisons are always false, so e.g. a naive   |
-|         | `spo2 < 70` alarm never fires on `NaN`, whereas it would on `-1.0f`).       |
-|         | `spo2_min_ot_dc`/`spo2_ac_div_eps` collapsed into one `spo2_div_eps`        |
-|         | (`1e-9`), a purely numerical division-safety guard on the actual divisors  |
-|         | (`dc_ir` for PI, `dc_red`/`ac_ir` for R) — not physiological, since that's  |
-|         | now `probe_state`'s job. `_spo2_sample_count` removed (redundant with      |
-|         | `EmaChannel::count`, always incremented in lockstep). Output contract now  |
-|         | uniform: `sqi==0 ⟹ pi==spo2==spo2_r==NaN`, across warmup, not-applied, and |
-|         | the division guard alike (previously only the near-zero-mean PI branch    |
-|         | used a sentinel; the rest left outputs stale). Verified: 7/7 `test_spo2`   |
-|         | (new `test_spo2_not_applied_resets` covers reset + fresh-warmup-on-reapply)|
-|         | + 33/33 other native tests, ESP32-S3 build (16.4 KB RAM / 828 KB flash).   |
-|         | Spec §5.1, §14.                                                            |
-| v0.40-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): removed the        |
-|         | `spo2_min_i_pd_a` "no-finger" gate added in v0.38.** Analysis (2026-07-15)  |
-|         | showed it rarely detected an actual no-finger condition (a transmittance    |
-|         | probe with no finger shows HIGH OT, not low i_pd) and mostly duplicated,    |
-|         | with a weaker/uncalibrated criterion, RSQM's own `PROBE_DISCONNECTED`.      |
-|         | `_update_spo2()` signature simplified to `(ot_ir, ot_red)` — no more        |
-|         | `i_pd_ir`/`i_pd_red`. Replaced by `spo2_min_ot_dc` (A/A, `1e-6` placeholder)|
-|         | applied only to `dc_ir`/`dc_red`; the AC side keeps a separate purely      |
-|         | numerical guard `spo2_ac_div_eps` (`1e-9`, on `ac_ir` only) — conflating   |
-|         | the two into one shared threshold was tried first and broke 4/7           |
-|         | `test_spo2` cases (AC legitimately gets tiny at low PI). `setSpO2MinIPdA()`|
-|         | removed; `spo2_min_i_pd_a` removed from `AFE4490Config`. Spec §5.1, §14.   |
-| v0.39-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): HR1/HR2/HR3     |
-|         | input migrated to OT**, completing the migration started in v0.38 (SpO2).   |
-|         | `_update_hr1/hr2/hr3()` and their fast-path helpers now take `float`        |
-|         | (`as.ot_led1`) instead of `int32_t led1_sub`. HR1 (peak timing) and HR3     |
-|         | (HPS ratio) needed no threshold recalibration — pure domain/type change.    |
-|         | HR2's near-zero-energy guard (`acorr0 < 1.0f`) recalibrated to              |
-|         | `acorr0 < hr2_ot_energy_eps` (1e-16) for OT-scale magnitudes. All 3 test    |
-|         | suites rewritten with OT-realistic magnitudes (previously still used raw   |
-|         | count-scale values that happened to pass by coincidence, since all three   |
-|         | algorithms are scale-invariant). Spec §5.2/§5.3/§5.4, §14.                  |
-| v0.38-experiment | **EXPERIMENT (branch `experiment/ot-domain-inputs`): SpO2 input      |
-|         | migrated from raw adc_code to OT.** `_update_spo2()` now takes            |
-|         | `(ot_ir, ot_red, i_pd_ir, i_pd_red)` instead of `(led1_sub, led2_sub)`.      |
-|         | New `spo2_min_i_pd_a` (replaces `spo2_min_dc`) — no-finger gate on          |
-|         | absolute i_pd magnitude, not the OT ratio (unreliable near zero signal).    |
-|         | `_hgac_descend_rf()` no longer rescales the SpO2 EMA — OT is gain-invariant |
-|         | by construction, so `EmaChannel::rescale()` is now dead code (removed).     |
-|         | `library.json` platforms/frameworks unblocked earlier (v0.37) already      |
-|         | covers native testing of this change. Spec §5.1 (rewritten), §14.          |
-|         | Not yet migrated: HR1/HR2/HR3 (still raw-domain, lower priority — see      |
-|         | project memory), `pulsenest_lab.py` mirror classes (impact analyzed, not   |
-|         | resolved — see project memory).                                            |
-| v0.37   | **HGAC Phase 1: RF-only saturation guard + descent + mandatory SpO2 EMA    |
-|         | rescale** (`_update_hgac()`, runs after `_update_rsqm()` in                 |
-|         | `_process_sample()`). New `AFE4490Config` fields `hgac_enable`,             |
-|         | `hgac_v_tia_thr`, `hgac_v_tia_ideal`, `hgac_descent_persist_s`,   |
-|         | `hgac_gate_invalid_frac_max`, `hgac_gate_window_s` (promoted from the       |
-|         | former fixed `hgac_v_tia_thr/ideal` constexpr in the .cpp anonymous    |
-|         | namespace). New bit `HGAC_DIAG_GAIN_FLOOR` (0x10000). First real producer  |
-|         | of `RSQM_DIAG_HW_SETTLING` (previously unreachable). `EmaChannel::rescale()`|
-|         | added. Gate G0 implemented as `probe_state != PROBE_DISCONNECTED` (not     |
-|         | literally `== PROBE_APPLIED` as in the original design axiom — avoids a    |
-|         | deadlock where saturation-induced OT invalidity would block the descent    |
-|         | that clears it). No ascent yet (manual recovery) — disabled by default.    |
-|         | `AFE4490DebugData` gained `hgac_rf_led1/led2`/`hgac_alarm_gain_floor`.      |
-|         | New unit tests `test/test_hgac/test_hgac.cpp`. Include-hygiene fix:        |
-|         | added missing `<cstring>`/`<cmath>` to the non-OFFLINE branch (the plain    |
-|         | `UNIT_TEST`/native path lacked them; real Arduino.h happened to provide    |
-|         | them transitively). Spec §5.8 (new), §3d, §5.6.3, §10.9 (new), §14.        |
-| v0.36   | DiagCode RSQM flags renamed `RSQM_*` → `RSQM_DIAG_*` (symmetric with        |
-|         | `AFE_DIAG_*`; avoids collision with operative `rsqm_*` config params).      |
-|         | Documented as ANTICIPATORY CODE: no programmatic consumer beyond the        |
-|         | aggregate `rsqi` gate; intended consumer is HGAC, which may never read      |
-|         | them. `RSQM_DIAG_HW_SETTLING` noted as currently unreachable (nothing       |
-|         | sets `_rsqm_settling_countdown > 0`). Spec §5.6.3.                          |
-| v0.35   | `AFE4490AnalogState`: value-always invalidity policy. New fields             |
-|         | `ot_led1`/`ot_led2` (OT moved from `_update_rsqm()` to                       |
-|         | `_compute_analog_state()`); 4 validity masks (adc_sat_pos/neg,               |
-|         | tia_over_fs/lin, bit=channel per new `AFE4490Ch` enum); helpers +            |
-|         | `chState()` (`AFE4490ChState`: CH_VALID_RANGE/CH_EXTENDED_RANGE/CH_CLIPPED_RANGE,              |
-|         | precedence CLIPPED>OFF_SPEC>CLEAN); physical constants in struct             |
-|         | (kVTiaFs=1.0, kVTiaLin=1.8, kAdcSatPos/Neg=±2096700: empirical       |
-|         | rails +2096921/−2096919 with ~220-code guard — ALED codes near the          |
-|         | negative rail oscillate without pinning due to ADC averaging).               |
-|         | Removed `rsqm_ot_saturated` sentinel and `rsqm_adc_positive_sat`;            |
-|         | `hgac_v_tia_fs` superseded by `kVTiaFs`. RSQM saturation            |
-|         | policy now explicit and stricter (`otLedxValid()`: both channels             |
-|         | CH_VALID_RANGE, both rails, TIA linearity). Spec §3c, §5.6.2, §5.6.3.              |
-| v0.32   | Default values changed: LED1/LED2 current 11.7 mA → ~19.9 mA (code 34,  |
-|         | range 150 mA), TIA gain RF_500K → RF_100K. Matched to Medle probe at     |
-|         | 20 mA. Spec tables updated (§3, §8 TX/RX params, §9 register decisions). |
-| v0.31   | HR3 SQI: redesigned as two-bin HPS fraction in a local window. Replaces    |
-|         | P[k] local prominence (v0.30), which was limited to SQI ≤ 0.19 due to     |
-|         | the Hann window spreading FFT energy across 3 bins (P[k]/P[k±1] ≈ 4,      |
-|         | not the assumed 10³). New metric: numerator = hps(peak_bin)+hps(b_other)  |
-|         | where b_other is the adjacent bin in the direction of fractional delta;     |
-|         | denominator = Σhps over ±hr3_sqi_local_w bins around both peak bins.       |
-|         | Bin-position-independent: off-bin energy split cancels in the ratio.        |
-|         | Removed `hr3_sqi_local_ratio`. Spec §5.4 updated. Header bumped to v0.31. |
-| v0.30   | HR3 SQI: switched from HPS to P[k] for local prominence computation.       |
-|         | HPS product (cubic amplification) saturated SQI to 1 for any real signal.  |
-|         | P[k] has linear dynamic range; `hr3_sqi_local_ratio` raised 10→100.        |
-|         | `p_interp` reuses yp/y0/yn already computed for frequency interpolation.   |
-|         | Spec §5.4 updated. `incunest_afe4490_spec.md` header bumped to v0.30.      |
-| v0.29   | HR3 true-peak validation widened: `hr3_peak_valid_w=5` — peak_bin must be  |
-|         | strict maximum in ±5 bins (including outside search range). Replaces ±1     |
-|         | neighbor check. Detects slope maxima and boundary humps more robustly.      |
-|         | HR3 SQI simplified: global SQI and geometric mean removed; only local       |
-|         | prominence (±hr3_sqi_local_w) remains. Eliminates false-high SQI when       |
-|         | sqi_local stayed near 1.0 while the signal was absent. Spec §5.4.          |
-| v0.28   | HR3 SQI redesigned: combined global fraction + local prominence (geometric  |
-|         | mean). `hr3_sqi_local_w=5` (±0.49 Hz window), `hr3_sqi_local_ratio=10.0`.  |
-|         | Detects movement-artifact humps that fool the global metric. Spec §5.4.    |
-|         | True-peak validation: reject boundary maxima by checking HPS neighbors      |
-|         | outside search range — fixes false HR/SQI from low-freq movement artifacts. |
-| v0.27   | RSQM (Raw Signal Quality Monitor). `ProbeState` enum                        |
-|         | (PROBE_DISCONNECTED / PROBE_NOT_APPLIED / PROBE_APPLIED). `DiagCode`        |
-|         | bitmask constants RSQM_AMB_SAT, RSQM_SIGNAL_WEAK, RSQM_HW_SETTLING         |
-|         | (renamed RSQM_DIAG_* in v0.36).                                             |
-|         | `AFE4490Data` gains `rsqi`, `diag_code`, `probe_state`. EMA estimators      |
-|         | (α_mean=0.02, α_var=0.004, ready after 750 samples). Probe detection via   |
-|         | `optical_transmittance` (single threshold 0.30, no hysteresis) + 100-sample  |
-|         | debounce in `_set_probe_state()`. RSQM runs first in `_process_sample()`    |
-|         | at 500 Hz. Spec §5.6 added.                                                 |
-| v0.26   | Decouple STAGE2EN1/STAGE2EN2 from Stage 2 gain. `stg2_gain_code[]` now         |
-|         | contains only D[10:8] gain bits (no enable). `setStage2En1(bool)` and          |
-|         | `setStage2En2(bool)` expose STAGE2EN1 (D14 of TIAGAIN) and STAGE2EN2           |
-|         | (D14 of TIA_AMB_GAIN) as independent explicit parameters. `AFE4490Config`      |
-|         | gains `afe_stg2_en_led1` and `afe_stg2_en_led2`. `$CFG` frame gains                |
-|         | `stage2en1` and `stage2en2` fields. `$SET,stage2en1/2,<0\|1>` commands added.  |
-|         | PulseNest HW CONFIG TIA section gains STAGE2EN1/STAGE2EN2 checkboxes.          |
-|         | STAGE2EN2 is still forced ON when AMBDAC > 0.                                  |
-| v0.25b  | Fix `setAmbDac()`: `_apply_analog_regs()` now sets STAGE2EN2 (D14 of          |
-|         | TIA_AMB_GAIN) automatically when `uA > 0`. Stage 2 must be active for AMBDAC  |
-|         | to have effect; STAGE2EN2 is independent of TIAGAIN's Stage 2 enable even    |
-|         | with ENSEPGAIN=0.                                                            |
-| v0.25   | `setAmbDac(uint8_t uA)`: exposes AMBDAC[3:0] in TIA_AMB_GAIN D19:D16.      |
-|         | `AFE4490Config` gains `afe_ambdac_uA`. `$CFG` frame gains `ambdac` field.   |
-|         | PulseNest HW CONFIG window gains "Ambient Cancellation" group with AMBDAC   |
-|         | spinbox and `$SET,ambdac,<value>` command.                                  |
-| v0.25   | LED current setters now store the actual DAC-quantised value (nearest step  |
-|         | of range/256 mA) instead of the requested float. `setLEDRange()` re-        |
-|         | quantises both currents to the new grid. `getConfig()` thus returns the      |
-|         | real programmed current. New private helper `_quantize_led_mA()`.           |
-| v0.25   | HR valid lower bound raised: `hr_min_bpm` 30→**40 BPM**.                  |
-|         | `hr_search_min_bpm` 27→37 BPM (guard band: hr_min − 3). Python:           |
-|         | `FW_HR_MIN_BPM` (HR1/HR2/HR3TestCalc) and `HR_MIN_HZ` (HRFFTCalc)         |
-|         | updated accordingly.                                                       |
-| v0.24   | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
-|         | via 13 new setters (setSpO2WarmupS, setSpO2EmaMeanTauS, setSpO2EmaVarTauS,   |
-|         | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
-|         | setHR1MaCutoffHz, setHR1SqiCvMax, setHR2MinCorr, setHR2UpdateInterval,    |
-|         | setHR3UpdateInterval, setHRValidRange). hr_search_{min,max}_bpm now        |
-|         | derived from hr_{min,max}_bpm ± 3 BPM guard band.                         |
-| v0.23   | `runAfeDiagnostics(diag_holdoff_ms = 10)`: post-diagnostic holdoff window.     |
-|         | After DIAG_EN is cleared, `_task_body()` feeds frozen last-valid raw ADC   |
-|         | values into `_process_sample()` for `diag_holdoff_ms` ms, replacing analog |
-|         | re-settling artefacts with neutral constant input that filters absorb       |
-|         | gracefully. Default 10 ms covers worst-case TIA settling (RF_1M+CF_155P:   |
-|         | 5τ ≈ 775 µs). Set to 0 to observe raw artefacts. Spec §2.5b updated.       |
-| v0.22   | `runAfeDiagnostics()` redesigned: `_diag_active` flag replaces long mutex hold. |
-|         | `_spi_mutex` held only for brief SPI transactions, eliminating priority       |
-|         | inversion. During the ~10 ms diagnostic window, `_task_body()` repeats the   |
-|         | last valid sample into the queue (under `_state_mutex`) on each DRDY instead  |
-|         | of dropping it, preserving temporal equi-spacing for HR2/HR3 and reducing     |
-|         | IIR filter discontinuity at resumption. Spec §2.5b updated.                  |
-| v0.21   | Parameters Reference added (§10): consolidated catalogue of all parameters  |
-|         | that influence library outputs, organised by layer: AFE hardware config     |
-|         | (§10.1), pre-processing (§10.2), SpO2 (§10.3), HR1 (§10.4), HR2 (§10.5),  |
-|         | HR3 (§10.6), range/validation (§10.7), and out-of-scope environmental       |
-|         | factors (§10.8). Version history moved to §13 (end of document).            |
-|         | §11 AFE4490 register config, §12 Bibliographic references renumbered.       |
-| v0.20   | Auto-CF: `_recalc_tia_cf()` selects the largest `AFE4490TIACF` that settles  |
-|         | within the adaptive TIA margin (10% of LED-on window, floor 12.5 µs).       |
-|         | `_compute_settle_margin()` shared by timing regs and auto-CF — always in     |
-|         | sync. Called from `_recalc_rate_params()` and `setTIAGain()`. `setTIACF()`  |
-|         | manual override still available. Default at 500 Hz / RF_500K: CF_20P        |
-|         | (was CF_5P). Spec §7.2 added.                                               |
-| v0.19   | Configuration readback: `AFE4490Config` struct + `getConfig()` method.      |
-|         | Returns a thread-safe snapshot of all runtime-configurable parameters       |
-|         | (sample rate, averages, LED currents, LED range, TIA gain/CF, stage 2 gain,|
-|         | PPG channel, filter type/cutoffs, HR2/HR3 filter cutoffs, SpO2 a/b).       |
-|         | Takes `_spi_mutex` + `_state_mutex` when initialized; safe before `begin()`.|
-| v0.18   | HR2_SQI: unbiased normalised autocorrelation. Previous biased estimator     |
-|         | systematically capped SQI at (N−τ)/N ≈ 0.875 at 60 BPM (τ=50, N=400)     |
-|         | even for a perfectly clean signal. Fix: divide by `acorr0·(N−τ)/N`         |
-|         | instead of `acorr0`. Clean signal now yields SQI ≈ 1.0 at all HR.          |
-|         | Updated: `_compute_hr2()` in `incunest_afe4490.cpp`, `HR2TestCalc.update()` |
-|         | in `pulsenest_lab.py`, `test_hr2.cpp` (thresholds raised to >0.95 clean,     |
-|         | >0.80 noisy). Spec §5.3. Observed with MS100 simulator: HR2 SQI ~0.9       |
-|         | vs HR1/HR3 ~1.0 — now consistent.                                           |
-| v0.17   | HR3_SQI: parabolic interpolation on HPS values (not P[k]) in numerator.    |
-|         | Fixes SQI collapse at inter-bin frequencies (e.g. 85 BPM = bin 14.5):      |
-|         | cubic product loss in HPS reduced SQI to ~0.5 for clean signals. Now SQI   |
-|         | > 0.80 across all frequencies. New unit test: `test_hr3_85bpm`. (§5.4)     |
-| v0.16   | Offline runner specification added (§9): `incunest_offline_runner` native C++   |
-|         | tool. `INCUNEST_OFFLINE` compile flag stubs Arduino/FreeRTOS and enables        |
-|         | `UNIT_TEST` API for algorithm-only builds. Hann window precomputation       |
-|         | moved to `_reset_algorithms()`. Input CSV: column-name-based parser,        |
-|         | format-agnostic, requires RED/IR/RED_Amb/IR_Amb/RED_Sub/IR_Sub. Output:        |
-|         | per-file `_result.csv` + `batch_summary.csv`. Build: CMake, C++17, no      |
-|         | external deps. Optional firmware delta columns for equivalence checking.    |
-| v0.15   | HR3_SQI redesigned: from linear spectral concentration to HPS peak           |
-|         | prominence (`HPS[peak_bin] / Σ HPS[k]`). Eliminates harmonic inflation of   |
-|         | the denominator. No new buffer — `hps_sum` accumulated in the existing loop. |
-|         | Updated: `incunest_afe4490.cpp` `_compute_hr3()`, `incunest_afe4490.h` comment,       |
-|         | `HR3TestCalc` in `pulsenest_lab.py`, spec §5.4.                               |
-| v0.14   | Timing instrumentation: `INCUNEST_TIMING_STATS` compile-time flag, `TimingStat` |
-|         | struct, `_emit_timing()` private method. Measures HR1/HR2/HR3/SpO2 per-call |
-|         | time and full cycle time (SPI + all algos) with `esp_timer_get_time()`.      |
-|         | `$TIMING` serial frame emitted every ~5 s. `TIMING` window added to         |
-|         | `pulsenest_lab.py` with green/orange/red budget indicator (budget = 2000 µs). |
-|         | Spec §8.4 added. Enabled in `platformio.ini` via `-DINCUNEST_TIMING_STATS=1`.    |
-| v0.13   | SQI continuous [0–1] for all algorithms. HR1_SQI: CV-based. HR2_SQI:       |
-|         | normalised autocorrelation peak. HR3_SQI: spectral concentration.           |
-|         | SpO2_SQI: PI-based (clamp PI from 0.5%–2.0%). All SQI fields added to      |
-|         | `AFE4490Data` and $M1 frame. 4 TEST windows completed (SPO2TEST, HR1TEST,  |
-|         | HR2TEST, HR3TEST). pulsenest_lab.py spec §8 updated.                          |
-| v0.12   | Added HR3 algorithm (FFT + HPS): `hr3`/`hr3_valid` in `AFE4490Data`,     |
-|         | `setHR3Filter()` in API, section 5.4. Self-contained radix-2 DIT FFT     |
-|         | in anonymous namespace. `_recalc_biquad_lp()` for LP anti-aliasing.      |
-|         | `INCUNEST_AFE4490_TASK_STACK` default 4096→8192. Architecture diagrams         |
-|         | (sections 1.1 and 1.3) updated. $M1 serial trama field 17 = HR3.        |
-| v0.11   | HR reported range corrected per ISO 80601-2-61 + neonatal use:           |
-|         | **[30, 250] → [25, 300] BPM**. Guard band updated to [22, 303] BPM.      |
-|         | `hr1_refractory_s` 0.200→0.185 s (covers 303 BPM guard: 198 ms period).   |
-|         | `hr2_min_lag_s` 0.22→0.185 s. `hr2_acorr_max_lag` 111→137 samples.      |
-|         | Python `HR_MIN_HZ`/`HR_MAX_HZ`/`HR_SEARCH_*` updated accordingly.        |
-| v0.10   | Guard band: internal HR search range extended to [27, 253] BPM (±3 BPM  |
-|         | beyond reported [30, 250] BPM). HR2: `hr2_acorr_max_lag` 100→111        |
-|         | (27 BPM @ 50 Hz). HR3 Python: `HR_SEARCH_MIN_HZ`/`HR_SEARCH_MAX_HZ`     |
-|         | added. `hr_search_min_bpm`/`hr_search_max_bpm` constants documented.     |
-| v0.9    | HR measurement range extended: 40–240 BPM → **30–250 BPM**.             |
-|         | `hr_min_bpm` 40→30, `hr_max_bpm` 240→250, `hr1_refractory_s` 0.3→0.2 s  |
-|         | (allows up to ~300 BPM), `hr2_acorr_max_lag` 75→100 samples (30 BPM    |
-|         | at 50 Hz). Spec header updated to v0.9.                                  |
-| v0.8    | Added HR2 algorithm (autocorrelation): `hr2`/`hr2_valid` in `AFE4490Data`, |
-|         | `setHR2Filter()` in API, section 5.3. Updated architecture diagrams        |
-|         | (sections 1.1 and 1.3). HR1/HR2 run in parallel in `_process_sample()`.   |
-|         | BiquadFilter refactored as struct; `_biquad_process()` extracted.          |
-|         | Section 5.2 (HR1) fully documented: DC removal IIR, moving average LP,    |
-|         | running-max threshold, refractory period, 5-interval averaging, peak       |
-|         | marker diagnostic, and key constants table.                                |
-| v0.7    | Added `stop()` (section 2.6): clean shutdown — detaches ISR, deletes       |
-|         | internal task and FreeRTOS objects, resets algorithm state. Allows          |
-|         | `begin()` to be called again. Added `_reset_algorithms()` (private).       |
-|         | Enables hot-swap between incunest_afe4490 and protocentral at runtime.          |
-| v0.6    | Biquad coefficients computed dynamically (`_recalc_biquad()`). Formula:    |
-|         | bilinear transform on a 2nd-order Butterworth bandpass prototype.          |
-|         | Coefficients moved from namespace constants to members `_bq_b0..a2`.       |
-|         | Called from `_recalc_rate_params()` and `setPPGDispFilter()`. The "not yet        |
-|         | implemented" warning removed. `setPPGDispFilter()` is now fully functional for    |
-|         | any fs, f_low, f_high.                                                     |
-| v0.5    | Internal constants reorganised at the top of the anonymous namespace in    |
-|         | `.cpp`, in snake_case. Algorithm time parameters expressed in physical      |
-|         | units (seconds): `spo2_warmup_s`, `dc_iir_tau_s`, `ac_ema_tau_s`,         |
-|         | `hr1_refractory_s`. New members `_spo2_warmup_samples`,                     |
-|         | `_hr1_refractory_samples`, `_dc_iir_alpha`, `_ac_ema_beta` derived from     |
-|         | `_sample_rate_hz` via `_recalc_rate_params()`, called in constructor and   |
-|         | in `setSampleRate()`. SpO2 and HR algorithms now correct at any PRF.       |
-| v0.4    | `AFE4490Data` extended with the 6 raw AFE4490 signals (led1, led2,         |
-|         | aled1, aled2, led1_aled1, led2_aled2). Struct is now equivalent in         |
-|         | information to the protocentral output.                                    |
-| v0.3    | Configurable NUMAV: added `setAdcAverages(uint8_t num)` to the API.        |
-|         | Section 11.1 with NUMAV_max formula, table by PRF, clamping behaviour and  |
-|         | SNR effect. `setSampleRate()` recalculates NUMAV_max.                      |
-|         | **First implementation:** `include/incunest_afe4490.h` and                      |
-|         | `src/incunest_afe4490.cpp` generated. Pending hardware validation.              |
-| v0.2    | Added section 11 with comparative register tables (timing, analog, control,|
-|         | init sequence). Sources: AFE44x0.h EVM TI v1.4, Datasheet AFE4490 Table 2,|
-|         | Protocentral src/. incunest_afe4490 values justified register by register.      |
-|         | Updated defaults: NUMAV=7, ENSEPGAIN=0, Stage2 disabled.                   |
-| v0.1    | Initial complete specification                                              |
+*Date* is the day the version's tag was made or, before tags were in use, the first commit carrying the
+version (up to v0.17 in PulseNest's repository, where the library lived until 2026-04-14; v0.1 to v0.7
+were already there in its first commit, 2026-03-18). The first row's date is the date of this
+specification; `scripts/check_version.py` requires it.
+
+| Version | Date          | Description                                                                 |
+|---------|---------------|-----------------------------------------------------------------------------|
+| v0.111  | 2026-10-29    | **Rename `WindowBlockClock::step()` → `tick()` (§5.1; Alex 2026-10-27).** A clock ticks |
+|         |               | once per full-rate sample and the call returns true on the tick that completes a   |
+|         |               | block; it advances the clock, so a predicate name (`completed()`) was rejected.    |
+|         |               | `Decimator::step()` unchanged. Same numbers; no wire or config change. Rationale   |
+|         |               | §12. Spec title brought to the library version (it had stayed at v0.106).          |
+| v0.110  | 2026-10-22    | **Pulse gate (§5.1, §10, rationale §17; decision Alex 2026-10-22):** SpO2 withheld   |
+|         |               | while `AFE4490Data::hr3` is NaN — `spo2_pulse_gate_enable` (default true),       |
+|         |               | `setSpO2PulseGateEnable()`. **Hold reason:** `AFE4490Data::spo2_hold_reason`     |
+|         |               | (`SpO2HoldReason` 0–7, first failing gate). PI 20 % ceiling: sources cited (§10). |
+|         |               | `_spo2_update()` locals renamed `eps_valid`, `reg_corr`, `reg_corr_ok` (Alex).  |
+|         |               | Tests: pulse gate on/off, return in the next block, reason order (test_spo2 21). |
+| v0.109  | 2026-10-20    | **Test hook `test_run_pending_hr_computations()` (§9):** runs the HR2/HR3 slow paths |
+|         |               | Task A signalled, synchronously, as the task bodies do. Host builds have no Task  |
+|         |               | B/C, so a raw replay through `test_feed_sample()` never produced HR2/HR3 (flag  |
+|         |               | stuck after the first interval). No change on the device. Runner v0.28 calls it. |
+| v0.108  | 2026-10-20    | **Rename: the R-METHOD-2 correlation is `spo2_r_method2_reg_corr`** (was          |
+|         |               | `spo2_r_corr`): `AFE4490Data::spo2_r_method2_reg_corr`, `spo2_r_method2_reg_corr_min`, |
+|         |               | `setSpO2RMethod2RegCorrMin()`, `$CFG` key `spo2_r_method2_reg_corr_min`, `$M4` field 36 |
+|         |               | `R_METHOD2_REG_CORR`. Same numbers. Under `spo2_r_` only R and its own quantities  |
+|         |               | live, and `r_corr` read as "R's correlation". Rationale §16.                     |
+| v0.107  | 2026-10-20    | **`spo2_clamp_margin` 3 → 10 % (§5.1, §10):** a − b·R up to 110 % is published  |
+|         |               | as 100; only beyond that is SpO2 withheld. With 3 % a curve offset of +3 pt     |
+|         |               | (the neonatal-foot curve on an adult finger; the MS100 at setpoint 100) made   |
+|         |               | SpO2 vanish at SaO2 100 % with r 0.999 and PI 7 %. Rationale §15.              |
+| v0.106  | 2026-10-20    | **The PI definition gets a name (§5.1, *PI methods*): `PI_METHOD_ID` =         |
+|         |               | `PI-METHOD-1`, `AFE4490Config::pi_method_id`; `PI-METHOD-0` is the ≤ v0.100     |
+|         |               | EMA/RMS definition. Traceability only — no setter, no alternative. Default R   |
+|         |               | curve relabelled `R-CURVE-STS0163-HOSPNAV-20261004` (same 123.98 − 39.13·R;   |
+|         |               | label date = fit date). Curve registry → PulseNest `docs/spo2_r_curves.md`.   |
+|         |               | Rationale §14.                                                                  |
+| v0.105  | 2026-10-17    | **HGAC gate half-open under `PROBE_ONLY_LED_SATURATING` (§5.8, §5.6.2): slow     |
+|         |               | step-down only (no fast guard, no raise). Closes the v0.90 open check: a thin    |
+|         |               | tissue clipping at a high RF was absent → gated off → RF never lowered → locked  |
+|         |               | until power cycle (bench, 2026-10-17). `_hgac_track(..., slow_step_down_only)`.       |
+|         |               | `isProbeAbsent()` unchanged for RSQM/diagnostics. Rationale §13.                 |
+| v0.104  | 2026-10-08    | **Bench switch `afe_settle_freeze_enable` (§5.8.4): `setSettleFreezeEnable(false)` |
+|         |               | lets the real switched-RC transient after a gain change reach the algorithms so    |
+|         |               | a host can measure it (default `true`; `AFE4490Config` field; diagnostics freeze |
+|         |               | unaffected). For the RF tap characterisation bench of 2026-10-08.               |
+| v0.103  | 2026-10-08    | **SpO2/PI window blocks of 100 ms (`alg_window_block_s`) instead of the 50 Hz |
+|         |               | cadence inherited from HR2/HR3 (§5.1, §5.3.1 scope note, rationale §12).**  |
+|         |               | New `WindowBlockClock` (a block clock by duration, not a `Decimator`) replaces     |
+|         |               | `_spo2_decim`/`_pi_decim` and their `*_decim_target_rate_hz`; buffers 600 →  |
+|         |               | 120 (≈ 3.4 KB). PI's AC² is now summed at the full rate over each block (one |
+|         |               | band-passed sample per 20 ms block until v0.102 — at 100 ms it would alias). |
+|         |               | Outputs refresh every 100 ms; the first estimate comes one block after the  |
+|         |               | window is full (6.1 s instead of 6.02 s). Measured on the SUBJ09 HOSPNAV      |
+|         |               | replay against v0.102: R mean diff 0, SD 0.0006 (max 0.006 at the window    |
+|         |               | edge), SpO2 SD 0.02 points (max 0.19), PI SD 0.02 % (max 0.31 %), noise of R |
+|         |               | unchanged. Test accessors renamed `test_spo2_block_rate_hz()`,                |
+|         |               | `test_pi_block_len()`, `test_pi_block_rate_hz()`.                             |
+| v0.102  | 2026-10-07    | **SpO2 averaged over a true sliding window; window lengths runtime and      |
+|         |               | independent for SpO2 and PI (§5.1, §10.3, §10.3b, rationale §12).**         |
+|         |               | R-METHOD-2's Σ(dx·dy)/Σ(dx²)/Σ(dy²) and R-METHOD-1's AC² are block sums at   |
+|         |               | the 50 Hz cadence of a new `_spo2_decim` chain, kept in circular buffers    |
+|         |               | with fixed-cost running totals (rebuilt at every wrap: float32 drift guard);       |
+|         |               | R, r and SpO2 refresh per block and are valid from the first full window.   |
+|         |               | Replaces the EMAs with τ = 6 s, equivalent to a 12 s window in noise and    |
+|         |               | delay and 18 s to settle; measured on HOSPNAV: same accuracy, +36 % noise   |
+|         |               | at equal nominal length, ~2 s less lag, exact purge after one window.       |
+|         |               | New `spo2_window_s` (6 s) / `setSpO2WindowS()` and `pi_window_s` (6 s) /    |
+|         |               | `setPIWindowS()`, both clamped 2–12 s, independent; a length change empties |
+|         |               | the window. **Removed:** `spo2_warmup_s`/`setSpO2WarmupS()` (the window is  |
+|         |               | the warm-up) and `spo2_ema_var_tau_s`/`setSpO2EmaVarTauS()`; the SpO2       |
+|         |               | `EmaChannel`s keep only the mean (var_tau = mean_tau). `AFE4490Config`      |
+|         |               | gains `spo2_window_s`, `pi_window_s`. Tests: test_spo2 16 (window exactness, |
+|         |               | setter clamps/reset), test_pi 7, test_sample_rate asserts both windows in   |
+|         |               | seconds across the PRF catalogue. Firmware: no `$SET` key yet (defaults).   |
+| v0.101  | 2026-10-06    | **PI (Perfusion Index) decoupled from SpO2 and redefined in the industry's   |
+|         |               | units (§5.1, §10.3b, rationale §11).** `_pi_update_sample()` replaces the    |
+|         |               | `sqrt(EmaChannel.var)/EmaChannel.mean` computed inside `_spo2_update()`.     |
+|         |               | AC from a private band-pass 0.5–15 Hz (`pi_bp_f_low_hz`/`_high_hz`,          |
+|         |               | `setPIFilter()`; the HR3 ceiling, since a 5 Hz one made PI fall 25 % from 60 |
+|         |               | to 220 BPM), not an EMA subtraction. AC² and DC (block means of the raw OT)  |
+|         |               | from the SAME 6 s sliding window (`pi_buf_len` = 300 @ 50 Hz, fixed-cost running |
+|         |               | sums): settles EXACTLY at 6 s, no EMA, no seed, no lead/lag between          |
+|         |               | numerator and denominator. **PI is now peak-to-peak** (`2√2·RMS`, Nellcor/   |
+|         |               | Masimo's definition, ISO *%mod*): the old RMS-based PI was ÷2.8–3.2 of it,   |
+|         |               | so `spo2_pi_sqi_lo/hi` (0.5/2.0, copied from those manufacturers) fired ~3×  |
+|         |               | too early — HOSPNAV SUBJ08 scored SQI 0.08 at a normal 1.8 % (pp). **PI      |
+|         |               | upper bound** `spo2_pi_max` = 20 % (third parameter of                        |
+|         |               | `setSpO2PiSqiThresholds()`, `AFE4490Config::spo2_pi_max`): above it SpO2 is  |
+|         |               | withheld — the ramp's output-only clamp used to publish SQI = 1 on the DC    |
+|         |               | transient of a probe coming off (closes the 2026-08-22 finding). `_spo2_     |
+|         |               | update()`'s SQI also guards a not-yet-valid (`NaN`) PI explicitly instead of |
+|         |               | relying on `fmaxf`/`fminf`'s NaN pass-through. New suite `test_pi` (6);      |
+|         |               | `test_spo2` feeds PI in lockstep, amplitudes halved to keep PI under the new |
+|         |               | bound, `test_spo2_pi_above_max_invalidates` added (14).                      |
+| v0.100  | 2026-10-04    | **R-METHOD-2 in the library, default (§5.1).** `setSpO2RMethod(1|2)`: 2 = causal    |
+|         |               | regression on the first differences of the band-passed (0.5–5 Hz, one biquad),  |
+|         |               | DC-normalised OT, R = EMA(dx·dy)/EMA(dx²), with its correlation r as validity  |
+|         |               | gate (`spo2_r_corr_min` 0.8, `setSpO2RCorrMin()`) and `AFE4490Data::spo2_r_corr`; |
+|         |               | 1 = the RMS ratio of v0.38–v0.99, still selectable (both run every sample, no   |
+|         |               | warm-up on switch). The port is bit-identical to the runner's `R_CAND` on all  |
+|         |               | 24 HOSPNAV parts. New default curve `R-CURVE-STS0163-HOSPNAV-20260923`        |
+|         |               | (R-METHOD-2): SpO2 = 123.98 − 39.13·R, fitted on the library's own replay of   |
+|         |               | the two HOSPNAV campaigns (scatter 1.65 points, ρ −0.80; R-METHOD-1 with the   |
+|         |               | MS100 curve read −10 points there). `AFE4490Config::spo2_r_method`,            |
+|         |               | `spo2_r_corr_min`. Tests: `test_spo2_method2_equals_method1_on_clean_sines`,   |
+|         |               | `test_spo2_method2_low_r_invalidates`, `test_spo2_method_switch_is_immediate`.  |
+|         |               | Rationale §9–§10.                                                             |
+| v0.99   | 2026-10-03    | **HR valid range floor 40 → 30 BPM (§5.2).** `hr_min_bpm` 40 → 30, so          |
+|         |               | `hr_search_min_bpm` 37 → 27 and the HR2 lag sweep 81 → 111 lags (caps 137/199  |
+|         |               | still inactive); HR3's `search_min` stays bin 5. Meets WHO-UNICEF 2019 §6.5    |
+|         |               | (pulse-rate range to include 30–240 bpm); with 40 a bradycardia at 35 BPM was  |
+|         |               | reported as no valid signal. Measured on the host build (rationale §8): HR2    |
+|         |               | locks at 30 BPM with its 0.5 Hz band-pass corner unchanged — the               |
+|         |               | autocorrelation is normalised, so the −3 dB there is harmless; a 0.35 Hz       |
+|         |               | corner was tried and rejected (no gain, SQI under drift 0.89 → 0.84, and a     |
+|         |               | 30.0 BPM sine reads 29.91 → below the gate). HR3 holds 30 BPM clean but loses  |
+|         |               | < 35 BPM under 2× baseline wander; HR1 needs ~11 s at 30 BPM. The range's      |
+|         |               | provenance (no normative source; ISO §201.12 only requires disclosure) and the |
+|         |               | SVT basis of the 260 ceiling are now written where the constants are. Tests:   |
+|         |               | `test_hr2_30bpm_lower_bound`, `test_hr2_27bpm_guard_band_is_invalid`,          |
+|         |               | `test_hr2_decimated_rate_invariant_to_sample_rate` (now 30 BPM at 1000 Hz),    |
+|         |               | `test_hr3_30bpm_lower_bound`, `test_hr1_30bpm_lower_bound`.                    |
+| v0.98   | 2026-10-02    | **R method and R curve get names (§5.1, *R methods and R curves*).**           |
+|         |               | `SPO2_R_METHOD_ID = "R-METHOD-1"` names how R is computed; it changes only     |
+|         |               | when R would. The coefficients become an R curve with an id and the R method   |
+|         |               | it was fitted with: `setSpO2Coefficients(a, b)` → `setSpO2RCurve(id,           |
+|         |               | r_method_id, a, b)` (rejects empty/oversized ids and non-finite values,        |
+|         |               | keeping the current curve whole); `AFE4490Config::spo2_a/spo2_b` →             |
+|         |               | `spo2_r_method_id`, `spo2_r_curve_id`, `spo2_r_curve_r_method_id`,             |
+|         |               | `spo2_r_curve_method_match`, `spo2_r_curve_a`, `spo2_r_curve_b`. Same root in    |
+|         |               | every layer (lib, PulseNest `$CFG` fw 0.16, capture header, PILAB). Default    |
+|         |               | curve labelled `R-CURVE-U401D-MS100-20260323`, fitted with `R-METHOD-0` (the   |
+|         |               | 2026-03-23 library: adc_code inputs, DC τ 1.6 s, AC τ 1.0 s), so it raises the  |
+|         |               | **mismatch warning** by itself — warning mode: logged and reported in the       |
+|         |               | config, never a `diag_code` bit (that would zero `rsqi`). SpO2 values are       |
+|         |               | unchanged (same coefficients, same R). Tests: `test_spo2` +3 (default labelled  |
+|         |               | and warning, a matching curve applies, bad input rejected whole); 9/9 suites.  |
+| v0.97   | 2026-10-01    | **HR3 anti-alias low-pass: 2nd → 4th-order Butterworth, 15 Hz (§5.3.1, §5.4).**   |
+|         |               | Closes the weak point recorded in v0.83: −9.4 dB at the 25 Hz Nyquist of the ×10  |
+|         |               | decimation becomes −18.0 dB (at a 500 Hz PRF), so less folded noise lifts the     |
+|         |               | spectral floor that `hr3_sqi` pays for, and flatter over the harmonics the HPS    |
+|         |               | uses (13 Hz: −1.2 vs −1.9 dB). New `LowPass4` (two cascaded biquads,              |
+|         |               | Q = 0.5412 / 1.3066, −3 dB at the corner); `BiquadFilter::init_lp()` takes an     |
+|         |               | optional Q (default 1/√2, unchanged behaviour for any other caller). Member        |
+|         |               | `_hr3_bpf` renamed `_hr3_lp`: it is not a bandpass, and its comment ("0.4–15 Hz")  |
+|         |               | had been false since v0.83. Public API unchanged (`setHR3Filter()`,               |
+|         |               | `hr3_f_high_hz`). Tests: `test_biquad` +4 (pulse band passes, −3 dB at the corner, |
+|         |               | < 0.14 at 25 Hz where the 2nd order leaves > 0.30, unity DC gain + precharge);    |
+|         |               | all 9 host suites pass (87 tests). Behaviour change: HR3 only.                    |
+| v0.96   | 2026-09-24    | **Offline replay accessors (§9).** `test_last_ot_led2()`, `test_probe_state()`,    |
+|         |               | `test_pi()` (UNIT_TEST only), so `incunest_offline_runner` can feed raw ADC codes   |
+|         |               | through `test_feed_sample()` (the full `_process_sample()` path: analog state →     |
+|         |               | RSQM → SpO2/HR) and read back OT, probe state, R, PI and SpO2 exactly as the       |
+|         |               | firmware would produce them — e.g. to replay the 2026-09-23 HOSPNAV captures with   |
+|         |               | the v0.95 `rsqm_ot_thr` and recover the stretches discarded as PROBE_OT_HIGH.       |
+|         |               | No behavioral change; test surface only.                                            |
+| v0.95   | 2026-09-24    | **`rsqm_ot_thr` 1.0e-4 → 1.5e-4 — first real-patient calibration (§5.6.2, §10).** |
+|         |               | HOSPNAV campaign 2026-09-23, SUBJ08: probe applied read OT_LED1 mean ≈ 120 ppm /  |
+|         |               | max ≈ 145 ppm and kept forcing PROBE_OT_HIGH (resetting SpO2/HR) on an applied     |
+|         |               | probe — exactly the thin-tissue case the v0.44 note anticipated. Margin ×1.03      |
+|         |               | above the observed max (n=1 patient, recalibrate with more campaigns); ×5.3 below  |
+|         |               | the theoretical probe-in-air OT (~8e-4), which ONLY_LED_SATURATING also detects    |
+|         |               | independently. No code path changed — default value and comments only.             |
+| v0.94   | 2026-09-22    | **HGAC announces its RF moves to the host (§5.8.4).** `_hgac_change_rf()` stamps    |
+|         |               | `_hgac_rf_change_ts_us` (esp_timer, the row clock) then increments               |
+|         |               | `_hgac_rf_change_count`; new lock-free getter `hgacRfChangeCount(uint64_t*)`.      |
+|         |               | The library emits nothing (measurement task never calls the network); the         |
+|         |               | consumer's command task polls it. Prerequisite 6 of PulseNest's                   |
+|         |               | `capture_csv_format_spec.md` (R21a: RF as a change-event, not a column).          |
+|         |               | test_hgac: `test_hgac_rf_change_is_counted_and_stamped`.                          |
+| v0.93   | 2026-09-16    | **`hr1_max_decay_tau_s` 20 s → 1.5 s — the first measured value this          |
+|         |               | parameter has ever had (§10.4).** The 20 s was the inherited `0.9999`         |
+|         |               | per-sample literal written in seconds at 500 Hz, and v0.87 said as much.      |
+|         |               | A threshold held up by a peak seconds old loses any beat whose amplitude has  |
+|         |               | since fallen, and **one lost beat costs five**: its doubled RR interval sits  |
+|         |               | in the 5-interval buffer until it is pushed out, so `hr1_sqi` is 0 for five   |
+|         |               | beats — 5.8 s at 52 bpm, which is exactly what the bench showed on 2026-09-15 |
+|         |               | on two of three boards while HR2/HR3 never flinched. Note what did NOT fail:  |
+|         |               | the SQI. Averaging that buffer gives 43 bpm, and publishing it would have     |
+|         |               | been a false bradycardia — the alarm this monitor exists to raise. The gate   |
+|         |               | was right; the detector fed it a bad interval. Evidence: the perturbed MS100  |
+|         |               | sweep (flat optimum 1–3 s, collapse at 0.5 s) and the three-board probe       |
+|         |               | capture (every missed beat recovered, zero extra detections). No API or       |
+|         |               | format change: `setHR1MaxDecayTauS()` already existed and the value is a      |
+|         |               | default. Mirrored in PulseNest's `HR1Variant.FW_MAX_DECAY_TAU_S`.             |
+| v0.92   | 2026-09-15    | **`$TIMING` gains `spi_mean,spi_max` (appended last) and the HAL gains a console   |
+|         |               | tee.** `_ts_spi` times the six 4-byte SPI frames of one sample on their own — the |
+|         |               | measurement the ESP-IDF port of PulseNest exists to make (Arduino 4 ×            |
+|         |               | `SPI.transfer(uint8_t)` per frame vs one polling transmit under IDF). `hal_console_ |
+|         |               | set_sink()`: every `hal_console_printf` line is also handed to an app sink,     |
+|         |               | NUL-terminated, on the calling task (must only queue) — PulseNest forwards       |
+|         |               | `$TIMING`/`$TASK` to its UDP data queue, so the ESP32 TIMING window needs no UART. |
+|         |               | The idf and host `console_printf` now format into a buffer (`fwrite`) like the   |
+|         |               | Arduino one. motherBoard: no behaviour change (`INCUNEST_TIMING_STATS` off, no    |
+|         |               | sink).                                                                           |
+| v0.91   | 2026-09-15    | **Hardware abstraction layer (§1.4): the library builds unchanged on            |
+|         |               | Arduino-ESP32, ESP-IDF (as a CMake component) and the host.** Phase 0 of the     |
+|         |               | ESP-IDF port of IncuNest. Measured first: only `<Arduino.h>`/`<SPI.h>` differed  |
+|         |               | between the embedded targets — 18 call sites — while FreeRTOS, esp_timer and     |
+|         |               | IRAM_ATTR are the same API on both, so those are not wrapped; the host gets them |
+|         |               | from `incunest_afe4490_hal_host.h`. New: `incunest_afe4490_hal.h` (7 functions), |
+|         |               | `_hal_arduino.cpp` (pure forwarding, byte-for-byte the v0.90b bus sequence),    |
+|         |               | `_hal_idf.cpp` (driver/gpio + spi_master, ONE polling transmit per 4-byte       |
+|         |               | frame instead of four), `_hal_host.cpp`, root `CMakeLists.txt`. Selection by    |
+|         |               | detection (`ARDUINO` / `ESP_PLATFORM` / neither), no macro to set. Removed: the |
+|         |               | 63 `INCUNEST_OFFLINE` conditionals, `incunest_afe4490_platform_stub.h`, and     |
+|         |               | PulseNest's `test/stubs/`. `constrain()` → own `clampf()` (gnu++11 has no       |
+|         |               | std::clamp). `_rsqm_update()` lost the four raw-channel parameters it stopped   |
+|         |               | reading in v0.35. `begin()` now calls `hal_spi_attach()` and checks the ISR      |
+|         |               | attach; `stop()` calls `hal_spi_detach()`.                                       |
+|         |               | **Found while proving the refactor pure:** Arduino-ESP32 redefines `ESP_LOGx`   |
+|         |               | (`esp32-hal-log.h`); dropping `Arduino.h` silently switched the library to IDF's |
+|         |               | `esp_log_write` on Arduino. Fixed by including `esp32-hal-log.h` under ARDUINO.  |
+|         |               | **Evidence:** compiler output identical for 102/113 functions, the 11 others     |
+|         |               | being exactly the touched ones; 10 Arduino symbols out, 8 HAL symbols in.       |
+|         |               | Verified on Arduino (V17, -Werror), ESP-IDF v6.0.1 (esp32s3, -Werror, GCC 15.2),|
+|         |               | host (link + run) and `pio test -e native` (76/77, unchanged).                   |
+|         |               | No behavioural change on Arduino. On ESP-IDF the library now exists at all.     |
+| v0.90b  | 2026-09-14    | **Warning cleanup: the library compiles clean under `-Wall -Wextra -Werror`, |
+|         |               | and `library.json` now enforces it for every PlatformIO build of the library.** |
+|         |               | Prompted by the ESP-IDF port of motherBoard (IncuNest branch                 |
+|         |               | `refactor/idf-native-port`), whose vendored copy of v0.81 silences seven      |
+|         |               | `-Wno-error=` classes. Reproduced on xtensa GCC 8.4 (Arduino) and host GCC 15 |
+|         |               | (C++17 and C++20): only **three** were ours. (1) `-Wreorder`: the constructor |
+|         |               | initialised `_hr1_dc_alpha` before `_spo2_warmup_samples`, against            |
+|         |               | declaration order — list reordered; no dependency between the members.        |
+|         |               | (2) `-Wvolatile` ×2: `--` on the volatile countdowns                            |
+|         |               | `_switched_rc_settling_countdown` and `_diag_holdoff_samples`, deprecated in   |
+|         |               | C++20 — rewritten as `x = x - 1`, the same non-atomic read-modify-write.       |
+|         |               | (3) `-Wunused-parameter` ×4: `_rsqm_update()` still took the raw LED/ALED      |
+|         |               | values it stopped reading in v0.35 (everything arrives via `AFE4490AnalogState`)|
+|         |               | — removed from the private signature and its single call site.               |
+|         |               | The other four (`missing-field-initializers`, `unused-variable`,               |
+|         |               | `format-truncation`, `deprecated`) do not reproduce on either compiler and have|
+|         |               | no candidate in the code (the only `snprintf`s live under                     |
+|         |               | `INCUNEST_TIMING_STATS`, off in motherBoard; aggregates use `{}`; no          |
+|         |               | deprecated IDF API): the same list is applied verbatim to every vendored       |
+|         |               | component of that port. **No behavioural change.** Also re-syncs the four     |
+|         |               | file headers that still read v0.88.                                            |
+| v0.90   | 2026-09-08    | **ProbeState renamed and split; `isProbeAbsent()`.** `PROBE_SATURATING` → |
+|         |               | `PROBE_AMB_SATURATING`: the old name suggested "any saturation", but since |
+|         |               | v0.61 LED-only saturation never came here — engineers (and this spec's     |
+|         |               | author) read the name and concluded the opposite of what the code does.   |
+|         |               | `PROBE_NOT_APPLIED` split into its two physical causes, which were         |
+|         |               | indistinguishable in frames, CSVs and the bench: `PROBE_OT_HIGH` (keeps    |
+|         |               | value 1 — the usual cause in historical captures, so old CSVs still read   |
+|         |               | correctly) and `PROBE_ONLY_LED_SATURATING` (new value 4). Names describe   |
+|         |               | what is measured, not what is inferred: "probe in air" was an inference    |
+|         |               | that fails on thin tissue at high RF.                                     |
+|         |               | `isProbeAbsent()` is now the one definition of "no patient", used by HGAC's|
+|         |               | gate G0 and the diagnostics task instead of two explicit lists — the trap  |
+|         |               | G0's own comment warned about. **No behavioural change**: the LED-only    |
+|         |               | case is absent, exactly as it was inside NOT_APPLIED.                      |
+|         |               | **Recorded, not fixed — open check:** thin tissue at high RF →             |
+|         |               | ONLY_LED_SATURATING → absent → HGAC gated off → RF never lowered → stays  |
+|         |               | absent (§5.6.2). Alex observed the sequential-RF symptom on the bench; the |
+|         |               | capture-based verification (`tools/probe_state_saturation_check.py`) is    |
+|         |               | pending. **Second check, recorded because the split creates it:** the      |
+|         |               | debounce counts consecutive identical requests, so alternation between the|
+|         |               | two absent states near the saturation boundary could keep either from     |
+|         |               | committing (see `_rsqm_request_probe_state`). Alex doubts it occurs; if    |
+|         |               | seen, debounce by class.                                                   |
+|         |               | **Vocabulary (same version):** the design labels "Gate G0" and "axiom A6"  |
+|         |               | are gone from live text and code comments — "HGAC gate" and "the RSQM/HGAC |
+|         |               | separation axiom" say what they are without a lookup. The old labels stay  |
+|         |               | once each, in parentheses at the definitions (§5.8, `_hgac_update()`), so |
+|         |               | earlier documents remain traceable. History rows keep their wording.      |
+|         |               | External consumers: motherBoard uses only `==`/`!= PROBE_APPLIED` (9 sites) |
+|         |               | and is unaffected. PulseNest script/tests/tools updated in the same commit.|
+| v0.89   | 2026-09-07    | **Presence by OT requires BOTH channels (`OR` → `AND`), §5.6.2.** With    |
+|         |               | OR, whichever channel read higher decided alone, so one channel drifting  |
+|         |               | over `rsqm_ot_thr` declared the probe absent while the other still saw    |
+|         |               | tissue. On thin tissue (preterm foot, MS100 simulator) a correctly        |
+|         |               | applied probe read as absent, resetting SpO2/HR1/HR2/HR3 every sample —   |
+|         |               | the failure mode with no downstream safety net. AND requires two          |
+|         |               | independent channels to agree; in air neither is attenuated by tissue, so |
+|         |               | both stay high and NOT_APPLIED holds. Margin gained on thin tissue, none  |
+|         |               | given back on air.                                                       |
+|         |               | *Corrected 2026-09-07:* this entry first justified the change by claiming |
+|         |               | RED is absorbed more than IR so `ot_led1 > ot_led2` always. Measured on   |
+|         |               | the MS100, probe applied: IR 91 ppm, RED 112 ppm — the opposite. OT is    |
+|         |               | the whole electro-optical ratio, not tissue transmittance. The AND does   |
+|         |               | not depend on the ordering, so the change stands. Both channels sit       |
+|         |               | within 12 % of the threshold: working, not robust.                       |
+|         |               | **No threshold changed** — `rsqm_ot_thr` stays at 1.0e-4 and still lacks  |
+|         |               | a calibrated value.                                                       |
+|         |               | **New failure mode, accepted knowingly:** one channel persistently low    |
+|         |               | (weak LED, obstructed PD) now forces APPLIED. The LED-only-saturation     |
+|         |               | branch and DISCONNECTED's four-channel check limit but do not remove it.  |
+|         |               | Chosen over raising the threshold because raising it spends margin on the |
+|         |               | air side, and because the estimate that would justify a new value carries |
+|         |               | uncertainty wider than the decision it would settle: neonatal optical     |
+|         |               | path length is **not published** (the 5–10 mm figure in use is an         |
+|         |               | engineering estimate, never measured), and OT is the whole                |
+|         |               | electro-optical ratio, not tissue transmittance alone.                    |
+| v0.88   | 2026-09-05    | **Two buried literals become named parameters.** Prompted by an inventory  |
+|         |               | of what actually conditions the algorithms: of ~45 configurable values     |
+|         |               | plus internal constants, ~15 condition a result and 7 have no documented   |
+|         |               | provenance — but two were not even parameters.                             |
+|         |               | **`0.6f` → `hr1_threshold_fraction`**, now configurable via                |
+|         |               | `setHR1ThresholdFraction()` and exposed in `AFE4490Config`. It is the      |
+|         |               | single value that most determines whether a beat is counted, and it had no |
+|         |               | name, no presence in the config or the spec, and could not be swept        |
+|         |               | without recompiling — which blocked precisely the sensitivity study it     |
+|         |               | most needs. The setter rejects anything outside (0, 1]: at 0 every sample  |
+|         |               | crosses and above 1 nothing does, so both extremes silence HR1 rather than |
+|         |               | degrade it.                                                                |
+|         |               | **`3.0f` → `hr_guard_band_bpm`**, one constant replacing the same literal  |
+|         |               | at four sites across HR2's lag sweep and HR3's bin sweep, where changing   |
+|         |               | one and forgetting another would have desynchronised the two estimators    |
+|         |               | silently. Kept as an internal constant: nothing suggests a caller should   |
+|         |               | tune it.                                                                   |
+|         |               | No behavioural change — both keep their previous values.                   |
+| v0.87   | 2026-09-04    | **Every time-valued parameter is expressed in seconds and derived from the |
+|         |               | rate (rationale §6).** Audit prompted by the question "are there more       |
+|         |               | unresolved sample-rate dependencies?" — there were two live and one latent. |
+|         |               | **`_hr1_running_max *= 0.9999f`** was a per-sample literal: tau 10 000      |
+|         |               | samples, i.e. 20 s at 500 Hz but **6.25 s at 1600 Hz**, relaxing HR1's      |
+|         |               | detection threshold 3.2× faster at the top of the catalogue and inviting    |
+|         |               | false positives. Now `hr1_max_decay_tau_s` (20 s, which reproduces 0.9999   |
+|         |               | exactly at 500 Hz, so default behaviour is unchanged) with a setter.        |
+|         |               | **`ts_emit_interval`** was 2500 samples — its own comment admitted "5 s at  |
+|         |               | 500 Hz", so 1.56 s at 1600 — now derived from `ts_emit_period_s`.          |
+|         |               | **`setHR2UpdateInterval`/`setHR3UpdateInterval` → `…IntervalS(float s)`**:  |
+|         |               | they were the only two time-valued setters in the API taking samples, and   |
+|         |               | immune to the AFE rate only because the decimated rate is the invariant.    |
+|         |               | **`hr1_ma_cutoff_hz` → `hr1_lp_cutoff_hz`** (and `setHR1MaCutoffHz` →      |
+|         |               | `setHR1LpCutoffHz`): "ma" stops being literal once the filter type is under |
+|         |               | review, and "lp" is true of both. All breaking, all with zero external      |
+|         |               | callers (checked in src/, tests and the lab script).                        |
+|         |               | **The lasting part is the net, not the fixes:** two catalogue-sweeping      |
+|         |               | tests assert every duration is preserved in seconds. Both had to be         |
+|         |               | rewritten after passing with the defects reintroduced — a test must observe |
+|         |               | the EFFECT (not the derived coefficient, which stays correct while unused)  |
+|         |               | and must exercise the setter with a NON-DEFAULT value (a constant equal to  |
+|         |               | the default is indistinguishable otherwise).                                |
+| v0.86b  | 2026-09-04    | **HR1 moving-average length 64 → 160 samples, clamp no longer silent      |
+|         |               | (§7.4).** 64 samples covered only up to 640 Hz, so four of the five        |
+|         |               | catalogue rates ran with an effective cutoff of 6.2–12.5 Hz instead of the |
+|         |               | configured 5 Hz — and said nothing. That filter exists to keep the dicrotic |
+|         |               | notch away from HR1's threshold detector; too wide, the notch is           |
+|         |               | double-counted and HR reads double. The 0.185 s refractory mitigates it     |
+|         |               | unevenly and least of all in bradycardia, where the notch arrives later     |
+|         |               | and falls outside the refractory — i.e. it fails in the clinically         |
+|         |               | critical case. 160 = worst case of the catalogue at the default cutoff.     |
+|         |               | Cost is RAM only (+384 B measured: 60 444 → 60 828 B): the average is       |
+|         |               | incremental so the CPU cost does not grow with N, and group delay stays ≈ 50 ms at any PRF.  |
+|         |               | Since `setHR1MaCutoffHz()` is public and unvalidated no fixed capacity can  |
+|         |               | cover every case (2 Hz at 1600 Hz would need 400 samples), so the clamp now    |
+|         |               | emits `logE` with the length needed, the length available and the effective |
+|         |               | by `test_hr1_ma_not_clamped_across_catalogue` (verified to fail with the    |
+|         |               | cap back at 64: 64 samples instead of 80 at 800 Hz).                       |
+| v0.86   | 2026-09-04    | **A PRF change now tears down state accumulated at the previous rate       |
+|         |               | (§7.4 "Changing the rate at runtime").** `setSampleRate()` recalculated    |
+|         |               | coefficients but left four things belonging to the old rate in play: the   |
+|         |               | biquad state (`init_bp`/`init_lp` deliberately do not reset it), the EMA   |
+|         |               | state (`init()` recomputes α but keeps mean/var), the decimated HR2/HR3    |
+|         |               | buffers (an 8 s window mixing two rates until it refilled) and the         |
+|         |               | decimation phase. It also did not arm switched-RC settling, even though a  |
+|         |               | rate change rewrites all four sampling windows — a signal-chain change in  |
+|         |               | the sense of datasheet §7.7 t5, and the same reason RF, CF, ILED, AMBDAC,  |
+|         |               | RG and Stage2En arm it. Now: no-op when the rate is unchanged, otherwise   |
+|         |               | `_reset_algorithms()` plus an arm, under both mutexes.                     |
+|         |               | **Lock order defined: `_spi_mutex` → `_state_mutex`** — the only place     |
+|         |               | holding both at once, hence the order for the whole library. Holding       |
+|         |               | `_state_mutex` across the mutation is also why settling can be armed AFTER |
+|         |               | the reset here (which clears the countdown) rather than before the         |
+|         |               | mutation as §5.8.4 requires of setters that do not hold it.                |
+|         |               | Pinned by `test_rate_change_tears_down_old_state` (verified to fail with   |
+|         |               | the fix reverted: buffer count 400 instead of 0) and                       |
+|         |               | `test_same_rate_is_a_no_op`. **Recorded, NOT fixed:** HR1's moving average |
+|         |               | saturates at 64 samples above 640 Hz, so four entries run with an          |
+|         |               | effective cutoff of 6.2–12.5 Hz instead of 5 Hz.                           |
+| v0.85   | 2026-09-04    | **`AFE4490SampleRate`: the supported PRFs become a closed catalogue        |
+|         |               | {500, 800, 1000, 1250, 1600 Hz} enforced by the type system (§7.4).**      |
+|         |               | `setSampleRate()` previously accepted 63–5000 Hz while checking only the   |
+|         |               | numeric bounds: above ~2487 Hz a legal call wrote INVERTED timer-compare   |
+|         |               | pairs (`ALEDxSTC` > `ALEDxENDC`) into the chip, silently, and below        |
+|         |               | 500 Hz the anti-alias margin collapses (§7.3). Both ends are now closed.   |
+|         |               | Primary form takes the enum, so an unvalidated rate is inexpressible; the  |
+|         |               | numeric overload is kept for the bench and `$SET sr` and accepts only      |
+|         |               | catalogue values. The acceptance policy lives in ONE predicate,            |
+|         |               | `isValidSampleRateHz()`. Introspection (`sampleRateCount()`,               |
+|         |               | `sampleRateHz()`) is static, so a host application or a validation report  |
+|         |               | can enumerate every supported rate before `begin()`.                      |
+|         |               | **Present-day benefit: certifiability.** A finite set can be validated     |
+|         |               | exhaustively — new `test_sample_rate` walks the whole catalogue asserting  |
+|         |               | exact `q`, integer decimation factor, both sampling windows ≥ TI's 50 µs,  |
+|         |               | non-inverted ambient timer pair and NUMAV_max ≥ 1, plus that rejected      |
+|         |               | rates leave the configuration untouched and that both analysis chains hold |
+|         |               | 50 Hz at every entry. A continuous range cannot be covered that way.       |
+|         |               | **Designed to widen:** a FractionalDecimator would drop the `hz % 50`      |
+|         |               | condition — the only one excluding an otherwise valid rate (625 Hz) — so   |
+|         |               | widening means adding table entries or relaxing that predicate. No public  |
+|         |               | signature changes, which is why the numeric overload was kept.             |
+|         |               | `test_hr2`'s off-grid case (700 Hz) was retired: it is no longer reachable |
+|         |               | through the API, by design. The rounding branch in `Decimator::configure()` |
+|         |               | stays as defensive code and as the hook for that future decimator.        |
+| v0.84c  | 2026-09-04    | **`_hr2_seg` → `_hr2_snapshot`, `_hr2_linearize()` →                       |
+|         |               | `_hr2_take_snapshot()`, `_hr3_linearize()` → `_hr3_prepare_fft_input()`.** |
+|         |               | No functional change. `seg` said nothing, and `linearize` named the         |
+|         |               | mechanism (walking a circular buffer) rather than the purpose: the copy    |
+|         |               | exists so Task B sees a COHERENT window while Task A keeps writing         |
+|         |               | `_hr2_buf` — the isolation that `_hr2_computing` guards. The comments       |
+|         |               | already called it a "snapshot"; now the identifier does too, and a future  |
+|         |               | memcpy-based implementation would still be a snapshot while no longer      |
+|         |               | being a "linearize". The twin names also implied the two functions did the |
+|         |               | same thing: HR2's only copies, HR3's copies AND subtracts the mean AND     |
+|         |               | applies the Hann window, which `_hr3_prepare_fft_input()` now states.      |
+| v0.84b  | 2026-09-04    | **Decimation chains renamed `_pulse_band_decim` / `_harmonic_band_decim` → |
+|         |               | `_hr2_decim` / `_hr3_decim`** (with their target-rate constants and test    |
+|         |               | accessors). No functional change. The band-based names described a split    |
+|         |               | that does not exist: a "pulse band" reaching 5 Hz covers the 5th harmonic   |
+|         |               | of a 60 BPM pulse, and a "harmonic band" includes the fundamental. Naming   |
+|         |               | after the consumer is accurate for all three lag estimators, since          |
+|         |               | HR2_ACF / HR2_MPM / HR2_YIN share HR2's chain and buffer. Accepted risk,    |
+|         |               | recorded in §5.3.1: the name goes stale if a non-HR2_* estimator ever feeds |
+|         |               | off that chain, and the honest rename would then be after what each chain   |
+|         |               | PRESERVES (HR2's: the fundamental across [30, 300] BPM; HR3's: up to the    |
+|         |               | 3rd harmonic of 260 BPM, which its HPS multiplies).                        |
+| v0.84   | 2026-09-04    | **One decimation chain per filtered path (§5.3.1).** The single             |
+|         |               | `_decim_factor` served both HR2 and HR3, implying a coupling that does not  |
+|         |               | exist: the two paths share no filter, no buffer and no phase counter, so    |
+|         |               | nothing forces a common rate and running them at one rate saves nothing —   |
+|         |               | no shared convolution, no shared buffer, not one CPU cycle. Replaced by a   |
+|         |               | `Decimator` struct (factor, phase, achieved rate) instantiated twice:       |
+|         |               | `_hr2_decim` (BP 0.5–5 Hz → HR2_ACF, and MPM/YIN when they land)     |
+|         |               | and `_hr3_decim` (LP 15 Hz → HR3), each deriving its factor from  |
+|         |               | its own target. Both target 50 Hz today, so **no behavioural change** — but |
+|         |               | §5.3.1 now records that this is a coincidence of requirements, not a        |
+|         |               | constraint: only the harmonic chain needs 50 Hz (its 15 Hz low-pass stops   |
+|         |               | protecting the decimation below that); the pulse chain has 5× of spare      |
+|         |               | margin and at 25 Hz would cut the autocorrelation cost (N × lags) by 3.9×,        |
+|         |               | tripled once three estimators sweep the same buffer. What holds that back   |
+|         |               | is lag resolution (4.8 vs 2.4 BPM at 120 BPM), which is precisely what MPM  |
+|         |               | and YIN depend on — to be settled with the offline replay experiment, not   |
+|         |               | by reasoning, and not during the campaign that compares the three.          |
+|         |               | New `test_decim_chains_derive_independently` pins per-chain derivation at   |
+|         |               | 500, 1000 and 700 Hz (the last one off-grid, to check the achieved rate is  |
+|         |               | reported honestly rather than as the nominal target).                       |
+|         |               | §5.5 now expands ACF / NSDF / MPM / CMND / YIN / HPS.                       |
+| v0.83   | 2026-09-04    | **The decimated analysis rate is now the invariant; the factor derives from |
+|         |               | it (§5.3.1).** `_decim_factor = round(sample_rate / decim_target_rate_hz)`, |
+|         |               | with `decim_target_rate_hz = 50 Hz` as the contract. Four constants are     |
+|         |               | calibrated against that rate (`hr2_buf_len` = 8 s, `hr3_buf_len` = 10.24 s, |
+|         |               | the update intervals = 0.5 s, `hr2_acorr_lag_cap` = 22 BPM); with the       |
+|         |               | previous fixed factor of 10, changing the AFE rate moved all four at once   |
+|         |               | and silently — at 1000 Hz the lag cap made 40 BPM unreachable, reporting    |
+|         |               | real bradycardia as "no periodicity". Pinned by the new                     |
+|         |               | `test_hr2_decimated_rate_invariant_to_sample_rate` (40 BPM at 1000 Hz — the |
+|         |               | discriminating case; a 60 BPM check passes either way).                     |
+|         |               | **§5.3.1 is new** and records, for the first time, WHY 50 Hz: it is the GCD |
+|         |               | of the validated PRF grid (the highest rate with an integer factor at every |
+|         |               | admissible PRF); below it HR3's 15 Hz low-pass stops protecting the         |
+|         |               | decimation (Nyquist falls under the filter corner) and the windows grow     |
+|         |               | into physiological non-stationarity; above it the fixed buffers grow too    |
+|         |               | short in time. Weak point recorded: −9.4 dB of anti-alias attenuation at    |
+|         |               | Nyquist, paid in `hr3_sqi`; the lever would be a 4th-order low-pass.        |
+|         |               | **Naming (no functional change):** `fs2` (HR2) and `fs_dec` (HR3), two      |
+|         |               | spellings of the same quantity, become `_decim_sample_rate_hz`, symmetric   |
+|         |               | with `_afe_sample_rate_hz`; `hr2_decim_factor` + `hr3_decim_factor` become  |
+|         |               | one `_decim_factor` (a third, dead copy lived in the .cpp anonymous         |
+|         |               | namespace, shadowed); the local `fs` — which meant *full scale in mA* in    |
+|         |               | two places and *sample rate in Hz* in another — becomes `full_scale_mA` /   |
+|         |               | `sample_rate_hz`. Version checklist: the .cpp header still read v0.80, so   |
+|         |               | it had been missed in v0.81 and v0.82 too.                                  |
+|         |               | **API cleanup (breaking, deliberate):** `setHR3Filter()` loses its         |
+|         |               | `f_low_hz` argument and `AFE4490Config` loses `hr3_f_low_hz`. Both were    |
+|         |               | inert — `init_lp()` never reads a lower corner — and actively misleading:  |
+|         |               | the reported value was a plausible 0.4 Hz left over from the constructor,  |
+|         |               | so a caller passing another value got 0.4 back and could believe a         |
+|         |               | bandpass was in effect. HR3 is a pure low-pass BY DESIGN (§5.4): the FFT   |
+|         |               | needs the harmonics preserved in phase for the HPS, and the DC is removed  |
+|         |               | by mean subtraction in `_hr3_prepare_fft_input()`. Neither field crossed the wire  |
+|         |               | (no $CFG/$LCFG frame carried it), so no protocol or script change.        |
+|         |               | Spec §5.4 also corrected: the low-pass corner is 15 Hz, documented as      |
+|         |               | 10 Hz, and the parameter table claimed the filter "removes DC/baseline     |
+|         |               | drift" — it does not; a low-pass passes DC.                                |
+| v0.82   | 2026-09-04    | **HR2 autocorrelation lag sweep: upper bound derived from `hr_min_bpm`      |
+|         |               | instead of a hardcoded 137 samples (§5.3).** The constant dated from v0.11, |
+|         |               | when the HR range was [25, 300] BPM (guard band 22 BPM at 50 Hz); the range |
+|         |               | later moved to [40, 260] BPM but the lag bound was never revisited. Being   |
+|         |               | fixed in *samples* while `fs2` is not, it also silently encoded a 50 Hz     |
+|         |               | assumption. Now `max_lag = 60/(hr_min_bpm-3)*fs2`, symmetric with the       |
+|         |               | existing `min_lag`, capped by storage (`hr2_acorr_max_lag` renamed to       |
+|         |               | `hr2_acorr_lag_cap`) and by `hr2_buf_len/2-1` (unbiased-ACF noise limit),   |
+|         |               | plus an explicit guard when fewer than 3 lags remain. **No output change at |
+|         |               | 500 Hz** — peaks beyond the old bound were rejected by the `hr >=           |
+|         |               | hr_min_bpm` check anyway — but the sweep drops from 127 to 71 lags, ~39 %   |
+|         |               | less work in the N × lags inner loop, and now tracks `setHrRange()`.       |
+|         |               | New test `test_hr2_40bpm_lower_bound` pins the bottom of the range.         |
+|         |               | **Documentation added in the same version (no code change):** new §7.3      |
+|         |               | (anti-aliasing — the effective Rx bandwidth is the duty-cycled corner,      |
+|         |               | `f_c,eff ≈ f_c,nominal × D` ≈ 70–110 Hz, not the nominal 500 Hz; margin     |
+|         |               | 2.3–3.6× over Nyquist at PRF 500 Hz; datasheet Fig. 54) and new §7.4        |
+|         |               | (the validated PRF grid {500, 800, 1000, 1250, 1600} Hz, the thermal        |
+|         |               | headroom the PRF leaves under the LED duty, and two recorded non-criteria). |
+|         |               | §7.2 corrected: it claimed the pre-sampler filter left "no out-of-band      |
+|         |               | noise to alias" — false for a first-order pole; the CF conclusion stands.   |
+| v0.81   | 2026-08-24    | **Rename: `AFE4490DebugData::hgac_rf_led1/led2` → `rf_led1/led2` (§3d).**  |
+|         |               | Alex, reviewing the new PulseNest `HGAC_RF1/RF2` CSV columns: the name      |
+|         |               | implies HGAC computed the value, but it's just the live RF config          |
+|         |               | (identical to `_afe_tia_rf_led1/led2`) — it can equally come from a manual  |
+|         |               | `$SET`. Consumer-side rename in PulseNest (`main.cpp`, `pulsenest_lab.py`,  |
+|         |               | `pulsenest_lab_spec.md`) done in the same pass. No behaviour change.        |
+| v0.80   | 2026-08-22    | **Bug fix: cross-thread race let a manual `$SET` gain/current/AMBDAC       |
+|         |               | change get combined with a stale raw ADC code before the settling window    |
+|         |               | was even armed (§5.8.4).** Distinct from v0.79: that fix covered            |
+|         |               | *recomputing* while already frozen; this one covers how the frozen snapshot |
+|         |               | gets *saved* in the first place. The six arming setters mutated their live  |
+|         |               | circuit-parameter member, *then* called `_arm_switched_rc_settling()` —     |
+|         |               | protected only by `_spi_mutex`, never `_state_mutex` (`_process_sample()`'s |
+|         |               | lock). A manual `$SET` runs on `Cmd_Task`, a different FreeRTOS task; if    |
+|         |               | `_task_body()` ran `_process_sample()` in the mutate→arm gap, it saw the    |
+|         |               | countdown still at 0, recomputed fresh, and combined an old raw code with   |
+|         |               | the already-new parameter — latching the wrong value into                  |
+|         |               | `_last_valid_analog_state` for the whole settling window. HGAC was never    |
+|         |               | exposed (mutates+arms sequentially, single-threaded, under `_state_mutex`). |
+|         |               | Suspected by Alex from a real capture ("a veces FW_OT_LED1 parece congelado |
+|         |               | con la RF nueva"). Fix: reorder to arm-before-mutate in all six setters     |
+|         |               | (`setTIAGainLED1/2`, `setLED1/2Current`, `setAmbDac`,                       |
+|         |               | `setStage2Gain`/`setStage2GainLED1/2`, `setStage2En1/2`) — safe because the |
+|         |               | countdown value depends only on `_afe_sample_rate_hz`, never on which       |
+|         |               | parameter changed. No new locks (rejected taking `_state_mutex` in the      |
+|         |               | setters: `_hgac_change_rf()` already nests a setter call under a           |
+|         |               | caller-held `_state_mutex`, so `Cmd_Task` acquiring `_spi_mutex` then       |
+|         |               | `_state_mutex` would invert the lock order → deadlock). Not covered by a    |
+|         |               | new automated test — the native suite is single-threaded and can't          |
+|         |               | reproduce cross-thread interleaving; the fix rests on the ordering argument |
+|         |               | above. Verified: `pio test -e native` 63/64 (unrelated pre-existing         |
+|         |               | `test_biquad` failure untouched); ESP32-S3 build (`incunest_V16`) SUCCESS.  |
+| v0.79   | 2026-08-22    | **Bug fix: freezing raw ADC codes during switched-RC settling wasn't        |
+|         |               | enough — `_compute_analog_state()` still combined them with LIVE (already   |
+|         |               | changed) circuit parameters, producing a stepped `OT` instead of a flat one |
+|         |               | (§5.8.4).** Found by Alex from a real capture: `ppg_disp` showed an abrupt  |
+|         |               | pulse (two steps bracketing the settle window) instead of the intended      |
+|         |               | smooth decay — RSQM/SpO2/HR1-3 were silently exposed to the same wrongly-   |
+|         |               | scaled `OT` for the whole window, not just the display. Fix: new member    |
+|         |               | `_last_valid_analog_state` (the full `AFE4490AnalogState`, not just raw     |
+|         |               | codes) saved every normal cycle; `_process_sample()` reuses it verbatim     |
+|         |               | while `_should_freeze_input()` instead of recomputing from stale-code +    |
+|         |               | live-parameter combinations. Chosen over freezing all 9 individual circuit  |
+|         |               | parameters (RF/RG/EN/AMBDAC/ILED separately) — fixes the mismatch by       |
+|         |               | construction, one new member instead of nine, `_compute_analog_state()`     |
+|         |               | untouched. New test `test_analog_state_stays_flat_during_settle_window`     |
+|         |               | (PulseNest `test_hgac.cpp`) proves it the strong way: feeds a bogus raw     |
+|         |               | code while frozen and asserts `OT` doesn't move. Verified: `pio test -e     |
+|         |               | native` 63/64 (unrelated pre-existing `test_biquad` failure untouched);     |
+|         |               | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
+| v0.78   | 2026-08-22    | **Docs only: comment on `_apply_analog_regs()` explaining why it's always   |
+|         |               | called unconditionally, even when a setter's value didn't change** — asked  |
+|         |               | by Alex while reviewing the `changed` guards added in v0.74-v0.77. Several  |
+|         |               | fields share one register (e.g. `TIAGAIN` packs `RF_LED1`+`CF_LED1`+        |
+|         |               | `STG2GAIN1`+`STAGE2EN1`+`ENSEPGAIN`), so any SPI write already retransmits  |
+|         |               | unchanged neighbours; rewriting the same bits has no physical effect (no    |
+|         |               | voltage step, nothing re-settles) and doubles as a forced resync — unlike   |
+|         |               | `_arm_switched_rc_settling()`, which IS guarded because it has a real cost  |
+|         |               | (freezes live data ~16 ms). No code change.                                |
+| v0.77   | 2026-08-22    | **`setStage2En1()`/`setStage2En2()` also arm switched-RC settling (§5.8.4)  |
+|         |               | — the follow-up decision left open in v0.76.** Bypassing Stage 2            |
+|         |               | (`STAGE2EN=0` → unity gain) vs. enabling it (`STAGE2EN=1` → gain `RG`)      |
+|         |               | steps the effective gain exactly like `setStage2Gain()` itself, so the same |
+|         |               | protection applies (same no-op guard: toggling to the current enable state  |
+|         |               | doesn't re-arm). New tests `test_stage2_en_toggle_arms_settling`,           |
+|         |               | `test_setting_same_stage2_en_does_not_rearm_settling` (PulseNest            |
+|         |               | `test_hgac.cpp`). Verified: `pio test -e native`; ESP32-S3 build            |
+|         |               | (`incunest_V16`) SUCCESS.                                                    |
+| v0.76   | 2026-08-22    | **Switched-RC settling extended to ILED, AMBDAC, and RG — not just RF       |
+|         |               | (§5.8.4).** Datasheet §7.7 t5 footnote (1) names "LED current setting, TIA  |
+|         |               | gain, and so forth" as triggers — RF was the only one wired up through      |
+|         |               | v0.75. `setLED1Current()`/`setLED2Current()`, `setAmbDac()`, and            |
+|         |               | `setStage2Gain()`/`setStage2GainLED1/2()` now call                          |
+|         |               | `_arm_switched_rc_settling()` themselves too, with the same no-op guard as  |
+|         |               | RF (re-applying the same value doesn't re-arm). AMBDAC and RG sit in the    |
+|         |               | identical feedback path as RF (Eq. 2) — a step in either produces the same  |
+|         |               | kind of transient. `setTIACF*()` deliberately excluded: CF only shapes      |
+|         |               | transient response, not the DC operating point (no CF term in Eq. 2).       |
+|         |               | `setStage2En1/2()` (which also steps effective gain, unity↔RG) noticed but  |
+|         |               | left for a follow-up decision, not folded in silently. New tests            |
+|         |               | `test_led_current_change_arms_settling`, `test_ambdac_change_arms_settling`,|
+|         |               | `test_stage2_gain_change_arms_settling`,                                    |
+|         |               | `test_setting_same_led_ambdac_rg_does_not_rearm_settling` (PulseNest        |
+|         |               | `test_hgac.cpp`). Verified: `pio test -e native`; ESP32-S3 build            |
+|         |               | (`incunest_V16`) SUCCESS.                                                    |
+| v0.75   | 2026-08-22    | **Rename: `_rsqm_settling_countdown`/`RSQM_DIAG_HW_SETTLING`/               |
+|         |               | `_arm_settling()`/`_compute_afe_settle_samples()` → their                   |
+|         |               | `*_switched_rc_settling_*` equivalents (§5.8.4).** Found by Alex: "settling"|
+|         |               | alone was ambiguous among three unrelated phenomena in this library — the   |
+|         |               | TIA's own RC pole (τ=RF·CF, one sample), the LED/cable transient (also one  |
+|         |               | sample), and this one (several PRP cycles, the datasheet's 3 ms minimum).   |
+|         |               | "Switched RC" is the datasheet's own term (§7.7 t5 footnote (1): "four      |
+|         |               | switched RC filters"), chosen over `gain_settling` (names the trigger, not  |
+|         |               | the mechanism — would misdescribe a future ILED-triggered case, since ILED  |
+|         |               | is a current, not a gain) and `sample_hold_settling` (not the datasheet's   |
+|         |               | term). Also fixed the `RSQM_DIAG_*` bit comment (§3) to explain the         |
+|         |               | distinction from the other two settling phenomena. Historical changelog    |
+|         |               | rows below (v0.35–v0.72) intentionally still use the old names — they      |
+|         |               | describe what those commits did at the time, not the current identifiers.  |
+|         |               | Internal-only, no behaviour change. Verified: `pio test -e native`;         |
+|         |               | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
+| v0.74   | 2026-08-22    | **A manual RF change now arms the settle window too, not just an HGAC one   |
+|         |               | (§5.8.4).** Found by Alex: `_rsqm_settling_countdown` was only armed inside |
+|         |               | `_hgac_change_rf()` — calling `setTIAGainLED1/2()`/`setTIAGain()` directly  |
+|         |               | (e.g. a manual `$SET,tiagain1,...` from the host) changed RF with zero      |
+|         |               | input-freeze protection (v0.72), even though the same physical transient   |
+|         |               | occurs regardless of who initiated the change. New `_arm_settling()`        |
+|         |               | (guarded: re-applying the same value is a no-op) is now called from the     |
+|         |               | three public setters; `_hgac_change_rf()`'s own separate arm removed (gets  |
+|         |               | it for free through the setter it already calls).                          |
+|         |               | **`_rsqm_settling_countdown` is now `volatile`** — with the arm reachable   |
+|         |               | from any caller, it can be written from a different thread (e.g. `Cmd_Task` |
+|         |               | on a manual `$SET`) than the one that reads/decrements it (`_task_body()`). |
+|         |               | No mutex: both sides only ever do a plain 32-bit store or decrement, never  |
+|         |               | a cross-thread read-modify-write, so the worst-case race is benign (±1     |
+|         |               | sample of settle duration) — same reasoning already applied to             |
+|         |               | `_diag_active`/`_diag_holdoff_samples`.                                     |
+|         |               | New tests `test_manual_rf_change_also_arms_settling` and                   |
+|         |               | `test_setting_same_gain_does_not_rearm_settling` (PulseNest `test_hgac.cpp`). |
+|         |               | Verified: `pio test -e native`; ESP32-S3 build (`incunest_V16`) SUCCESS.    |
+| v0.73   | 2026-08-21    | **Docs only: `tia_settle_min` PRF dependence reviewed (§7.2).** Confirmed   |
+|         |               | it does NOT scale with PRF (flat `constexpr`, always 12.5 µs regardless of  |
+|         |               | `_afe_sample_rate_hz`) — and that this is almost certainly the right shape, |
+|         |               | since its purpose (LED/cable turn-on settling, §8.3.1.3) is a hardware      |
+|         |               | property independent of pulse rate. Sharpened the existing provenance note  |
+|         |               | (`9fb2831`): datasheet Table 2's own footnote (1), p.36, states its values  |
+|         |               | are "based off PRF = 500 Hz and duty cycle = 25%" — the "50" `tia_settle_min` |
+|         |               | was lifted from is TI's single worked example, never stated as a rule for  |
+|         |               | any other rate. No code change: the formula's structure (fixed floor +     |
+|         |               | PRF-proportional term) was already correct, only the exact magnitude has   |
+|         |               | weak provenance, same class of finding as `tia_settle_fraction`/`tia_n_tau`. |
+| v0.72   | 2026-08-21    | **`RSQM_DIAG_HW_SETTLING` is now enforced, not just labelled** (found by    |
+|         |               | Alex from a visible spike in `ppg_disp` whenever HGAC changes RF).         |
+|         |               | `_task_body()`'s freeze condition — `_diag_active \|\| _diag_holdoff_samples`|
+|         |               | `> 0 \|\| _rsqm_settling_countdown > 0` — now also covers the settling window |
+|         |               | opened by `_hgac_change_rf()` (§5.8.4), reusing the exact same frozen-      |
+|         |               | last-valid-input mechanism already used for the post-diagnostic holdoff:   |
+|         |               | "same physical phenomenon (analog front-end re-settling), two different    |
+|         |               | triggers." Before this, the bit was set in `diag_code` but nothing         |
+|         |               | actually stopped SpO2/HR1/HR2/HR3/`ppg_disp` from processing the real      |
+|         |               | (transient) values during that window — only HGAC's own Gate G0 checked    |
+|         |               | it, to pause its own actuation. `_rsqm_settling_countdown` is decremented   |
+|         |               | inside `_process_sample()` (`_rsqm_update()`) unconditionally, whether fed  |
+|         |               | frozen or fresh inputs, so no extra bookkeeping was needed beyond the OR    |
+|         |               | term. Renamed `_diag_last_*` → `_last_valid_*` (no longer diagnostics-      |
+|         |               | specific) across `.h`/`.cpp`. Fixes `ppg_disp`'s visible spike AND a        |
+|         |               | latent, previously-unreported issue: SpO2/HR1/HR2/HR3 were silently        |
+|         |               | exposed to the same RF-change transient. Verified: `pio test -e native`;   |
+|         |               | ESP32-S3 build (`incunest_V16`) SUCCESS.                                    |
+| v0.71   | 2026-08-21    | **Docs only: plausible physical derivation of `tia_axis::LIN_V` = 1.8 V**   |
+|         |               | (§3c), previously purely empirical (`tia_linearity_sweep.py`, no theory     |
+|         |               | recorded). Alex connected two independently-documented datasheet facts      |
+|         |               | never linked before: §8.3.4 regulates the receive analog rail to 1.8 V      |
+|         |               | internally, and §8.3.1.1's ambient-DAC common-mode (0.9 V, "set             |
+|         |               | internally", p.11) is exactly half of it. A symmetric fully-differential    |
+|         |               | output centred at 0.9 V on a 0–1.8 V rail reaches its maximum differential  |
+|         |               | swing (one node at 1.8 V, the other at 0 V) at exactly 1.8 V — matching     |
+|         |               | `LIN_V` exactly, with `FS_V` (1.0 V, TI-guaranteed) sitting inside it as    |
+|         |               | guardband, and the measured hard clip (~1.94 V) slightly past it as         |
+|         |               | expected real-silicon headroom, not a contradiction. Not verified against a |
+|         |               | schematic — recorded as the most plausible explanation found, not a         |
+|         |               | certainty. No code change.                                                  |
+| v0.70   | 2026-08-21    | **500 Hz post-stage2 filter pole vs. settle window (§5.8.4) reviewed —      |
+|         |               | closes the last open item from the v0.65 settling work.** Computed          |
+|         |               | numerically across the full `setSampleRate()` range (63–5000 Hz): at every  |
+|         |               | rate this library is actually used at (500 Hz default), the settle window  |
+|         |               | covers the filter's 5τ (1.59 ms) with 10×–39× margin. Docs only, no code    |
+|         |               | change for this part.                                                       |
+|         |               | **Found in the process (docs only, not fixed):** the settle-window          |
+|         |               | calculation itself collapses above ~2487 Hz (still within the documented   |
+|         |               | valid range of `setSampleRate()`) — a more severe, now-quantified           |
+|         |               | re-statement of the pre-existing "Valid for PRF ≤ ~2 kHz" caveat already on |
+|         |               | `ambient_margin`. Above that threshold `_compute_ambient_sample_window_counts()` |
+|         |               | returns 0, collapsing `_compute_afe_settle_samples()` to its 1-sample floor  |
+|         |               | (under even the raw 3 ms datasheet requirement) and, at the register level,  |
+|         |               | `_apply_timing_regs()` would write an inverted `ALEDxSTC > ALEDxENDC` pair.  |
+|         |               | Out of scope here (this project only runs at 500 Hz) — tracked in memory.   |
+| v0.69   | 2026-08-21    | **`ppg_disp` migrated to the OT domain — the last consumer of raw           |
+|         |               | `led1_sub`/`led2_sub` joins the gain-invariance migration HR1/HR2/HR3/SpO2  |
+|         |               | already went through (§5.1/§5.2, since v0.38).** Found by Alex: `ppg_disp`  |
+|         |               | was the only signal still scaled by RF, so it visibly jumped whenever HGAC  |
+|         |               | changed gain — the exact artefact OT fixed everywhere else.                 |
+|         |               | `AFE4490Data::ppg_disp`: `int32_t` → `float` (OT magnitude ~1e-5..1e-6      |
+|         |               | truncates to 0 as an int). Source: bandpass-filtered `ot_led1`/`ot_led2`    |
+|         |               | (was `led1_sub`/`led2_sub`). `AFE4490Channel` enum shrunk from 6 values to  |
+|         |               | 2 (`LED1`/`LED2`): the four single-ended raw options (bare LED1/LED2/       |
+|         |               | ALED1/ALED2) have no OT equivalent — OT is structurally an ambient-         |
+|         |               | corrected ratio (`AFE4490AnalogState` has no `ot_aled1`/`ot_aled2`) — and   |
+|         |               | `setPPGChannel()` was their only consumer, so they were dropped rather than |
+|         |               | kept meaningless. NOT normalized for display (deliberately deferred — a    |
+|         |               | candidate `ppg_disp_norm`, PI-weighted [0..1], is backlog, not this         |
+|         |               | change). §1.3/§2.1/§3 corrected in the same pass: fixed pre-existing spec   |
+|         |               | drift found while touching this code — stale field names                   |
+|         |               | (`led2_aled2`/`led1_aled1`, actual code has used `led2_sub`/`led1_sub` for  |
+|         |               | some time), a phantom `int32_t ppg` struct field that no longer exists in   |
+|         |               | the header, and a processing-chain diagram that still routed HR1 through    |
+|         |               | `setPPGChannel()` when it has consumed `ot_led1` directly since v0.38.      |
+|         |               | PulseNest: wire frames `$M1`-`$M4` change `PPG_DISP`'s format from `%ld`    |
+|         |               | to `%.4e` (units A/A, was ADC counts); `channel_str()` in `main.cpp`        |
+|         |               | updated for the 2-value enum. `pulsenest_lab.py`/`pulsenest_lab_spec.md`:   |
+|         |               | `PPG_DISP` tooltip/type corrected (parsing was already `float(x)`, no      |
+|         |               | code change needed there); `LED1_SUB`/`LED2_SUB` tooltips also corrected    |
+|         |               | in the same pass — they still claimed to feed HR1/HR2/HR3/SpO2, another    |
+|         |               | pre-existing drift from the same v0.38 OT migration that was never         |
+|         |               | reflected in the lab's tooltips.                                            |
+| v0.68   | 2026-08-20    | **CF/RF atomicity reviewed (§5.8.4) — no bug, closes an open question from  |
+|         |               | the v0.65 settling work.** `RF_LEDx`/`CF_LEDx` share the same 24-bit         |
+|         |               | register (`TIAGAIN`/`TIA_AMB_GAIN`), and `setTIAGainLED1/2()` recomputes CF  |
+|         |               | for the new RF *before* the single SPI write in `_apply_analog_regs()` — the |
+|         |               | chip never observes a transient RF-new/CF-old combination, and `getConfig()` |
+|         |               | reads both fields under the same `_spi_mutex` (no torn read either).         |
+|         |               | Documented inline in `_hgac_change_rf()` and in §5.8.4. New regression test  |
+|         |               | `test_hgac_change_rf_recalculates_cf` (PulseNest `test_hgac.cpp`) exercises  |
+|         |               | CF recalculation through the HGAC entry point specifically (previously only  |
+|         |               | covered via the public `setTIAGain()` in `test_tia_cf.cpp`). Also fixes      |
+|         |               | `INCUNEST_AFE4490_VERSION` macro, stuck at "0.64" since v0.65 (comment/      |
+|         |               | `library.json` were bumped correctly each time, this `#define` was missed). |
+|         |               | Comments/tests only, no behaviour change.                                    |
+| v0.67   | 2026-08-20    | **Rename: `_compute_settle_margin()` → `_compute_led_on_to_sample_margin_counts()`** |
+|         |               | (found by Alex reviewing v0.66). "Settle" was ambiguous two ways: (1) the    |
+|         |               | datasheet's stated cause is LED/cable settling (§8.3.1.3), but the library   |
+|         |               | also reuses the same figure as the TIA-τ budget for auto-CF — a name        |
+|         |               | asserting either cause alone would be partly wrong for the other call site;  |
+|         |               | (2) it collided with the unrelated `_compute_afe_settle_samples()` (v0.65,   |
+|         |               | the datasheet-t5 post-register-change wait) — same word, different          |
+|         |               | timescale (µs-level per-phase margin vs. ms-level post-config countdown).    |
+|         |               | New name describes what the value structurally IS (`LEDxSTC = LEDxLEDSTC +` |
+|         |               | this margin) without taking a side on WHY, and adds the `_counts` suffix    |
+|         |               | for consistency with `_compute_led_sample_window_counts()` /                |
+|         |               | `_compute_ambient_sample_window_counts()` (v0.66). Internal-only, no        |
+|         |               | behaviour change.                                                           |
+| v0.66   | 2026-08-20    | **Rename: `_compute_sample_window_counts()` only ever covered the LED phase** |
+|         |               | (found by Alex reviewing v0.65) — renamed to `_compute_led_sample_window_counts()`, |
+|         |               | paired with a new symmetric `_compute_ambient_sample_window_counts()` (was  |
+|         |               | inline arithmetic duplicated inside `_compute_afe_settle_samples()`). Both now |
+|         |               | delegate to a shared `_window_counts(margin)` clamp, removing the duplicated |
+|         |               | `(q > margin+2) ? q-2-margin : 0` formula. `_compute_afe_settle_samples()` is  |
+|         |               | now `min(led(), ambient())` — no inline `q`/margin arithmetic left in it.    |
+|         |               | `getCFMaxEq1PF()` updated to the new LED-window name (datasheet Eq. 1's "Rx  |
+|         |               | Sample Time" is specifically the LED window, per Fig. 58 — never ambient).   |
+|         |               | Internal-only, no behaviour change; `pio test -e native` unaffected.        |
+| v0.65   | 2026-08-20    | **`afe_settle_time_s` (0.15 s fixed guess) replaced by `_compute_afe_settle_samples()`,** |
+|         |               | derived from datasheet §7.7 t5 (p.17): "> 3 ms of cumulative sampling time  |
+|         |               | in each phase" after any signal-chain change, footnote (1) naming "TIA     |
+|         |               | gain" explicitly. New private method computes `ceil(3 ms / phase_window_s)` |
+|         |               | from the shorter of the LED/ambient sample windows (both symmetric between  |
+|         |               | LED1/LED2, so one figure covers either HGAC color domain); depends only on  |
+|         |               | `_afe_sample_rate_hz`, recomputed live instead of hardcoded. At the default  |
+|         |               | 500 Hz config this yields 8 samples (~16 ms) vs. the old 150 ms — ≈9×       |
+|         |               | shorter and, unlike the old value, traceable to the datasheet instead of an |
+|         |               | undocumented guess (§5.8.4, §7.2). New named constant                      |
+|         |               | `afe_ambient_margin_counts` (was a bare `400` literal in                    |
+|         |               | `_apply_timing_regs()`) shared by both call sites. §5.8.4 total-delay        |
+|         |               | figures (guard/leveling re-arm after an RF step) updated accordingly.       |
+| v0.64   | 2026-08-19    | **HGAC: `hgac_v_tia_low1` default 0.25→0.20 V** (§5.8.1). Widens the        |
+|         |               | leveling dead-band by lowering LOW1, not raising HIGH1: HIGH1 is capped by   |
+|         |               | its 0.15 V margin to HIGH2/GUARD (safety against saturation), while LOW1 has |
+|         |               | no symmetric lower guard (`v_tia_diff ≥ 0` always) — widening there only     |
+|         |               | costs SNR, never safety. Also fixes the tightest anti-hunting margin (0.05 V |
+|         |               | at the RF ×2.5 step boundaries) found for the old value; new stability      |
+|         |               | invariant `HIGH1/LOW1 = 3.75 > 2.5×` (was 3.0). PulseNest's `test_hgac.cpp`  |
+|         |               | no longer hardcodes a raw ADC code for its weak-signal case — it derives it  |
+|         |               | from the object's own `hgac_v_tia_low1` (via `getConfig()`), so this default |
+|         |               | can move again without silently breaking the test.                          |
+| v0.63   | 2026-08-17    | **Datasheet Equation 1 exposed as a check (no behaviour change).** New       |
+|         |               | `getCFMaxEq1PF(rf)` returns the chip's own CF ceiling                         |
+|         |               | (`RF × CF ≤ Rx Sample Time / 10`, §8.3.1.1), plus private                     |
+|         |               | `_compute_sample_window_counts()` (= q − 2 − margin). Auto-CF is ≈4.5×        |
+|         |               | stricter and provably stays inside Eq. 1 (`test_autocf_always_within_eq1`);   |
+|         |               | a MANUAL `setTIACF*()` can exceed it and is deliberately not clamped —        |
+|         |               | PulseNest now emits `# WARN … applied anyway` after such a $SET.              |
+|         |               | Spec §7.2 documents that `tia_settle_fraction` and Eq. 1's `/10` govern       |
+|         |               | DIFFERENT decisions and must not be substituted: per §8.3.1.3 the sample-     |
+|         |               | start delay exists for **LED/cable** settling, not TIA settling, so Eq. 1     |
+|         |               | (which only bounds CF) cannot supply a criterion for it. Both numbers kept    |
+|         |               | unchanged: the margin is conservative but free, and shrinking it without      |
+|         |               | measuring the LED/cable transient risks sampling before the LED settles.      |
+|         |               | Also corrects the strictness ratio stated in v0.62: ≈4.5×, not ~10×.          |
+|         |               | `test_tia_cf` grows 9 → 13 cases.                                            |
+|         |               | §7.2 additionally records the provenance of all three settle constants:       |
+|         |               | NONE comes from the datasheet. `tia_settle_min`=50 is TI's Table 2 example    |
+|         |               | value; `tia_settle_fraction`=0.10 is probably Eq. 1's `/10` misapplied;       |
+|         |               | `tia_n_tau`=5.0 is the generic five-time-constants rule of thumb (its         |
+|         |               | "< 0.7% error" comment is circular — 0.7% IS e⁻⁵). The datasheet's implied    |
+|         |               | count is 10τ, so raising `tia_n_tau` 5→10 "to match TI" while keeping the     |
+|         |               | margin basis would make the criterion twice as STRICT, not laxer — the three  |
+|         |               | constants only make sense together. All kept unchanged.                       |
+| v0.62   | 2026-08-16    | **TIA CF: expose all 32 register codes (was 6).** Found by Alex reviewing     |
+|         |               | `_recalc_afe_tia_cf_led1()` against datasheet Figure 114. `CF_LED[4:0]` is    |
+|         |               | not a 6-value enum: it switches five capacitors in parallel over a fixed 5 pF |
+|         |               | base (weights 5/15/25/50/150 pF), so all 32 combinations are legal —          |
+|         |               | 5…250 pF. The old `enum class AFE4490TIACF` covered only the six single-bit   |
+|         |               | settings; its values were CORRECT but the grid was incomplete, making auto-CF |
+|         |               | under-select. Changes: `AFE4490TIACF` → `using AFE4490CFCode = uint8_t` (the  |
+|         |               | code IS the value); `kAFE_CF_PF[6]` → `[32]`; new `kAFE_CF_STR[32]`,          |
+|         |               | `afeCFCodeToPF()`, `afeCFPFToCode()` (quantise DOWN — never overshoot the 5τ  |
+|         |               | budget); `cf_code[]` LUT deleted (now `(code & 0x1F) << 3`); setters take pF  |
+|         |               | (`setTIACF(float)`), mirroring `_quantize_led_mA()`; `AFE4490Config` exposes  |
+|         |               | `afe_tia_cf_ledN_code` + `_pF`. `afeStrToCF()` still accepts the six pre-v0.62 |
+|         |               | strings → no $CFG/$SET protocol break. `kAFE_CF_MATCH_TOL` (1e-4) added: the  |
+|         |               | budget computes 99.9999924 instead of 100.0 in float, which would have        |
+|         |               | silently dropped a whole step and negated the change. **Behaviour change:**   |
+|         |               | auto-CF at the default 500 Hz / RF_100K now picks **100 pF (was 55 pF)**;     |
+|         |               | f_pole ≈ 15.9 kHz, far above the PPG band. Every RF/Fs combination improves   |
+|         |               | or is unchanged; none violates 5τ.                                            |
+|         |               | New `test_tia_cf` (9 cases) covers the LUT vs. datasheet weights, quantise-   |
+|         |               | down, round-trips, legacy strings and the float-tolerance regression.         |
+|         |               | **Verified on 16.A (2026-08-17):** sweeping CF over its full 5–250 pF range   |
+|         |               | changes neither V_TIA (±1 mV = drift) nor `LED1_SUB` %SD/Mean (0.01 → 0.01).  |
+|         |               | An earlier claim in this changelog that the change bought "~1.8× more noise   |
+|         |               | filtering" was NOT supported by measurement and has been removed: the         |
+|         |               | internal 500 Hz filter (FLTRCNRSEL) dominates the noise bandwidth and sits    |
+|         |               | before the sampler. v0.62's value is fixing an incomplete register grid, not  |
+|         |               | improving SNR. See §7.2 "Measured behaviour" for the data, the write-path     |
+|         |               | control, and why the auto-CF criterion is ≈4.5× stricter than datasheet Eq.1. |
+| v0.61-experiment (doc fix) | 2026-08-16    | **§5.8.4 corrected: `afe_settle_time_s` and the EMA warmup are SEQUENTIAL, not overlapped.** |
+|         |               | No code change — the spec previously claimed the 3·τ EMA warmup "comfortably absorbs"  |
+|         |               | the 150 ms settling window (implying they run in parallel). Wrong: Gate G0             |
+|         |               | (`_hgac_update()`) closes off while `RSQM_DIAG_HW_SETTLING` is active and `reset()`s the |
+|         |               | four EMAs on EVERY sample during that window (not once) — `count` stays pinned at 0, so  |
+|         |               | `EmaChannel::update()` is never called and the warmup counter cannot advance until the  |
+|         |               | settling countdown reaches 0. Corrected total delay after an RF change: guard operative  |
+|         |               | again at `afe_settle_time_s` + 3×τ_fast = 0.45 s (was documented as 0.3 s); leveling/    |
+|         |               | ambient at + 3×τ_slow = 6.15 s (was 6 s). Found by Alex while reviewing the design.      |
+| v0.61-experiment | 2026-08-16    | **ProbeState classifier: discriminate saturation by phase (probe-in-air vs external light).** |
+|         |               | Fixes HGAC driving RF to the floor when the finger is removed. Was: *any* positive     |
+|         |               | saturation → PROBE_SATURATING → HGAC acts. Now (`_rsqm_update`): if not saturated, OT   |
+|         |               | classifies presence as before; if saturated, look at WHICH phase clips — an ambient    |
+|         |               | (ALED) phase also clipping → external light → PROBE_SATURATING (HGAC corrects); only    |
+|         |               | LED phases clipping, ambient clean → the LED's own light hits the PD with no tissue →   |
+|         |               | **PROBE_NOT_APPLIED** (probe in air), so HGAC freezes RF instead of chasing it down.    |
+|         |               | OT is the discriminator's basis (ambient-invariant, subtracts ALED). Limitation:       |
+|         |               | LED-only clip can't tell air from a rare no-ambient tissue over-saturation → assumed    |
+|         |               | air. Spec §5.6.2 rewritten; PROBE_SATURATING enum comment updated. HGAC unchanged.      |
+|         |               | test_hgac: the old "LED-dominated → descend" test became "LED-only sat = probe in air → |
+|         |               | HGAC frozen". 38/38 native tests, ESP32-S3 V16 build OK.                                 |
+| v0.60-experiment | 2026-08-09    | **Move the ambient alarm out of `_hgac_track()` (separate actuation/diagnostic).** |
+|         |               | `_hgac_track()` is pure actuation again (returns void); the AMBIENT_HIGH condition moves|
+|         |               | to a new `_hgac_ambient_high(color, ambient)` evaluated in `_hgac_update()`. Same        |
+|         |               | producer (HGAC — depends on RF state, so not RSQM), but no longer nested in the guard   |
+|         |               | branch. Behaviour change: the alarm no longer requires the LED guard (`fast`) to have    |
+|         |               | tripped — condition is now just `RF==floor && ambient≥HIGH2` (ALED is the direct ambient |
+|         |               | indicator). Cleaner separation and drops the spurious `fast` dependency. Tests unchanged |
+|         |               | (8/8), ESP32-S3 V16 build OK.                                                            |
+| v0.59-experiment | 2026-08-09    | **HGAC ambient-light alarm (`RSQM_DIAG_AMBIENT_HIGH`, bit 14).**            |
+|         |               | When the guard is tripped but RF is already at the floor, HGAC now discriminates the  |
+|         |               | cause with a third per-domain EMA on the **ALED** phase (`hgac_ema_ambient_tau_s`,     |
+|         |               | default 2 s, sustained): if ambient alone ≥ HIGH2, lowering RF/ILED can't help         |
+|         |               | (`v_tia_led ≥ v_tia_aled`) → raise bit 14 "TOO MUCH AMBIENT LIGHT" (global OR across    |
+|         |               | domains). Reuses the bit freed by SIGNAL_WEAK's removal; distinct from `AMB_SAT`        |
+|         |               | (per-sample hard rail). `_hgac_track()` returns the alarm and `_hgac_update()` publishes|
+|         |               | it into `_current_data.diag_code`. Consumer: pulsenest_lab DiagCode tooltip (operator-  |
+|         |               | actionable). test_hgac +2 (alarm at floor; no alarm when LED-dominated). 38/38 native   |
+|         |               | tests, ESP32-S3 V16 build OK.                                                           |
+| v0.58-experiment | 2026-08-09    | **HGAC rebuilt: RF-only, two EMA per gain domain (guard + leveling).**      |
+|         |               | Replaces the single TIAGUARD guard + debounce + descent-only design. Per domain (LED |
+|         |               | phase only): a **fast** EMA (τ 0.1 s) drives an urgent HIGH2 guard (0.90 V), a **slow**|
+|         |               | EMA (τ 2 s) drives a bidirectional HIGH1/LOW1 leveling dead-band (0.75/0.25 V) — so RF |
+|         |               | now both descends AND ascends. No debounce (the EMA τ is the temporal filter).        |
+|         |               | `EmaChannel` gains optional `warmup_s` + `valid()`; HGAC uses 3·τ warmup, and          |
+|         |               | `_hgac_change_rf()` **resets** the domain's EMAs on a gain step (warmup doubles as     |
+|         |               | cooldown; no analytic rescale). Renames: `tia_axis::GUARD_V`→`HIGH2_V`;                |
+|         |               | `hgac_v_tia_thr`→`hgac_v_tia_high2`; added `hgac_v_tia_high1`, `hgac_v_tia_low1`,      |
+|         |               | `hgac_ema_fast_tau_s`, `hgac_ema_slow_tau_s`; removed `hgac_tiaguard_debounce_min_s`.  |
+|         |               | Setters renamed/added accordingly; `_hgac_step_rf_down`/`_hgac_check_tiaguard` →       |
+|         |               | `_hgac_change_rf`/`_hgac_track`. Only led1/led2 tracked (ALED reserved for the         |
+|         |               | deferred ambient alarm). API-breaking (config fields, setters, wire keys). test_hgac   |
+|         |               | rewritten (6 behavioural tests: guard→floor, warmup, disabled, leveling→raises RF,     |
+|         |               | reset+rewarm, SpO2-EMA-untouched). 36/36 native tests, ESP32-S3 V16 build OK.          |
+| v0.57-experiment | 2026-08-07    | **Remove RSQM's EMA estimators, the `ready` gate, and the RSQM EMA τ config.** |
+|         |               | Follow-on to v0.56: once SIGNAL_WEAK was gone, `_rsqm_led1/2_sub_ema` fed only their   |
+|         |               | sample `.count` (the `ready = count ≥ rsqm_ready_count` gate), and `ready` fed only     |
+|         |               | `rsqi`'s 12 s warm-up — itself a vestige of SIGNAL_WEAK (no statistic left to mature).   |
+|         |               | Removed: the two `EmaChannel`s, `rsqm_ready_count`, `ready`, and (cascade) the now-inert |
+|         |               | `rsqm_ema_mean_tau_s`/`rsqm_ema_var_tau_s` config + `setRsqmEmaTau()` + `getConfig()`    |
+|         |               | copies + `$LCFG`/`$SET` wiring + LIBConfig controls. `rsqi` is now                        |
+|         |               | `PROBE_APPLIED && diag_code==0` (responsive, no warm-up — probe-state is instantaneous,  |
+|         |               | and SpO2/HR keep their own warm-ups). Spec §5.6.1 rewritten. API-breaking (config fields  |
+|         |               | + setter + wire keys). 36/36 native tests, ESP32-S3 V16 build OK.                         |
+| v0.56-experiment | 2026-08-07    | **Remove `RSQM_DIAG_SIGNAL_WEAK` (bit 14) end-to-end.**                    |
+|         |               | No actionable consumer (only the aggregate `rsqi` gate + display), not fixable by |
+|         |               | gain (RF scales AC and DC together → PI/ratio invariant), and redundant with the  |
+|         |               | PI-based `spo2_sqi`. Removed: the bit, `rsqm_signal_weak_std` config field + `2000`|
+|         |               | default + `setRsqmSignalWeakStd()` + `getConfig()` copy, the producer block in     |
+|         |               | `_rsqm_update()`, and the `$LCFG`/`$SET` wiring + LIBConfig control in PulseNest.  |
+|         |               | Bit 14 (0x4000) left free — reintroduce as `RSQM_DIAG_AC_LOW` if a pulsatile-      |
+|         |               | amplitude flag is ever needed. API-breaking (config field + setter + bit + wire).  |
+|         |               | Note: `_rsqm_led1/2_sub_ema` now feed only `.count` (for `ready`); their var/mean   |
+|         |               | are unconsumed (candidate to reduce to a plain sample counter). 36/36 native tests, |
+|         |               | ESP32-S3 V16 build OK.                                                              |
+| v0.55-experiment | 2026-08-07    | **`EmaChannel::update()` seeds on the first sample.**                      |
+|         |               | `count == 0` → `mean = x`, `var = 0` (was: ramp `mean` from 0). Ramping from 0 left    |
+|         |               | `d = x − mean ≈ x` for ~3·τ, spuriously inflating `var` (→ PI, RSQM SIGNAL_WEAK) during |
+|         |               | warm-up. Fixes the start-up bias; does NOT shorten `spo2_warmup_s` / `rsqm_ready_count` |
+|         |               | (var still needs ~3·τ_var to be representative). Steady state unchanged. Behaviour      |
+|         |               | change only in the transient after construction/`reset()`. Affects all EmaChannel users |
+|         |               | (RSQM, SpO2). 36/36 native tests (same as baseline), no regression.                     |
+| v0.54-experiment | 2026-08-07    | **Remove the `IDEAL` (0.6 V) v_tia threshold — unused.**                    |
+|         |               | `tia_axis::IDEAL_V` and the `hgac_v_tia_ideal` config field (default + `getConfig()` |
+|         |               | copy) deleted; the ascending `static_assert` drops the `IDEAL_V <` term. It was      |
+|         |               | telemetry-only in v1 and never consumed by any control logic. RF is a discrete 7-step |
+|         |               | actuator (×2–3 jumps) → no fine setpoint is reachable, so a "target DC" is meaningless: |
+|         |               | v1 control is a dead-band `[LOW, HIGH]` + `GUARD`, no attractor at the centre. Would    |
+|         |               | only matter for a future feed-forward jump (Phase 5). API-breaking: `AFE4490Config`     |
+|         |               | loses a field (no wire/firmware consumer — `$CFG` never sent it). 36/36 native tests,   |
+|         |               | ESP32-S3 (incunest_V16) build OK.                                                       |
+| v0.53-experiment | 2026-08-03    | **Consolidate ADC constants into `namespace adc`.**                        |
+|         |               | `kAFE_ADC_FS_CODE`/`kAFE_ADC_FSR` (file-scope) and `kAdcSatPos`/`kAdcSatNeg`     |
+|         |               | (`AFE4490AnalogState`) moved to `namespace adc`: `FS_CODE`/`FSR`/`SCALE`, NOMINAL |
+|         |               | vs ACTUAL code rails, and guarded `SAT_POS`/`SAT_NEG` (guard now explicit).      |
+|         |               | Removed `tia_axis::ADC_SAT_V` (duplicate 1.2 V) — `tia_axis` references          |
+|         |               | `adc::FSR`. Internal reorg, no API consumer outside the library.                 |
+| v0.52-experiment | 2026-08-03    | **Rename `v_tia_diff` → `v_tia` (drop the `_diff` suffix).**                |
+|         |               | All identifiers, config fields (`hgac_v_tia_thr`/`hgac_v_tia_ideal`), the       |
+|         |               | setter (`setHgacVTiaThr`), comments and CSV column headers (`V_TIA_*`).          |
+|         |               | Rationale (Alex): only the differential value exists, so `_diff` is redundant   |
+|         |               | and falsely implies a `v_tia_branch` that is nowhere in the code. Removed the    |
+|         |               | old "naming rule 4b". API-breaking: config/setter renamed; CSV headers change    |
+|         |               | from `V_TIA_DIFF_*` to `V_TIA_*` (breaks by-name parsing of older captures).      |
+| v0.51-experiment | 2026-08-03    | **Removed `AFE4490AnalogState::kVTiaDiffFs`/`kVTiaDiffLin` aliases.**       |
+|         |               | They only re-exposed `tia_axis::FS_V`/`LIN_V` (the single source of truth); the   |
+|         |               | `tia_over_fs`/`tia_over_lin` masks now compare against `tia_axis::` directly.     |
+| v0.50-experiment | 2026-07-31    | **PROBE_SATURATING checks POSITIVE saturation only (`anyPositiveSaturation`).**|
+|         |               | RSQM's saturation branch changed from `!allValidRange()` to                     |
+|         |               | `anyPositiveSaturation() = (adc_sat_pos \| tia_over_fs)`. Rationale (Alex): the  |
+|         |               | probe can only saturate from above (photocurrent unipolar); the ADC only rails  |
+|         |               | NEGATIVE via AMBDAC (unused in v1, and its neg rail was itself characterised via |
+|         |               | an AMBDAC sweep), and a negative rail wouldn't be cleared by reducing RF/ILED.   |
+|         |               | Identical behaviour today (AMBDAC=0 → adc_sat_neg always 0); differs only if     |
+|         |               | AMBDAC is enabled (layer v2). New helper `anyPositiveSaturation()`;              |
+|         |               | `allValidRange()` removed. No behaviour change. 36/36 tests, build OK.        |
+|         |               | Also renamed `_rsqm_set_probe_state()` to `_rsqm_request_probe_state()`:    |
+|         |               | a debounce gate that commits a state only after N consecutive identical     |
+|         |               | requests, not an imperative setter; the name now matches its `requested`    |
+|         |               | parameter and contract. Private method, no signature/behaviour change.      |
+|         |               | Removed the diag-task on-state-change trigger (`xTaskNotify` from           |
+|         |               | `_rsqm_request_probe_state`); `_diag_task_body` now polls via `vTaskDelay`  |
+|         |               | every rsqm_diag_period_ms (5 s). The notification only advanced the first   |
+|         |               | diagnostic by <=5 s while no patient was present (no value) and woke the    |
+|         |               | task pointlessly on transitions into APPLIED/SATURATING. Behaviour change.  |
+|         |               | Detector: the two `_rsqm_request_probe_state()` call sites (DISCONNECTED    |
+|         |               | branch + else) collapsed into one flat if/else-if priority ladder with a    |
+|         |               | single call, matching the priority order already in §5.6.                   |
+|         |               | Readability only, no behaviour change.                                      |
+|         |               | Diag task gate is now a whitelist (DISCONNECTED || NOT_APPLIED) instead     |
+|         |               | of a blacklist (not APPLIED, not SATURATING). Runs runAfeDiagnostics only   |
+|         |               | in states with no patient confirmed. Any future ProbeState defaults to      |
+|         |               | NOT diagnosing → never silently interrupts acquisition. Equivalent for      |
+|         |               | today's four states; no behaviour change.                                   |
+|         |               | Gate G0 in _hgac_update() rewritten to an explicit gate-OFF blacklist:      |
+|         |               | `NOT_APPLIED || DISCONNECTED || HW_SETTLING` instead of the `probe_active`  |
+|         |               | helper + double negation. Equivalent today (4 states); readability per      |
+|         |               | Alex. Trade-off recorded: a future ProbeState is NOT gated off (fail-open), |
+|         |               | unlike the diag-task whitelist above — revisit the list when adding states. |
+|         |               | Also in _hgac_check_tiaguard(): removed the single-use `tiaguard` bool +    |
+|         |               | `!tiaguard`; the early-return now tests the condition directly (De Morgan). |
+|         |               | Removed HGAC gain-floor signal end-to-end: bit HGAC_DIAG_GAIN_FLOOR         |
+|         |               | (0x10000), members _hgac_alarm_gain_floor_led1/2, param alarm_flag of       |
+|         |               | _hgac_check_tiaguard, AFE4490DebugData.hgac_alarm_gain_floor, getter        |
+|         |               | test_hgac_alarm_gain_floor, the $M4 HGAC_ALARM field (frame 37->36 cols),   |
+|         |               | and §5.8.6. No consumer ever decoded the bit (script parses <=col33;        |
+|         |               | motherBoard only prints diag_code). Behaviour change (bit gone from         |
+|         |               | diag_code, one fewer $M4 field). test_hgac Test 5 repurposed to assert      |
+|         |               | RF reaches the floor (RF_10K).                                              |
+|         |               | Renamed hgac_settle_time_s -> afe_settle_time_s: it arms the RSQM settling  |
+|         |               | countdown and models AFE front-end re-settling after any register change,   |
+|         |               | not an HGAC-specific quantity (comment already anticipates config-change    |
+|         |               | producers). Private constexpr, no public API break.                         |
+| v0.49-experiment | 2026-07-31    | **Rename TIASAT → TIAGUARD + debounce naming; `adc_code` convention.**  |
+|         |               | The HGAC over-threshold condition was named "TIASAT" (TIA saturation) — it   |
+|         |               | collided with RSQM's `PROBE_SATURATING` and misled: the guard trips at        |
+|         |               | `GUARD_V`=0.9 V, BELOW full-scale, so it is *preventive*, not saturation.     |
+|         |               | Renamed the condition to **TIAGUARD**. Debounce state/threshold renamed to    |
+|         |               | drop the count/samples ambiguity: `_hgac_tiasat_count_led1/2` →               |
+|         |               | `_hgac_tiaguard_debounce_count_led1/2`, `_hgac_tiasat_min_samples`  |
+|         |               | → `_hgac_tiaguard_debounce_min_samples`, `hgac_tiasat_persist_s` /            |
+|         |               | `setHgacTiasatPersistS()` → `hgac_tiaguard_debounce_min_s` /                  |
+|         |               | `setHgacTiaguardDebounceMinS()`, `_hgac_check_tiasat()` →                     |
+|         |               | `_hgac_check_tiaguard()`. `$SET`/`$LCFG` wire key updated in `src/main.cpp`   |
+|         |               | (no consumer in `pulsenest_lab.py`). Naming rule adopted: ADC output uses     |
+|         |               | `adc_code`, NEVER `count`; `count` freed for dynamic sample counters (project  |
+|         |               | convention, e.g. `_sample_count`) → state `_hgac_tiaguard_debounce_count`;     |
+|         |               | fixed sample thresholds use `_min_samples`. No behaviour change.              |
+|         |               | 36/36 native tests, ESP32-S3 (incunest_V16) build OK.                         |
+| v0.48-experiment | 2026-07-31    | **Single source of truth for the v_tia axis: `namespace tia_axis`.**|
+|         |               | The five ordered thresholds (IDEAL 0.6 / GUARD 0.9 / FS 1.0 / ADC_SAT 1.2 / LIN  |
+|         |               | 1.8 V) were scattered across `AFE4490AnalogState` (physics constexpr) and        |
+|         |               | `AFE4490Config` (HGAC policy defaults). Now defined ONCE in `tia_axis`, with a    |
+|         |               | `static_assert` enforcing the strict ascending order at compile time.            |
+|         |               | `kVTiaFs/Lin` and the `hgac_v_tia_thr/ideal` defaults derive from it.    |
+|         |               | `setHgacVTiaThr()` now clamps to ≤ FS_V (guard can't sit above the reliable   |
+|         |               | range at runtime). Values unchanged → no behaviour change except that clamp.     |
+|         |               | ADC_SAT_V is nominal; `kAdcSatPos` stays the empirical adc_code rail. 36/36 tests.  |
+| v0.47b-experiment | 2026-07-31    | **Readability: RSQM's PROBE_SATURATING check uses `allValidRange()`.** |
+|         |               | `_rsqm_update()` classified saturation via `!otLed1Valid() \|\| !otLed2Valid()`  |
+|         |               | (two locals). Replaced by `!as.allValidRange()` — exact equivalent, but asks the |
+|         |               | channels' RANGE directly instead of borrowing OT-validity semantics (a separate  |
+|         |               | concern that may evolve independently of "in range"). Aligns the code with its   |
+|         |               | own comment ("channel not CH_VALID_RANGE → SATURATING"). No behaviour change.     |
+|         |               | `otLed1Valid()`/`otLed2Valid()` removed — unused after this change, no dead API.  |
+|         |               | 36/36 native tests, build OK.                                                     |
+| v0.47-experiment | 2026-07-29    | **Default LED current 20 mA → 50 mA (preliminary, dev-phase).** Both**  |
+|         |               | `_afe_led1/2_current_mA` = 50.0 → DAC code 85 (0x55), ~49.8 mA. Purpose:    |
+|         |               | gain field experience at higher drive. Rationale (2026-07-27): the LED      |
+|         |               | rating is NOT the limit — at the AFE's pulsed ~25 % duty, 50 mA peak sits    |
+|         |               | ≪ I_FP 100 mA and ~23 mW ≪ Pd, so there is ample margin (datasheet Medle,    |
+|         |               | reliability-caveated). Side-effects: (a) TIA does NOT saturate — measured   |
+|         |               | v_tia < 0.5 V, finger, 50 mA/RF_100K (neonatal case uncharacterised); |
+|         |               | (b) §8 timing note,                                                         |
+|         |               | ambient settling t5/t11 raised 200→400 counts (100 µs) for the 50 mA drive |
+|         |               | (longer LED extinction / CF discharge tail); (c) skin-thermal envelope      |
+|         |               | (ISO ≤41 °C) still uncharacterised. Spec §3/§8 default+timing tables updated.|
+|         |               | Also: **inlined Gate G0 into `_hgac_update()`** — removed the single-use    |
+|         |               | `_hgac_gate_ok()` helper so the gate's condition and its consequences (reset |
+|         |               | TIAGUARD debounce + return) read together; the design rationale lives here in  |
+|         |               | §5.8, not in a 12-line code comment. No behaviour change.                    |
+| v0.46-experiment | 2026-07-26    | **Rename `AFE4490ChState` to an increasing-range scale (all suffixed**  |
+|         |               | `_RANGE`): `CH_CLEAN`→`CH_VALID_RANGE`, `CH_OFF_SPEC`→`CH_EXTENDED_RANGE`,  |
+|         |               | `CH_CLIPPED`→`CH_CLIPPED_RANGE`; helpers `chClean()`→`chValidRange()` and    |
+|         |               | `allClean()`→`allValidRange()`. Motivation (Alex, 2026-07-26): the old       |
+|         |               | `CLEAN`/`OFF_SPEC` mix wasn't parallel; the new trio reads as one monotone   |
+|         |               | scale of `v_tia` bands and drops the earlier `chInValidRange` proposal  |
+|         |               | (ambiguous "in-valid"). "VALID" = TI's guaranteed-linear range (±1.0 V), NOT |
+|         |               | that EXTENDED is invalid — enum comment clarifies the nuance. Pure rename:   |
+|         |               | no behavior change. Propagated to `pulsenest_lab.py`, `pulsenest_lab_spec.md`|
+|         |               | and `test_hgac.cpp`. 36/36 native tests, ESP32-S3 (incunest_V16) build OK.  |
+| v0.45-experiment | 2026-07-26    | **New `ProbeState::PROBE_SATURATING` — splits the TIAGUARD condition out**|
+|         |               | of `PROBE_NOT_APPLIED`, resolving the open question from v0.44d/§5.8.2      |
+|         |               | about HGAC's gate (Alex, 2026-07-23: "no entiendo por qué un fallo en la    |
+|         |               | detección de PROBE_APPLIED se deba corregir modificando RF o ILED").        |
+|         |               | `_rsqm_update()`: `!as.otLed1Valid()`/`!as.otLed2Valid()` (channel not      |
+|         |               | `CH_VALID_RANGE`) now yields `PROBE_SATURATING` directly, checked BEFORE the      |
+|         |               | `rsqm_ot_thr` comparison — no longer OR'd into the same `NOT_APPLIED` as    |
+|         |               | "OT valid but reads high" (genuine no-tissue). Enum value appended (0-2    |
+|         |               | unchanged) to keep `$M2`/`$M3`/`$M4` wire encoding stable. Consumers:       |
+|         |               | SpO2/HR1/HR2/HR3/RSQI need no change (already gate on `!= PROBE_APPLIED`); |
+|         |               | `_hgac_gate_ok()` simplified to `== PROBE_APPLIED \|\| == PROBE_SATURATING` |
+|         |               | (§5.8.2) — no longer needs the coarse `!= PROBE_DISCONNECTED` and no       |
+|         |               | longer opens during ordinary probe-idle `NOT_APPLIED`; `_diag_task_body()` |
+|         |               | (§5.7) updated to also skip periodic diagnostics during `PROBE_SATURATING` |
+|         |               | (a real saturation event may involve a real patient, and HGAC needs to act |
+|         |               | undisturbed). `pulsenest_lab.py`: `PROBE_SATURATING=3` added to the 4      |
+|         |               | mirror TestCalc classes and the `AFESweepTestWindow` combo; new dedicated  |
+|         |               | background color in SIGNAL STATS (orange, distinct from NOT_APPLIED's     |
+|         |               | amber). Test stimulus in `test_hgac.cpp` (`SAT_LED1_CODE`) raised from     |
+|         |               | ~0.973 V to ~1.087 V so it actually trips `PROBE_SATURATING` under the new |
+|         |               | gate (the old value stayed CH_VALID_RANGE, which now yields plain NOT_APPLIED —  |
+|         |               | correctly excluded from HGAC's gate, so the old tests would otherwise      |
+|         |               | fail). Verified: 36/36 native tests (`test_biquad` pre-existing unrelated  |
+|         |               | failure), ESP32-S3 V16 build OK.                                          |
+| v0.44d-experiment | 2026-07-26    | **Renamed "descent" → "TIASAT" (TIA saturation) for the condition,**    |
+|         |               | kept a plain action verb for the response. Alex: the "descent" concept      |
+|         |               | conflated the CONDITION being debounced (TIA saturating) with the ACTION    |
+|         |               | taken in response (step RF down) — and doesn't appear in the datasheet.    |
+|         |               | Split cleanly: `_hgac_descent_count_led1/2` → `_hgac_tiasat_count_led1/2`,  |
+|         |               | `hgac_descent_persist_s`/`setHgacDescentPersistS()` →                      |
+|         |               | `hgac_tiasat_persist_s`/`setHgacTiasatPersistS()`, `_hgac_descent_min_      |
+|         |               | samples` → `_hgac_tiasat_min_samples`, `_hgac_check_descent()` →            |
+|         |               | `_hgac_check_tiasat()` (condition side); `_hgac_descend_rf()` →             |
+|         |               | `_hgac_step_rf_down()` (action side, unrelated to TIASAT — a plain verb).   |
+|         |               | `$SET`/`$LCFG` wire key `hgac_descent_persist_s` → `hgac_tiasat_persist_s`   |
+|         |               | *(these `tiasat` names were later renamed to `tiaguard` in v0.49 — see below)* |
+|         |               | in PulseNest `src/main.cpp` (no consumer in `pulsenest_lab.py` yet, so no   |
+|         |               | Python-side break). Test accessors `test_hgac_descend_rf_led1/2` →         |
+|         |               | `test_hgac_step_rf_down_led1/2`. Test *function names* (e.g.               |
+|         |               | `test_hgac_descent_after_persistence`) and prose describing the general    |
+|         |               | English action ("descent"/"step down") were left alone — only the         |
+|         |               | conflated identifier family was in scope. Verified: 36/36 native tests     |
+|         |               | (`test_biquad` pre-existing unrelated failure), ESP32-S3 V16 build OK.     |
+| v0.44c-experiment | 2026-07-26    | **Removed `_hgac_invalid_ema` — Gate G0's invalid-fraction clause was**|
+|         |               | self-defeating, not just redundant (§5.8.2). It gated HGAC's corrective     |
+|         |               | action on the EMA'd fraction of `!allValidRange()` samples — the same signal    |
+|         |               | HGAC exists to fix — with a faster time constant (0.2 s window, crosses    |
+|         |               | 0.5 after ~139 ms of continuous saturation) than the descent debounce it   |
+|         |               | gates (0.5 s persistence), so sustained saturation closed the gate and     |
+|         |               | reset the descent counters before the debounce could ever complete —      |
+|         |               | blocking the fix exactly when needed most. Never caught by tests: the only |
+|         |               | descent test uses a stimulus that stays below `kVTiaFs` so `allValidRange()`|
+|         |               | never went false. Removed: `_hgac_invalid_ema` member, `hgac_gate_invalid_ |
+|         |               | frac_max`/`hgac_gate_window_s` config fields + `setHgacGateInvalidFracMax()`|
+|         |               | setter + its `$SET`/`$LCFG` wiring in PulseNest `src/main.cpp`. `_hgac_gate_|
+|         |               | ok()` keeps only the `probe_state`/`HW_SETTLING` clauses (§5.8.2 deviation  |
+|         |               | discussion unchanged, still open). Verified: 36/36 native tests (`test_    |
+|         |               | biquad` pre-existing unrelated failure), ESP32-S3 V16 build OK.            |
+| v0.44b-experiment | 2026-07-26    | **Readability refactor of `_hgac_check_descent()`, no behavior change**|
+|         |               | (`incunest_afe4490.cpp`). The O8.1 debounce increment/check was duplicated  |
+|         |               | across the "at gain floor → alarm" and "not at floor → descend" branches,   |
+|         |               | with two different increment idioms (capped vs unconditional pre-increment) |
+|         |               | that made the two paths hard to compare. Hoisted the debounce check once,  |
+|         |               | shared by both outcomes; the `cur_rf == RF_10K` branch now only decides     |
+|         |               | alarm-vs-descend after debounce is already satisfied. Verified equivalent:  |
+|         |               | 6/6 `test_hgac.cpp` (incl. `test_hgac_descent_debounce`,                    |
+|         |               | `test_hgac_alarm_at_gain_floor`), ESP32-S3 V16 build OK.                    |
+| v0.44-experiment | 2026-07-26    | **EXPERIMENT (branch `experiment/ot-domain-inputs`): `rsqm_ot_thr` widened**|
+|         |               | 8.5e-5 → 1.0e-4 (§5, §10). First real-HW test (CONTEC MS100 simulator,      |
+|         |               | probe applied) found `probe_state` never reached PROBE_APPLIED at the       |
+|         |               | theoretical 8.5e-5 estimate — the simulator is very sensitive to probe      |
+|         |               | placement and reads OT above that value routinely. Practical mitigation,   |
+|         |               | not an empirical calibration with a real neonatal probe/patient.           |
+| v0.43-experiment | 2026-07-18    | **Naming cleanup, no behavior change: `_verb_algorithm()` → `_algorithm_verb()`**|
+|         |               | across the whole class, matching the prefix convention already used by     |
+|         |               | every member variable (`_hr2_buf`, `_spo2_a`, `_rsqm_led1_sub_ema`, ...)    |
+|         |               | and by the HR2/HR3 task methods (`_hr2_task_body`). 15 renames: `_update_rsqm`|
+|         |               | → `_rsqm_update`; `_update_hgac` → `_hgac_update`; `_update_spo2` →         |
+|         |               | `_spo2_update`; `_update_hr1` → `_hr1_update`; `_update_hr2_sample` →       |
+|         |               | `_hr2_update_sample`; `_linearize_hr2` → `_hr2_take_snapshot`; `_compute_hr2`   |
+|         |               | → `_hr2_compute`; `_update_hr2` (test-only sync wrapper) →                 |
+|         |               | `_hr2_update_for_test` (name now signals it is never called from           |
+|         |               | production — see §5.3); `_hr2_calc_sem` → `_hr2_compute_sem` (names the    |
+|         |               | function it gates, `_hr2_compute()`, instead of a generic "calc"); same    |
+|         |               | 5 renames mirrored for HR3 (`_update_hr3_sample`/`_linearize_hr3`/         |
+|         |               | `_compute_hr3`/`_update_hr3`/`_hr3_calc_sem`); `_set_probe_state` →        |
+|         |               | `_rsqm_set_probe_state` (RSQM's debounce gate — previously had no          |
+|         |               | algorithm prefix at all). Pure rename: no signatures, semantics, or        |
+|         |               | timings changed. Verified: 36/36 native tests (`test_biquad` pre-existing  |
+|         |               | unrelated failure), ESP32-S3 V16 build OK (18.4% RAM / 30.1% flash).       |
+|         |               | Living spec sections (§1, §3d, §5, §9, §11) updated to the new names;      |
+|         |               | this table (historical record) keeps the old names as they were at each   |
+|         |               | past version. Spec §1.3, §3d, §5.1-§5.4, §5.6-§5.8, §9.3/§9.7, §11, §14.  |
+| v0.42-experiment | 2026-07-16    | **EXPERIMENT (branch `experiment/ot-domain-inputs`): same `probe_state`  |
+|         |               | design as v0.41's SpO2 applied to HR1/HR2/HR3.** `_update_hr1(float ir,    |
+|         |               | ProbeState probe_state)`, `_update_hr2_sample(...)`, `_update_hr3_sample(  |
+|         |               | ...)` all gained the `probe_state` parameter — consumed, never computed.  |
+|         |               | While `probe_state != PROBE_APPLIED`: all internal state (HR1's DC filter/ |
+|         |               | running max/threshold flag/peak+interval indices/RR buffer/MA buffer;     |
+|         |               | HR2's bandpass filter + circular buffer; HR3's low-pass filter + circular  |
+|         |               | buffer) resets every sample (idempotent, same pattern as SpO2 — no stored |
+|         |               | "previous state" needed), and `hr1/hr2/hr3` + their `_sqi` fields are     |
+|         |               | forced to `NaN`/`0`, unifying the sentinel across all 4 algorithms. For   |
+|         |               | HR2/HR3 the gate lives in the fast per-sample path (shared by the         |
+|         |               | production call site and the sync test wrapper), so the slow autocorr/FFT |
+|         |               | task (Task B/C) is never signalled while not applied. Test wrappers       |
+|         |               | `test_feed_hr1/hr2/hr3()` gained the `probe_state` parameter. New tests   |
+|         |               | `test_hr1/hr2/hr3_not_applied_resets` (reset + fresh-buffer/interval-count |
+|         |               | on reapply). `pulsenest_lab.py` mirrors: `HR1TestCalc`/`HR2TestCalc`/      |
+|         |               | `HR3TestCalc.update()` all gained `probe_state`, resetting + returning    |
+|         |               | `NaN`/`0` identically; all call sites (offline CSV loaders, live feeds,   |
+|         |               | `PPGMonitor`) updated — the unrelated `HRFFTCalc`/`self.hr3_calc`         |
+|         |               | (HR3LAB diagnostic window) deliberately left untouched (separate class,  |
+|         |               | no inheritance, out of scope). Verified: 36/36 native tests (test_biquad  |
+|         |               | pre-existing unrelated failure), `py_compile` clean. Spec §5.2-§5.4, §14. |
+| v0.41-experiment | 2026-07-16    | **EXPERIMENT (branch `experiment/ot-domain-inputs`): presence detection  |
+|         |               | fully delegated to RSQM — `spo2_min_ot_dc` removed too.** `_update_spo2()`  |
+|         |               | gained a third parameter, `ProbeState probe_state` (RSQM's classification, |
+|         |               | consumed — never computed internally). While `probe_state != PROBE_APPLIED`|
+|         |               | (covers both `PROBE_NOT_APPLIED` and `PROBE_DISCONNECTED`): both EMAs are  |
+|         |               | reset every sample (idempotent — no stored "previous state" needed; warmup |
+|         |               | restarts naturally via `ir_ema.count` once `PROBE_APPLIED` resumes), and   |
+|         |               | `pi`/`spo2`/`spo2_r` are set to `NaN` (not `-1.0f` — a forgotten `sqi`      |
+|         |               | check on `NaN` fails safe: comparisons are always false, so e.g. a naive   |
+|         |               | `spo2 < 70` alarm never fires on `NaN`, whereas it would on `-1.0f`).       |
+|         |               | `spo2_min_ot_dc`/`spo2_ac_div_eps` collapsed into one `spo2_div_eps`        |
+|         |               | (`1e-9`), a purely numerical division-safety guard on the actual divisors  |
+|         |               | (`dc_ir` for PI, `dc_red`/`ac_ir` for R) — not physiological, since that's  |
+|         |               | now `probe_state`'s job. `_spo2_sample_count` removed (redundant with      |
+|         |               | `EmaChannel::count`, always incremented in lockstep). Output contract now  |
+|         |               | uniform: `sqi==0 ⟹ pi==spo2==spo2_r==NaN`, across warmup, not-applied, and |
+|         |               | the division guard alike (previously only the near-zero-mean PI branch    |
+|         |               | used a sentinel; the rest left outputs stale). Verified: 7/7 `test_spo2`   |
+|         |               | (new `test_spo2_not_applied_resets` covers reset + fresh-warmup-on-reapply)|
+|         |               | + 33/33 other native tests, ESP32-S3 build (16.4 KB RAM / 828 KB flash).   |
+|         |               | Spec §5.1, §14.                                                            |
+| v0.40-experiment | 2026-07-16    | **EXPERIMENT (branch `experiment/ot-domain-inputs`): removed the        |
+|         |               | `spo2_min_i_pd_a` "no-finger" gate added in v0.38.** Analysis (2026-07-15)  |
+|         |               | showed it rarely detected an actual no-finger condition (a transmittance    |
+|         |               | probe with no finger shows HIGH OT, not low i_pd) and mostly duplicated,    |
+|         |               | with a weaker/uncalibrated criterion, RSQM's own `PROBE_DISCONNECTED`.      |
+|         |               | `_update_spo2()` signature simplified to `(ot_ir, ot_red)` — no more        |
+|         |               | `i_pd_ir`/`i_pd_red`. Replaced by `spo2_min_ot_dc` (A/A, `1e-6` placeholder)|
+|         |               | applied only to `dc_ir`/`dc_red`; the AC side keeps a separate purely      |
+|         |               | numerical guard `spo2_ac_div_eps` (`1e-9`, on `ac_ir` only) — conflating   |
+|         |               | the two into one shared threshold was tried first and broke 4/7           |
+|         |               | `test_spo2` cases (AC legitimately gets tiny at low PI). `setSpO2MinIPdA()`|
+|         |               | removed; `spo2_min_i_pd_a` removed from `AFE4490Config`. Spec §5.1, §14.   |
+| v0.39-experiment | 2026-07-14    | **EXPERIMENT (branch `experiment/ot-domain-inputs`): HR1/HR2/HR3     |
+|         |               | input migrated to OT**, completing the migration started in v0.38 (SpO2).   |
+|         |               | `_update_hr1/hr2/hr3()` and their fast-path helpers now take `float`        |
+|         |               | (`as.ot_led1`) instead of `int32_t led1_sub`. HR1 (peak timing) and HR3     |
+|         |               | (HPS ratio) needed no threshold recalibration — pure domain/type change.    |
+|         |               | HR2's near-zero-energy guard (`acorr0 < 1.0f`) recalibrated to              |
+|         |               | `acorr0 < hr2_ot_energy_eps` (1e-16) for OT-scale magnitudes. All 3 test    |
+|         |               | suites rewritten with OT-realistic magnitudes (previously still used raw   |
+|         |               | count-scale values that happened to pass by coincidence, since all three   |
+|         |               | algorithms are scale-invariant). Spec §5.2/§5.3/§5.4, §14.                  |
+| v0.38-experiment | 2026-07-13    | **EXPERIMENT (branch `experiment/ot-domain-inputs`): SpO2 input      |
+|         |               | migrated from raw adc_code to OT.** `_update_spo2()` now takes            |
+|         |               | `(ot_ir, ot_red, i_pd_ir, i_pd_red)` instead of `(led1_sub, led2_sub)`.      |
+|         |               | New `spo2_min_i_pd_a` (replaces `spo2_min_dc`) — no-finger gate on          |
+|         |               | absolute i_pd magnitude, not the OT ratio (unreliable near zero signal).    |
+|         |               | `_hgac_descend_rf()` no longer rescales the SpO2 EMA — OT is gain-invariant |
+|         |               | by construction, so `EmaChannel::rescale()` is now dead code (removed).     |
+|         |               | `library.json` platforms/frameworks unblocked earlier (v0.37) already      |
+|         |               | covers native testing of this change. Spec §5.1 (rewritten), §14.          |
+|         |               | Not yet migrated: HR1/HR2/HR3 (still raw-domain, lower priority — see      |
+|         |               | project memory), `pulsenest_lab.py` mirror classes (impact analyzed, not   |
+|         |               | resolved — see project memory).                                            |
+| v0.37   | 2026-07-13    | **HGAC Phase 1: RF-only saturation guard + descent + mandatory SpO2 EMA    |
+|         |               | rescale** (`_update_hgac()`, runs after `_update_rsqm()` in                 |
+|         |               | `_process_sample()`). New `AFE4490Config` fields `hgac_enable`,             |
+|         |               | `hgac_v_tia_thr`, `hgac_v_tia_ideal`, `hgac_descent_persist_s`,   |
+|         |               | `hgac_gate_invalid_frac_max`, `hgac_gate_window_s` (promoted from the       |
+|         |               | former fixed `hgac_v_tia_thr/ideal` constexpr in the .cpp anonymous    |
+|         |               | namespace). New bit `HGAC_DIAG_GAIN_FLOOR` (0x10000). First real producer  |
+|         |               | of `RSQM_DIAG_HW_SETTLING` (previously unreachable). `EmaChannel::rescale()`|
+|         |               | added. Gate G0 implemented as `probe_state != PROBE_DISCONNECTED` (not     |
+|         |               | literally `== PROBE_APPLIED` as in the original design axiom — avoids a    |
+|         |               | deadlock where saturation-induced OT invalidity would block the descent    |
+|         |               | that clears it). No ascent yet (manual recovery) — disabled by default.    |
+|         |               | `AFE4490DebugData` gained `hgac_rf_led1/led2`/`hgac_alarm_gain_floor`.      |
+|         |               | New unit tests `test/test_hgac/test_hgac.cpp`. Include-hygiene fix:        |
+|         |               | added missing `<cstring>`/`<cmath>` to the non-OFFLINE branch (the plain    |
+|         |               | `UNIT_TEST`/native path lacked them; real Arduino.h happened to provide    |
+|         |               | them transitively). Spec §5.8 (new), §3d, §5.6.3, §10.9 (new), §14.        |
+| v0.36   | 2026-07-10    | DiagCode RSQM flags renamed `RSQM_*` → `RSQM_DIAG_*` (symmetric with        |
+|         |               | `AFE_DIAG_*`; avoids collision with operative `rsqm_*` config params).      |
+|         |               | Documented as ANTICIPATORY CODE: no programmatic consumer beyond the        |
+|         |               | aggregate `rsqi` gate; intended consumer is HGAC, which may never read      |
+|         |               | them. `RSQM_DIAG_HW_SETTLING` noted as currently unreachable (nothing       |
+|         |               | sets `_rsqm_settling_countdown > 0`). Spec §5.6.3.                          |
+| v0.35   | 2026-07-10    | `AFE4490AnalogState`: value-always invalidity policy. New fields             |
+|         |               | `ot_led1`/`ot_led2` (OT moved from `_update_rsqm()` to                       |
+|         |               | `_compute_analog_state()`); 4 validity masks (adc_sat_pos/neg,               |
+|         |               | tia_over_fs/lin, bit=channel per new `AFE4490Ch` enum); helpers +            |
+|         |               | `chState()` (`AFE4490ChState`: CH_VALID_RANGE/CH_EXTENDED_RANGE/CH_CLIPPED_RANGE,              |
+|         |               | precedence CLIPPED>OFF_SPEC>CLEAN); physical constants in struct             |
+|         |               | (kVTiaFs=1.0, kVTiaLin=1.8, kAdcSatPos/Neg=±2096700: empirical       |
+|         |               | rails +2096921/−2096919 with ~220-code guard — ALED codes near the          |
+|         |               | negative rail oscillate without pinning due to ADC averaging).               |
+|         |               | Removed `rsqm_ot_saturated` sentinel and `rsqm_adc_positive_sat`;            |
+|         |               | `hgac_v_tia_fs` superseded by `kVTiaFs`. RSQM saturation            |
+|         |               | policy now explicit and stricter (`otLedxValid()`: both channels             |
+|         |               | CH_VALID_RANGE, both rails, TIA linearity). Spec §3c, §5.6.2, §5.6.3.              |
+| v0.32   | 2026-06-04    | Default values changed: LED1/LED2 current 11.7 mA → ~19.9 mA (code 34,  |
+|         |               | range 150 mA), TIA gain RF_500K → RF_100K. Matched to Medle probe at     |
+|         |               | 20 mA. Spec tables updated (§3, §8 TX/RX params, §9 register decisions). |
+| v0.31   | 2026-05-29    | HR3 SQI: redesigned as two-bin HPS fraction in a local window. Replaces    |
+|         |               | P[k] local prominence (v0.30), which was limited to SQI ≤ 0.19 due to     |
+|         |               | the Hann window spreading FFT energy across 3 bins (P[k]/P[k±1] ≈ 4,      |
+|         |               | not the assumed 10³). New metric: numerator = hps(peak_bin)+hps(b_other)  |
+|         |               | where b_other is the adjacent bin in the direction of fractional delta;     |
+|         |               | denominator = Σhps over ±hr3_sqi_local_w bins around both peak bins.       |
+|         |               | Bin-position-independent: off-bin energy split cancels in the ratio.        |
+|         |               | Removed `hr3_sqi_local_ratio`. Spec §5.4 updated. Header bumped to v0.31. |
+| v0.30   | 2026-05-29    | HR3 SQI: switched from HPS to P[k] for local prominence computation.       |
+|         |               | HPS product (cubic amplification) saturated SQI to 1 for any real signal.  |
+|         |               | P[k] has linear dynamic range; `hr3_sqi_local_ratio` raised 10→100.        |
+|         |               | `p_interp` reuses yp/y0/yn already computed for frequency interpolation.   |
+|         |               | Spec §5.4 updated. `incunest_afe4490_spec.md` header bumped to v0.30.      |
+| v0.29   | 2026-05-29    | HR3 true-peak validation widened: `hr3_peak_valid_w=5` — peak_bin must be  |
+|         |               | strict maximum in ±5 bins (including outside search range). Replaces ±1     |
+|         |               | neighbor check. Detects slope maxima and boundary humps more robustly.      |
+|         |               | HR3 SQI simplified: global SQI and geometric mean removed; only local       |
+|         |               | prominence (±hr3_sqi_local_w) remains. Eliminates false-high SQI when       |
+|         |               | sqi_local stayed near 1.0 while the signal was absent. Spec §5.4.          |
+| v0.28   | 2026-05-29    | HR3 SQI redesigned: combined global fraction + local prominence (geometric  |
+|         |               | mean). `hr3_sqi_local_w=5` (±0.49 Hz window), `hr3_sqi_local_ratio=10.0`.  |
+|         |               | Detects movement-artifact humps that fool the global metric. Spec §5.4.    |
+|         |               | True-peak validation: reject boundary maxima by checking HPS neighbors      |
+|         |               | outside search range — fixes false HR/SQI from low-freq movement artifacts. |
+| v0.27   | 2026-05-28    | RSQM (Raw Signal Quality Monitor). `ProbeState` enum                        |
+|         |               | (PROBE_DISCONNECTED / PROBE_NOT_APPLIED / PROBE_APPLIED). `DiagCode`        |
+|         |               | bitmask constants RSQM_AMB_SAT, RSQM_SIGNAL_WEAK, RSQM_HW_SETTLING         |
+|         |               | (renamed RSQM_DIAG_* in v0.36).                                             |
+|         |               | `AFE4490Data` gains `rsqi`, `diag_code`, `probe_state`. EMA estimators      |
+|         |               | (α_mean=0.02, α_var=0.004, ready after 750 samples). Probe detection via   |
+|         |               | `optical_transmittance` (single threshold 0.30, no hysteresis) + 100-sample  |
+|         |               | debounce in `_set_probe_state()`. RSQM runs first in `_process_sample()`    |
+|         |               | at 500 Hz. Spec §5.6 added.                                                 |
+| v0.26   | 2026-05-20    | Decouple STAGE2EN1/STAGE2EN2 from Stage 2 gain. `stg2_gain_code[]` now         |
+|         |               | contains only D[10:8] gain bits (no enable). `setStage2En1(bool)` and          |
+|         |               | `setStage2En2(bool)` expose STAGE2EN1 (D14 of TIAGAIN) and STAGE2EN2           |
+|         |               | (D14 of TIA_AMB_GAIN) as independent explicit parameters. `AFE4490Config`      |
+|         |               | gains `afe_stg2_en_led1` and `afe_stg2_en_led2`. `$CFG` frame gains                |
+|         |               | `stage2en1` and `stage2en2` fields. `$SET,stage2en1/2,<0\|1>` commands added.  |
+|         |               | PulseNest HW CONFIG TIA section gains STAGE2EN1/STAGE2EN2 checkboxes.          |
+|         |               | STAGE2EN2 is still forced ON when AMBDAC > 0.                                  |
+| v0.25b  | 2026-05-02    | Fix `setAmbDac()`: `_apply_analog_regs()` now sets STAGE2EN2 (D14 of          |
+|         |               | TIA_AMB_GAIN) automatically when `uA > 0`. Stage 2 must be active for AMBDAC  |
+|         |               | to have effect; STAGE2EN2 is independent of TIAGAIN's Stage 2 enable even    |
+|         |               | with ENSEPGAIN=0.                                                            |
+| v0.25   | 2026-04-29    | `setAmbDac(uint8_t uA)`: exposes AMBDAC[3:0] in TIA_AMB_GAIN D19:D16.      |
+|         |               | `AFE4490Config` gains `afe_ambdac_uA`. `$CFG` frame gains `ambdac` field.   |
+|         |               | PulseNest HW CONFIG window gains "Ambient Cancellation" group with AMBDAC   |
+|         |               | spinbox and `$SET,ambdac,<value>` command.                                  |
+| v0.25   | 2026-04-29    | LED current setters now store the actual DAC-quantised value (nearest step  |
+|         |               | of range/256 mA) instead of the requested float. `setLEDRange()` re-        |
+|         |               | quantises both currents to the new grid. `getConfig()` thus returns the      |
+|         |               | real programmed current. New private helper `_quantize_led_mA()`.           |
+| v0.25   | 2026-04-29    | HR valid lower bound raised: `hr_min_bpm` 30→**40 BPM**.                  |
+|         |               | `hr_search_min_bpm` 27→37 BPM (guard band: hr_min − 3). Python:           |
+|         |               | `FW_HR_MIN_BPM` (HR1/HR2/HR3TestCalc) and `HR_MIN_HZ` (HRFFTCalc)         |
+|         |               | updated accordingly.                                                       |
+| v0.24   | 2026-04-24    | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
+|         |               | via 13 new setters (setSpO2WarmupS, setSpO2EmaMeanTauS, setSpO2EmaVarTauS,   |
+|         |               | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
+|         |               | setHR1MaCutoffHz, setHR1SqiCvMax, setHR2MinCorr, setHR2UpdateInterval,    |
+|         |               | setHR3UpdateInterval, setHRValidRange). hr_search_{min,max}_bpm now        |
+|         |               | derived from hr_{min,max}_bpm ± 3 BPM guard band.                         |
+| v0.23   | 2026-04-24    | `runAfeDiagnostics(diag_holdoff_ms = 10)`: post-diagnostic holdoff window.     |
+|         |               | After DIAG_EN is cleared, `_task_body()` feeds frozen last-valid raw ADC   |
+|         |               | values into `_process_sample()` for `diag_holdoff_ms` ms, replacing analog |
+|         |               | re-settling artefacts with neutral constant input that filters absorb       |
+|         |               | gracefully. Default 10 ms covers worst-case TIA settling (RF_1M+CF_155P:   |
+|         |               | 5τ ≈ 775 µs). Set to 0 to observe raw artefacts. Spec §2.5b updated.       |
+| v0.22   | 2026-04-17    | `runAfeDiagnostics()` redesigned: `_diag_active` flag replaces long mutex hold. |
+|         |               | `_spi_mutex` held only for brief SPI transactions, eliminating priority       |
+|         |               | inversion. During the ~10 ms diagnostic window, `_task_body()` repeats the   |
+|         |               | last valid sample into the queue (under `_state_mutex`) on each DRDY instead  |
+|         |               | of dropping it, preserving temporal equi-spacing for HR2/HR3 and reducing     |
+|         |               | IIR filter discontinuity at resumption. Spec §2.5b updated.                  |
+| v0.21   | 2026-04-17    | Parameters Reference added (§10): consolidated catalogue of all parameters  |
+|         |               | that influence library outputs, organised by layer: AFE hardware config     |
+|         |               | (§10.1), pre-processing (§10.2), SpO2 (§10.3), HR1 (§10.4), HR2 (§10.5),  |
+|         |               | HR3 (§10.6), range/validation (§10.7), and out-of-scope environmental       |
+|         |               | factors (§10.8). Version history moved to §13 (end of document).            |
+|         |               | §11 AFE4490 register config, §12 Bibliographic references renumbered.       |
+| v0.20   | 2026-04-15    | Auto-CF: `_recalc_tia_cf()` selects the largest `AFE4490TIACF` that settles  |
+|         |               | within the adaptive TIA margin (10% of LED-on window, floor 12.5 µs).       |
+|         |               | `_compute_settle_margin()` shared by timing regs and auto-CF — always in     |
+|         |               | sync. Called from `_recalc_rate_params()` and `setTIAGain()`. `setTIACF()`  |
+|         |               | manual override still available. Default at 500 Hz / RF_500K: CF_20P        |
+|         |               | (was CF_5P). Spec §7.2 added.                                               |
+| v0.19   | 2026-04-14    | Configuration readback: `AFE4490Config` struct + `getConfig()` method.      |
+|         |               | Returns a thread-safe snapshot of all runtime-configurable parameters       |
+|         |               | (sample rate, averages, LED currents, LED range, TIA gain/CF, stage 2 gain,|
+|         |               | PPG channel, filter type/cutoffs, HR2/HR3 filter cutoffs, SpO2 a/b).       |
+|         |               | Takes `_spi_mutex` + `_state_mutex` when initialized; safe before `begin()`.|
+| v0.18   | 2026-04-14    | HR2_SQI: unbiased normalised autocorrelation. Previous biased estimator     |
+|         |               | systematically capped SQI at (N−τ)/N ≈ 0.875 at 60 BPM (τ=50, N=400)     |
+|         |               | even for a perfectly clean signal. Fix: divide by `acorr0·(N−τ)/N`         |
+|         |               | instead of `acorr0`. Clean signal now yields SQI ≈ 1.0 at all HR.          |
+|         |               | Updated: `_compute_hr2()` in `incunest_afe4490.cpp`, `HR2TestCalc.update()` |
+|         |               | in `pulsenest_lab.py`, `test_hr2.cpp` (thresholds raised to >0.95 clean,     |
+|         |               | >0.80 noisy). Spec §5.3. Observed with MS100 simulator: HR2 SQI ~0.9       |
+|         |               | vs HR1/HR3 ~1.0 — now consistent.                                           |
+| v0.17   | 2026-04-13    | HR3_SQI: parabolic interpolation on HPS values (not P[k]) in numerator.    |
+|         |               | Fixes SQI collapse at inter-bin frequencies (e.g. 85 BPM = bin 14.5):      |
+|         |               | cubic product loss in HPS reduced SQI to ~0.5 for clean signals. Now SQI   |
+|         |               | > 0.80 across all frequencies. New unit test: `test_hr3_85bpm`. (§5.4)     |
+| v0.16   | 2026-04-11    | Offline runner specification added (§9): `incunest_offline_runner` native C++   |
+|         |               | tool. `INCUNEST_OFFLINE` compile flag stubs Arduino/FreeRTOS and enables        |
+|         |               | `UNIT_TEST` API for algorithm-only builds. Hann window precomputation       |
+|         |               | moved to `_reset_algorithms()`. Input CSV: column-name-based parser,        |
+|         |               | format-agnostic, requires RED/IR/RED_Amb/IR_Amb/RED_Sub/IR_Sub. Output:        |
+|         |               | per-file `_result.csv` + `batch_summary.csv`. Build: CMake, C++17, no      |
+|         |               | external deps. Optional firmware delta columns for equivalence checking.    |
+| v0.15   | 2026-04-10    | HR3_SQI redesigned: from linear spectral concentration to HPS peak           |
+|         |               | prominence (`HPS[peak_bin] / Σ HPS[k]`). Eliminates harmonic inflation of   |
+|         |               | the denominator. No new buffer — `hps_sum` accumulated in the existing loop. |
+|         |               | Updated: `incunest_afe4490.cpp` `_compute_hr3()`, `incunest_afe4490.h` comment,       |
+|         |               | `HR3TestCalc` in `pulsenest_lab.py`, spec §5.4.                               |
+| v0.14   | 2026-04-10    | Timing instrumentation: `INCUNEST_TIMING_STATS` compile-time flag, `TimingStat` |
+|         |               | struct, `_emit_timing()` private method. Measures HR1/HR2/HR3/SpO2 per-call |
+|         |               | time and full cycle time (SPI + all algos) with `esp_timer_get_time()`.      |
+|         |               | `$TIMING` serial frame emitted every ~5 s. `TIMING` window added to         |
+|         |               | `pulsenest_lab.py` with green/orange/red budget indicator (budget = 2000 µs). |
+|         |               | Spec §8.4 added. Enabled in `platformio.ini` via `-DINCUNEST_TIMING_STATS=1`.    |
+| v0.13   | 2026-04-09    | SQI continuous [0–1] for all algorithms. HR1_SQI: CV-based. HR2_SQI:       |
+|         |               | normalised autocorrelation peak. HR3_SQI: spectral concentration.           |
+|         |               | SpO2_SQI: PI-based (clamp PI from 0.5%–2.0%). All SQI fields added to      |
+|         |               | `AFE4490Data` and $M1 frame. 4 TEST windows completed (SPO2TEST, HR1TEST,  |
+|         |               | HR2TEST, HR3TEST). pulsenest_lab.py spec §8 updated.                          |
+| v0.12   | 2026-04-08    | Added HR3 algorithm (FFT + HPS): `hr3`/`hr3_valid` in `AFE4490Data`,     |
+|         |               | `setHR3Filter()` in API, section 5.4. Self-contained radix-2 DIT FFT     |
+|         |               | in anonymous namespace. `_recalc_biquad_lp()` for LP anti-aliasing.      |
+|         |               | `INCUNEST_AFE4490_TASK_STACK` default 4096→8192. Architecture diagrams         |
+|         |               | (sections 1.1 and 1.3) updated. $M1 serial trama field 17 = HR3.        |
+| v0.11   | 2026-04-08    | HR reported range corrected per ISO 80601-2-61 + neonatal use:           |
+|         |               | **[30, 250] → [25, 300] BPM**. Guard band updated to [22, 303] BPM.      |
+|         |               | `hr1_refractory_s` 0.200→0.185 s (covers 303 BPM guard: 198 ms period).   |
+|         |               | `hr2_min_lag_s` 0.22→0.185 s. `hr2_acorr_max_lag` 111→137 samples.      |
+|         |               | Python `HR_MIN_HZ`/`HR_MAX_HZ`/`HR_SEARCH_*` updated accordingly.        |
+| v0.10   | 2026-04-08    | Guard band: internal HR search range extended to [27, 253] BPM (±3 BPM  |
+|         |               | beyond reported [30, 250] BPM). HR2: `hr2_acorr_max_lag` 100→111        |
+|         |               | (27 BPM @ 50 Hz). HR3 Python: `HR_SEARCH_MIN_HZ`/`HR_SEARCH_MAX_HZ`     |
+|         |               | added. `hr_search_min_bpm`/`hr_search_max_bpm` constants documented.     |
+| v0.9    | 2026-04-07    | HR measurement range extended: 40–240 BPM → **30–250 BPM**.             |
+|         |               | `hr_min_bpm` 40→30, `hr_max_bpm` 240→250, `hr1_refractory_s` 0.3→0.2 s  |
+|         |               | (allows up to ~300 BPM), `hr2_acorr_max_lag` 75→100 samples (30 BPM    |
+|         |               | at 50 Hz). Spec header updated to v0.9.                                  |
+| v0.8    | 2026-04-07    | Added HR2 algorithm (autocorrelation): `hr2`/`hr2_valid` in `AFE4490Data`, |
+|         |               | `setHR2Filter()` in API, section 5.3. Updated architecture diagrams        |
+|         |               | (sections 1.1 and 1.3). HR1/HR2 run in parallel in `_process_sample()`.   |
+|         |               | BiquadFilter refactored as struct; `_biquad_process()` extracted.          |
+|         |               | Section 5.2 (HR1) fully documented: DC removal IIR, moving average LP,    |
+|         |               | running-max threshold, refractory period, 5-interval averaging, peak       |
+|         |               | marker diagnostic, and key constants table.                                |
+| v0.7    | <= 2026-03-18 | Added `stop()` (section 2.6): clean shutdown — detaches ISR, deletes       |
+|         |               | internal task and FreeRTOS objects, resets algorithm state. Allows          |
+|         |               | `begin()` to be called again. Added `_reset_algorithms()` (private).       |
+|         |               | Enables hot-swap between incunest_afe4490 and protocentral at runtime.          |
+| v0.6    | <= 2026-03-18 | Biquad coefficients computed dynamically (`_recalc_biquad()`). Formula:    |
+|         |               | bilinear transform on a 2nd-order Butterworth bandpass prototype.          |
+|         |               | Coefficients moved from namespace constants to members `_bq_b0..a2`.       |
+|         |               | Called from `_recalc_rate_params()` and `setPPGDispFilter()`. The "not yet        |
+|         |               | implemented" warning removed. `setPPGDispFilter()` is now fully functional for    |
+|         |               | any fs, f_low, f_high.                                                     |
+| v0.5    | <= 2026-03-18 | Internal constants reorganised at the top of the anonymous namespace in    |
+|         |               | `.cpp`, in snake_case. Algorithm time parameters expressed in physical      |
+|         |               | units (seconds): `spo2_warmup_s`, `dc_iir_tau_s`, `ac_ema_tau_s`,         |
+|         |               | `hr1_refractory_s`. New members `_spo2_warmup_samples`,                     |
+|         |               | `_hr1_refractory_samples`, `_dc_iir_alpha`, `_ac_ema_beta` derived from     |
+|         |               | `_sample_rate_hz` via `_recalc_rate_params()`, called in constructor and   |
+|         |               | in `setSampleRate()`. SpO2 and HR algorithms now correct at any PRF.       |
+| v0.4    | <= 2026-03-18 | `AFE4490Data` extended with the 6 raw AFE4490 signals (led1, led2,         |
+|         |               | aled1, aled2, led1_aled1, led2_aled2). Struct is now equivalent in         |
+|         |               | information to the protocentral output.                                    |
+| v0.3    | <= 2026-03-18 | Configurable NUMAV: added `setAdcAverages(uint8_t num)` to the API.        |
+|         |               | Section 11.1 with NUMAV_max formula, table by PRF, clamping behaviour and  |
+|         |               | SNR effect. `setSampleRate()` recalculates NUMAV_max.                      |
+|         |               | **First implementation:** `include/incunest_afe4490.h` and                      |
+|         |               | `src/incunest_afe4490.cpp` generated. Pending hardware validation.              |
+| v0.2    | <= 2026-03-18 | Added section 11 with comparative register tables (timing, analog, control,|
+|         |               | init sequence). Sources: AFE44x0.h EVM TI v1.4, Datasheet AFE4490 Table 2,|
+|         |               | Protocentral src/. incunest_afe4490 values justified register by register.      |
+|         |               | Updated defaults: NUMAV=7, ENSEPGAIN=0, Stage2 disabled.                   |
+| v0.1    | <= 2026-03-18 | Initial complete specification                                              |
