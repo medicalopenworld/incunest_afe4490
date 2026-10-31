@@ -1759,6 +1759,81 @@ must carry a date or `check_version.py` fails. Version and date in the same tabl
 document control. The title paragraph was rewritten at the same time: it still described the library
 as Arduino-only and "coexisting with protocentral-afe4490-arduino", the state of April 2026.
 
+## 20. `rsqm_ot_thr` — second calibration on four patients, 150 → 250 ppm (2026-10-31 → 2026-11-01)
+
+**Question (Alex, 2026-10-31).** Is the 150 ppm threshold of v0.95, set on one patient the day after the
+first hospital campaign, adequate now that four babies have been measured?
+
+**Data.** All 18 HOSPNAV sessions of SUBJ08–11 (220 min, 6.6 M samples at 500 Hz), columns `OT_LED1`,
+`OT_LED2` and `ProbeState` as the board recorded them (SUBJ08/09 on lib v0.94 with the threshold at
+100 ppm; SUBJ10/11 on v0.104 at 150 ppm). Probe Medle ST-S0163-26, one unit. Stretches with the probe
+taken off (ProbeState 4, OT clipped at 240/480 ppm) excluded: the saturation branch, not this
+threshold, handles them.
+
+| Patient | GA, weight, skin | OT IR p50 / max [ppm] | OT RED p50 / max [ppm] | RED/IR |
+|---|---|---|---|---|
+| SUBJ08 | 27+3 wk, 1.16 kg, 21 d, white | 131 / 156 | 95 / 119 | 0.73 |
+| SUBJ11 | 30 wk, 1.5 kg, white | 91 / 111 | 72 / 89 | 0.79 |
+| SUBJ09 | 26+1 wk, 1.53 kg, dark | 75 / 109 | 27 / 35 | 0.37 |
+| SUBJ10 | 39+4 wk, 2.75 kg, white | 43 / 85 | 16 / 50 | 0.38 |
+
+Fraction of each patient's time the AND (`min(OT1, OT2) > thr`, runs ≥ 0.2 s = the debounce) would
+have flagged as PROBE_OT_HIGH: at 100 ppm, SUBJ08 35 % (the board did record 35 % in state 1 that day),
+the others 0 %; at 150 ppm and above, 0 % on all four.
+
+**What the data say.**
+
+1. *The channel that decides is RED, not IR.* RED < IR on all four babies with this unit, so under the
+   AND the applied-side maximum that matters is RED's 119 ppm. The v0.95 note quoted IR's 145 ppm and a
+   ×1.03 margin; the actual margin of 150 ppm was ×1.26. Both numbers are thin.
+2. *IR alone did cross 150 ppm* on SUBJ08 (max 156, 1.1 % of the time). The in-air ratio RED/IR was
+   measured on two units of this probe model on 2026-09-07: 0.716 and 1.35 (§5.6.2 of the spec, and the
+   2026-09-07 analysis in PulseNest's log). With the unit whose RED is the higher channel, IR decides and
+   SUBJ08 would have been declared absent at 150 ppm. The threshold is unit-dependent; this was already
+   the conclusion of 2026-09-07 and is why normalisation by the in-air value remains the real fix.
+3. *OT grows as the baby gets smaller.* RED rises ×6 from the term baby (SUBJ10) to the 1.16 kg preterm
+   (SUBJ08). Patients under 1 kg are not in the sample and will sit above SUBJ08. The failure mode on
+   that side, a correctly applied probe declared absent, resets SpO2/HR on every sample and has no
+   downstream safety net (§5.6.2).
+4. *The air side has room.* In-air minimum measured 592 ppm (unit with 827/592; the other ~800/1080).
+   And air at RF ≥ 50K with 50 mA drives the TIA past full scale (clipped OT = FS / (RF·I_LED) = 480 ppm
+   at 50K, 240 at 100K), which goes to PROBE_ONLY_LED_SATURATING regardless of `rsqm_ot_thr`. The
+   threshold decides only at RF 10K/25K (air gives 0.4–1.0 V there, below FS) or at lower LED current.
+5. *High OT on an applied probe is still a usable signal.* SUBJ08 replayed with lib v0.108 (threshold
+   150 ppm, so every sample APPLIED): OT IR > 150 ppm gives PI 1.6 and SpO2_SQI 0.78; OT < 110 ppm gives
+   PI 4–5.5 and SQI 0.93–0.96. Widening the threshold admits no bad data; it only stops discarding thin
+   feet.
+6. *SUBJ08's RED/IR (0.73) equals the in-air ratio of the 827/592 unit (0.716).* Almost no differential
+   attenuation: OT normalised by air is ≈ 0.16 on both channels. A very thin foot, or optical shunting
+   (light reaching the photodiode around the foot), which the PI drop with rising OT also suggests.
+   Not resolvable from these data; a deliberate well-seated vs tilted capture would be.
+
+**Alternatives.**
+
+- *Keep 150 ppm.* Works on the four measured babies and this unit. Rejected: ×1.26 over the deciding
+  channel, below the other channel's maximum, and the next smaller patient or the other probe unit
+  breaks it. Margin by luck, as the MS100 case was in v0.89.
+- *300 ppm.* ×2.5 / ×1.9 above the two channels' maxima, ×2.0 below air. Rejected only because
+  250 already gives balanced margins and 300 spends air-side margin the threshold's only operating
+  region (RF 10K/25K) does need.
+- *250 ppm (chosen).* Geometric mean of the applied-side maximum (119–156) and the in-air minimum (592):
+  ×2.1 above RED's maximum, ×1.6 above IR's, ×2.4 below air. At RF 100K the clipped in-air OT (240 ppm)
+  sits just under it, which costs nothing: that case clips and is caught by the LED-only branch.
+- *Normalise OT by its in-air value* (decided in principle 2026-09-07, not implemented). Removes the
+  per-unit and per-channel factor and turns the threshold into a physical statement ("tissue attenuates
+  ≥ N×"). Still the destination; needs the in-air reference captured automatically (the LED-only
+  saturation branch sees air) and is a separate change.
+
+**Decision (Alex, 2026-11-01).** `rsqm_ot_thr` default 1.5e-4 → 2.5e-4 (v0.115). Limits that stay
+written down: n = 4 patients, one probe unit, no patient under 1 kg, in-air values from two units
+measured on the bench, not the hospital unit identified. Recalibrate when a smaller patient or a second
+unit is measured; the fix for the unit dependence is the normalisation above.
+
+**Reproduction.** Script of the 2026-10-31 session (PulseNest scratchpad, not versioned): for each part
+of each session, `OT_LED1`, `OT_LED2`, `ProbeState`; percentiles in ppm; runs of `min(OT1,OT2) > thr`
+of ≥ 100 samples at 100/150/200/250/300/400 ppm. Quality per OT bin from
+`derived/replay_lib0.108/*_replay.csv` of SUBJ08 and SUBJ11.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

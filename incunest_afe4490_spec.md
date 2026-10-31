@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.114
+# incunest_afe4490 — Specification v0.115
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -1584,12 +1584,31 @@ back on the air case.
 > only ×1.03 (n=1 patient — revisit as campaigns accumulate); margin below the theoretical
 > probe-in-air OT (~8e-4) remains ×5.3, and ONLY_LED_SATURATING detects probe-in-air
 > independently of OT.
+>
+> **Update (v0.115, 2026-11-01) — four patients, `rsqm_ot_thr` 1.5e-4 → 2.5e-4.** The four HOSPNAV
+> babies (SUBJ08–11, 18 sessions, 220 min, probe Medle ST-S0163-26) read, probe applied and not
+> saturated (ppm, p50 / max): SUBJ08 (27+3 wk, 1.16 kg) IR 131/156, RED 95/119; SUBJ11 (30 wk, 1.5 kg)
+> IR 91/111, RED 72/89; SUBJ09 (26+1 wk, 1.53 kg, dark skin) IR 75/109, RED 27/35; SUBJ10 (39+4 wk,
+> 2.75 kg) IR 43/85, RED 16/50. RED < IR on all four with this probe unit, so the AND is decided by
+> RED: the applied-side maximum that matters is **119 ppm**, not the 145 ppm of IR quoted above, and
+> the 1.5e-4 margin was ×1.26, not ×1.03. At 1.5e-4 none of the four was ever flagged (no run ≥ 0.2 s
+> with both channels above); but IR alone exceeded 150 ppm on SUBJ08 (1.1 % of the time), so a probe
+> unit with the inverted channel ordering (RED/IR 1.35 was measured on one unit, 2026-09-07) would
+> have declared SUBJ08 absent, and OT rises as the baby gets smaller (RED ×6 from SUBJ10 to SUBJ08):
+> patients under 1 kg, not yet sampled, will sit above SUBJ08. Probe-in-air minimum measured 592 ppm
+> (2026-09-07, two units: 827/592 and ~800/1080). 2.5e-4 is the geometric mean of the two sides:
+> ×2.1 above the deciding-channel maximum, ×1.6 above the other channel's, ×2.4 below air. Signal in
+> the high-OT stretches is still valid (SUBJ08 replay v0.108, IR > 150 ppm: PI 1.6, SpO2_SQI 0.78), so
+> the wider threshold admits no bad data. Air at RF ≥ 50K and 50 mA clips the TIA (OT clipped to
+> 480 ppm at 50K, 240 at 100K) and goes to ONLY_LED_SATURATING regardless of this threshold, which
+> therefore decides only at RF 10K/25K. Still n=4 and one probe unit; the per-unit factor is why
+> normalisation by the in-air value remains the real fix. Full analysis: design rationale §20.
 
 *The cost, stated plainly.* AND introduces a failure mode OR did not have: a channel reading
 persistently low — weak or failing LED, partially obstructed photodiode — now forces APPLIED
 regardless of the other. Two existing guards limit the exposure without removing it: the
 LED-only-saturation branch below detects probe-in-air independently of OT, and PROBE_DISCONNECTED
-still checks all four `i_pd` channels. A channel that is degraded but not dead is not covered. Default `rsqm_ot_thr = 1.5e-4` (v0.95), runtime-configurable via `setRsqmOtThr()`. Single
+still checks all four `i_pd` channels. A channel that is degraded but not dead is not covered. Default `rsqm_ot_thr = 2.5e-4` (v0.115), runtime-configurable via `setRsqmOtThr()`. Single
 threshold (no hysteresis) — oscillation is prevented by the `rsqm_probe_state_min_s` debounce.
 
 **Saturated — discriminate by phase (v0.61).** When `anyPositiveSaturation()` (ADC positive rail or
@@ -1624,7 +1643,7 @@ name suggested "any saturation"; LED-only saturation never came here) and splits
 into PROBE_OT_HIGH (value 1) and PROBE_ONLY_LED_SATURATING (value 4), with `isProbeAbsent()` as the
 single definition of "no patient". No behavioural change.
 
-Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54). First real-HW test (2026-07-19, CONTEC MS100 simulator, probe applied) showed the theoretical APPLIED estimate does not hold in practice: the simulator is highly sensitive to probe placement and OT frequently reads above 8.5e-5 with the probe applied, so `probe_state` never reached APPLIED at that threshold. `rsqm_ot_thr` was widened to 1.0e-4 as a practical mitigation — still not a calibrated value from a real neonatal probe/patient. The first real-patient data (HOSPNAV campaign, 2026-09-23, SUBJ08: probe applied, OT_LED1 mean ≈ 1.2e-4, max ≈ 1.45e-4) widened it again to 1.5e-4 (v0.95); n=1 patient, to be recalibrated as campaigns accumulate.
+Estimated values (theoretical, need empirical calibration with HW): APPLIED ≈ 1.4e-5, NOT_APPLIED ≈ 8e-4 (factor ~×54). First real-HW test (2026-07-19, CONTEC MS100 simulator, probe applied) showed the theoretical APPLIED estimate does not hold in practice: the simulator is highly sensitive to probe placement and OT frequently reads above 8.5e-5 with the probe applied, so `probe_state` never reached APPLIED at that threshold. `rsqm_ot_thr` was widened to 1.0e-4 as a practical mitigation — still not a calibrated value from a real neonatal probe/patient. The first real-patient data (HOSPNAV campaign, 2026-09-23, SUBJ08: probe applied, OT_LED1 mean ≈ 1.2e-4, max ≈ 1.45e-4) widened it again to 1.5e-4 (v0.95); n=1 patient. Four patients (SUBJ08–11, 2026-10-31 analysis) put the applied-probe maximum at 1.19e-4 on the deciding channel and the in-air minimum at 5.9e-4: 2.5e-4 (v0.115), their geometric mean.
 
 > Previous formula was heuristic: `LED_Sub / (LED_mA × RF_Ω × RG_linear)` — dimensionally not A/A, scale ~×3495 larger. Values measured in earlier sessions (APPLIED ≈ 0.05, NOT_APPLIED ≈ 2.8) correspond to the old scale.
 
@@ -3291,6 +3310,10 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.115  | 2026-11-01    | **`rsqm_ot_thr` 1.5e-4 → 2.5e-4 (§5.6.2; Alex 2026-11-01).** Second real-patient          |
+|         |               | calibration, four HOSPNAV babies: applied-probe maximum 119 ppm on the channel that       |
+|         |               | decides the AND (RED on this probe unit), 156 ppm on the other; in-air minimum 592 ppm.   |
+|         |               | 250 ppm is their geometric mean (×2.1 / ×2.4). No other change. Rationale §20.            |
 | v0.114  | 2026-10-30    | **Release assets and tag rule (§9.10; Alex 2026-10-30).** The CI uploads the tag's source    |
 |         |               | archive and its SHA-256 to the GitHub Release; a tag never moves. No change to the code:  |
 |         |               | same sources as v0.113. Rationale: PulseNest `docs/product_publishing_alternatives.md`.  |
