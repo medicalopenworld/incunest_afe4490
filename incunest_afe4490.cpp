@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.115 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.116 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -122,6 +122,17 @@ namespace {
     // alternative (per-beat peaks) needs a beat detector and is kept for PILAB (rationale §11).
     constexpr float    pi_rms_to_pp_ratio          = 2.8284271f;   // 2·√2
     constexpr float    pi_div_eps            = 1e-9f;   // A/A — division-safety guard only (mirrors spo2_div_eps)
+
+    // ── ppg_disp NORM modes (v0.116, §5.9; chosen in PulseNest's PPGDISPLAB, 2026-11-07) ──────
+    constexpr float    ppgdisp_norm_rise_per_s = 0.5f;   // /s — max frame growth per second, fraction of the frame
+    constexpr float    ppgdisp_norm_win_s      = 1.0f;   // s  — max/min target window (≥ one neonatal beat); warm-up
+    constexpr float    ppgdisp_norm_tau_s      = 1.0f;   // s  — fall time constant
+    constexpr float    ppgdisp_norm_headroom   = 1.15f;  // frame extrema map to ±1/H (halves clipping, rationale §21.8)
+    constexpr float    ppgdisp_norm_pi_floor   = 0.5f;   // A at and below spo2_pi_sqi_lo (NORM_PI); 1 at and above _hi
+    constexpr float    ppgdisp_norm_rise_min = 0.05f, ppgdisp_norm_rise_max = 5.0f;   // setter validity
+    constexpr float    ppgdisp_norm_win_min  = 0.2f,  ppgdisp_norm_win_max  = 5.0f;   // 5 s = PPGDispTracker::kMaxBlocks blocks
+    constexpr float    ppgdisp_norm_tau_min  = 0.2f,  ppgdisp_norm_tau_max  = 10.0f;
+    constexpr float    ppgdisp_norm_hr_min   = 1.0f,  ppgdisp_norm_hr_max   = 2.0f;
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
     constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
@@ -406,6 +417,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1),
       _ppgdisp_bpf(),
+      _ppgdisp_mode(AFE4490PPGDispMode::NO_NORM), _ppgdisp_tracker(), _ppgdisp_pi_last(NAN), _ppgdisp_amp(ppgdisp_norm_pi_floor),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_refractory_samples(0),
       _hr1_dc_alpha(0.0f),
@@ -469,6 +481,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
     _current_data = AFE4490Data{};
     _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
+    _ppgdisp_tracker.rise_per_s = ppgdisp_norm_rise_per_s; _ppgdisp_tracker.win_s = ppgdisp_norm_win_s;
+    _ppgdisp_tracker.tau_s      = ppgdisp_norm_tau_s;      _ppgdisp_tracker.headroom = ppgdisp_norm_headroom;
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
     _pi_bpf.f_low      = pi_bp_f_low_hz;  _pi_bpf.f_high = pi_bp_f_high_hz;
     _hr3_lp.f_high     = 15.0f;   // low-pass only (v0.83); 4th order since v0.97
@@ -899,6 +913,32 @@ void INCUNEST_AFE4490::setPPGDispFilter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+// ppg_disp display mode (v0.116, §5.9). Changing the mode restarts the tracker: a NORM trace never
+// inherits a frame measured while nobody was looking at it.
+void INCUNEST_AFE4490::setPPGDispMode(AFE4490PPGDispMode mode) {
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _ppgdisp_mode = mode;
+    _ppgdisp_tracker.reset();
+    _ppgdisp_pi_last = NAN;
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
+void INCUNEST_AFE4490::setPPGDispNormTracker(float rise_per_s, float win_s, float tau_s, float headroom) {
+    if (!(rise_per_s >= ppgdisp_norm_rise_min && rise_per_s <= ppgdisp_norm_rise_max) ||
+        !(win_s      >= ppgdisp_norm_win_min  && win_s      <= ppgdisp_norm_win_max)  ||
+        !(tau_s      >= ppgdisp_norm_tau_min  && tau_s      <= ppgdisp_norm_tau_max)  ||
+        !(headroom   >= ppgdisp_norm_hr_min   && headroom   <= ppgdisp_norm_hr_max)) {
+        ESP_LOGE(TAG, "setPPGDispNormTracker: out of range (rise %.3f win %.2f tau %.2f H %.2f) — ignored",
+                 rise_per_s, win_s, tau_s, headroom);
+        return;
+    }
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _ppgdisp_tracker.rise_per_s = rise_per_s; _ppgdisp_tracker.win_s = win_s;
+    _ppgdisp_tracker.tau_s      = tau_s;      _ppgdisp_tracker.headroom = headroom;
+    _ppgdisp_tracker.configure((float)_afe_sample_rate_hz);   // derives the constants and resets
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _hr2_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
@@ -1183,6 +1223,11 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     // state-mutex fields: PPG channel, filters, SpO2 calibration
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     cfg.ppgdisp_channel      = _ppgdisp_channel;
+    cfg.ppgdisp_mode         = _ppgdisp_mode;
+    cfg.ppgdisp_norm_rise_per_s = _ppgdisp_tracker.rise_per_s;
+    cfg.ppgdisp_norm_win_s   = _ppgdisp_tracker.win_s;
+    cfg.ppgdisp_norm_tau_s   = _ppgdisp_tracker.tau_s;
+    cfg.ppgdisp_norm_headroom = _ppgdisp_tracker.headroom;
     cfg.ppgdisp_f_low_hz     = _ppgdisp_bpf.f_low;
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
@@ -1347,6 +1392,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr1_interval_count = 0;
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
     _ppgdisp_bpf.reset();
+    _ppgdisp_tracker.reset(); _ppgdisp_pi_last = NAN;
     _hr2_bpf.reset();
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
     _hr2_decim.reset(); _hr2_update_counter = 0;
@@ -1978,6 +2024,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
         _hr1_ma_len = (uint32_t)hr1_ma_max_len;
     }
     _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
+    _ppgdisp_tracker.configure(sample_rate_hz);
     _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, sample_rate_hz);
     _hr3_lp.init(_hr3_lp.f_high, sample_rate_hz);
     _recalc_afe_tia_cf_led1();
@@ -2258,7 +2305,9 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 
     float filtered = _ppgdisp_bpf.process(raw_ppg);
 
-    _current_data.ppg_disp        = -filtered;  // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up)
+    // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up). Then the
+    // display mode (§5.9, v0.116): NO_NORM writes it as is; NORM / NORM_PI scale it to [−1, +1].
+    _ppgdisp_update(-filtered, _rsqm_probe_state);
     _current_data.led1       = led1;
     _current_data.led2       = led2;
     _current_data.aled1      = aled1;
@@ -2613,6 +2662,101 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
         _current_data.spo2     = NAN;
         _current_data.spo2_sqi = 0.0f;
     }
+}
+
+// ── ppg_disp display modes (v0.116, §5.9) ──────────────────────────────────────────────────────
+// x is the NO_NORM display signal of v0.69–v0.115: −BPF(ot_ch), peaks up. The NORM modes centre it
+// and divide it by the SLEW tracker's semi-amplitude (headroom included), NORM_PI multiplies by
+// A(PI), and both clamp to [−1, +1] — at ±1, never at ±A (rationale §21.8: the consumer's byte has
+// room up to ±1, and a beat larger than the frame is information). Probe not applied, tracker
+// warming up or a degenerate frame → 0, so an auto-gain never turns noise into a live-looking trace.
+// Runs under _state_mutex inside _process_sample(); PI is the one PI-METHOD-1 published last
+// (100 ms cadence), A is recomputed only when it changes (one logf per PI block, not per sample).
+void INCUNEST_AFE4490::_ppgdisp_update(float x, ProbeState probe_state) {
+    if (_ppgdisp_mode == AFE4490PPGDispMode::NO_NORM) {
+        _current_data.ppg_disp = x;
+        return;
+    }
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        _ppgdisp_tracker.reset();          // idempotent, as PI-METHOD-1 / SpO2 do while not applied
+        _current_data.ppg_disp = 0.0f;
+        return;
+    }
+    float centre, semi;
+    if (!_ppgdisp_tracker.update(x, centre, semi) || semi < pi_div_eps) {
+        _current_data.ppg_disp = 0.0f;     // first window, or a flat frame
+        return;
+    }
+    float u = (x - centre) / semi;
+    if (_ppgdisp_mode == AFE4490PPGDispMode::NORM_PI) {
+        const float pi = _current_data.pi;
+        const bool same = (pi == _ppgdisp_pi_last) || (isnan(pi) && isnan(_ppgdisp_pi_last));
+        if (!same) { _ppgdisp_amp = _ppgdisp_amp_of_pi(pi); _ppgdisp_pi_last = pi; }
+        u *= _ppgdisp_amp;
+    }
+    _current_data.ppg_disp = clampf(u, -1.0f, 1.0f);
+}
+
+// A(PI) of NORM_PI: floor at PI_lo and below, 1 at PI_hi and above, logarithmic in between
+// (PI spans more than a decade in neonates); PI_lo/PI_hi are the SQI ramp's spo2_pi_sqi_lo/_hi,
+// so "low perfusion" has one meaning in the library. NaN (window filling) → the floor: unknown
+// perfusion is shown at the minimum, not hidden.
+float INCUNEST_AFE4490::_ppgdisp_amp_of_pi(float pi) const {
+    if (isnan(pi) || pi <= 0.0f || _spo2_pi_sqi_hi <= _spo2_pi_sqi_lo) return ppgdisp_norm_pi_floor;
+    const float a = ppgdisp_norm_pi_floor
+                  + (1.0f - ppgdisp_norm_pi_floor) * logf(pi / _spo2_pi_sqi_lo) / logf(_spo2_pi_sqi_hi / _spo2_pi_sqi_lo);
+    return clampf(a, ppgdisp_norm_pi_floor, 1.0f);
+}
+
+void INCUNEST_AFE4490::PPGDispTracker::configure(float sample_rate_hz) {
+    _clock.configure(sample_rate_hz, alg_window_block_s);
+    long n    = lroundf(win_s / alg_window_block_s);
+    _n_blocks = (int)(n < 1 ? 1 : (n > kMaxBlocks ? kMaxBlocks : n));
+    _step_frac = rise_per_s / sample_rate_hz;
+    _alpha     = 1.0f - expf(-1.0f / (tau_s * sample_rate_hz));
+    reset();
+}
+
+void INCUNEST_AFE4490::PPGDispTracker::reset() {
+    _clock.reset();
+    _idx = 0; _count = 0;
+    _blocks_hi = -HUGE_VALF; _blocks_lo = HUGE_VALF;
+    _cur_max   = -HUGE_VALF; _cur_min   = HUGE_VALF;
+    _hi = 0.0f; _lo = 0.0f;
+}
+
+bool INCUNEST_AFE4490::PPGDispTracker::update(float x, float& centre, float& semi) {
+    if (x > _cur_max) _cur_max = x;
+    if (x < _cur_min) _cur_min = x;
+    if (_clock.tick()) {                       // a block completed: store it, re-scan the window
+        _blk_max[_idx] = _cur_max; _blk_min[_idx] = _cur_min;
+        _idx = (_idx + 1) % _n_blocks;
+        if (_count < _n_blocks) _count++;
+        _blocks_hi = -HUGE_VALF; _blocks_lo = HUGE_VALF;
+        for (int i = 0; i < _count; i++) {
+            if (_blk_max[i] > _blocks_hi) _blocks_hi = _blk_max[i];
+            if (_blk_min[i] < _blocks_lo) _blocks_lo = _blk_min[i];
+        }
+        _cur_max = -HUGE_VALF; _cur_min = HUGE_VALF;
+    }
+    const float t_hi = (_cur_max > _blocks_hi) ? _cur_max : _blocks_hi;
+    const float t_lo = (_cur_min < _blocks_lo) ? _cur_min : _blocks_lo;
+    if (warmed() && (_hi - _lo) < pi_div_eps) // a flat window (no pulse) left a degenerate frame:
+        _count = 0;                            // warm up again, so the returning pulse is not trapped
+                                               // behind a slew limit relative to a ~0 frame
+    if (!warmed()) {                           // first window: plain running extrema, no output yet
+        _hi = t_hi; _lo = t_lo;
+        return false;
+    }
+    const float range = _hi - _lo;
+    const float step  = _step_frac * range;
+    if (t_hi > _hi) { const float d = t_hi - _hi; _hi += (d < step) ? d : step; }   // rise: slew-limited
+    else            { _hi += _alpha * (t_hi - _hi); }                                 // fall: exponential
+    if (t_lo < _lo) { const float d = _lo - t_lo; _lo -= (d < step) ? d : step; }
+    else            { _lo += _alpha * (t_lo - _lo); }
+    centre = 0.5f * (_hi + _lo);
+    semi   = 0.5f * (_hi - _lo) * headroom;
+    return true;
 }
 
 // ── PI (Perfusion Index) algorithm — decoupled from SpO2 (v0.101, rationale §11) ─────────────

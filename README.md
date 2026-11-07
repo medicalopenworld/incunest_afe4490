@@ -16,7 +16,31 @@ Part of the [IncuNest](https://github.com/medicalopenworld/IncuNest) neonatal in
 - HR2: autocorrelation
 - HR3: FFT + Harmonic Product Spectrum
 - Signal Quality Index (SQI) for SpO2 and each HR algorithm
+- Display waveform `ppg_disp` in three modes: as measured, vertically scaled, or scaled with the
+  perfusion index (see below)
 - Runtime-configurable gain, LED current, filter cutoffs and sample rate
+
+## PPG display waveform (`ppg_disp`)
+
+`AFE4490Data::ppg_disp` is the waveform meant for a screen: the chosen channel's optical
+transmission, band-passed (0.5–20 Hz by default) and inverted so that each heartbeat rises. No
+algorithm reads it. Since v0.116 it has three modes, `afe.setPPGDispMode(...)` (spec §5.9):
+
+| Mode | What the screen gets | Use |
+|---|---|---|
+| `NO_NORM` (default) | the waveform as measured, in transmission units (~1e-6..1e-5): its size follows the perfusion | plots that auto-range; what every version before v0.116 produced |
+| `NORM` | the waveform vertically scaled to a constant pulse amplitude, in [−1, +1] | laboratory comparison; the "normalized" display of ISO 80601-2-61 201.3.241, which the standard warns can mask an unreliable signal on its own |
+| `NORM_PI` | as `NORM`, but the amplitude follows the perfusion index: full size at PI ≥ 2 %, half size at PI ≤ 0.5 %, logarithmic in between; still clamped to [−1, +1] | the product mode: a shrinking trace tells the operator the perfusion is falling |
+
+How the scaling works (the "SLEW" tracker): the library keeps a frame around the waveform from the
+highest and lowest values of the last second. When a beat is larger than the frame, the frame grows
+towards it at a limited rate — at most half its own size per second — so a brief artefact saturates
+the trace for a moment instead of re-scaling it; when beats get smaller, the frame shrinks
+exponentially with a 1 s time constant. The frame's own extremes map to ±1/1.15, leaving 15 % of
+headroom for the next beat. While the probe is not applied, or during the first second after it is,
+the scaled modes output 0: an auto-gain never turns noise into a live-looking trace. The four
+numbers are runtime parameters (`setPPGDispNormTracker()`); the reasons behind them are in the
+design rationale, §21.
 
 ## Requirements
 

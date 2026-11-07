@@ -1,5 +1,5 @@
 // incunest_afe4490 — Basic Example
-// Library version: v0.115 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.116 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
@@ -145,6 +145,8 @@ void setup() {
 
     // Change the PPG bandpass filter (default 0.5–20 Hz is fine for most cases)
     // afe.setPPGDispFilter(0.5f, 20.0f);
+    // afe.setPPGDispMode(AFE4490PPGDispMode::NORM_PI);   // v0.116: NO_NORM (default) / NORM / NORM_PI, spec §5.9
+    // afe.setPPGDispNormTracker(0.5f, 1.0f, 1.0f, 1.15f); // rise /s, window s, fall τ s, headroom
 
     // Use Webster (1997) coefficients instead of the default (source-traceable)
     // NOTE: both sets assume ~940 nm IR. For 905 nm probes (e.g. UpnMed U401-D)

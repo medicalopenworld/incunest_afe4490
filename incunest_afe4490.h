@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.115 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.116 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.115"
+#define INCUNEST_AFE4490_VERSION "0.116"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -219,9 +219,16 @@ struct AFE4490Data {
     int32_t led2_sub;  // LED2-ALED2 — RED ambient-corrected (frame: LED2_SUB)
     int32_t led1_sub;  // LED1-ALED1 — IR ambient-corrected  (frame: LED1_SUB)
     // Processed outputs
-    float   ppg_disp;         // PPG display signal, OT domain (v0.69): BPF(ot_led1/ot_led2) + negated.
-                              // A/A units, tiny magnitude (~1e-5..1e-6) — NOT normalized for display
-                              // (see backlog: candidate ppg_disp_norm, PI-weighted [0..1]).
+    float   ppg_disp;         // PPG display signal (§5.9). x = −BPF(ot_led1/ot_led2), peaks up, then one
+                              // of three modes (AFE4490PPGDispMode, setPPGDispMode(), v0.116):
+                              //   NO_NORM   — x itself, A/A, tiny magnitude (~1e-5..1e-6): auto-ranging plots
+                              //             only (default; the only output until v0.115)
+                              //   NORM    — x centred and divided by its slew-limited envelope, clamped to
+                              //             [−1, +1]: constant pulse amplitude (ISO 80601-2-61 201.3.241)
+                              //   NORM_PI — NORM × A(PI), A ∈ [0.5, 1] logarithmic in the perfusion index
+                              //             between spo2_pi_sqi_lo and _hi, clamped to [−1, +1] after the
+                              //             scaling (never to ±A): the product mode, the envelope tracks PI
+                              // 0 in the NORM modes while the probe is not applied or the tracker warms up.
                               // Gain-invariant like the algorithms (§5.1/§5.2): no discontinuity when
                               // HGAC changes RF, unlike the raw-ADC-code led1_sub/led2_sub it replaced.
                               // Display only — not an input to algorithms.
@@ -253,6 +260,33 @@ enum class AFE4490Channel {
     LED1,  // ot_led1 (IR)  — default
     LED2   // ot_led2 (RED)
 };
+
+// PPG display mode (setPPGDispMode() / ppg_disp, §5.9; v0.116). Selects what the band-passed,
+// negated OT of the chosen channel becomes before it is written to ppg_disp. One field, one
+// selector — not three fields (rationale §21.1). Values are fixed: they travel in $CFG/$LCFG.
+// In prose NORM is "vertically scaled": the waveform's shape is untouched, only its Y gain moves;
+// "normalized" is the standard's word (ISO 80601-2-61:2026 201.3.241) and is kept for traceability.
+enum class AFE4490PPGDispMode : uint8_t {
+    NO_NORM = 0,  // A/A, as v0.69–v0.115 — default (no scaling; named OT_AC in the drafts until 2026-11-07:
+                  // the incubator user need not know what OT or AC are, NO_NORM names the feature)
+    NORM    = 1,  // [−1, +1]: centred and divided by its slew-limited envelope (§5.9), clamped
+    NORM_PI = 2   // NORM scaled by A = 0.5 + 0.5·ln(PI/PI_lo)/ln(PI_hi/PI_lo), A ∈ [0.5, 1],
+                  // clamped to [−1, +1] after scaling (never to ±A) — the product mode
+};
+inline const char* afePPGDispModeToStr(AFE4490PPGDispMode m) {
+    switch (m) {
+        case AFE4490PPGDispMode::NO_NORM:   return "no_norm";
+        case AFE4490PPGDispMode::NORM:    return "norm";
+        case AFE4490PPGDispMode::NORM_PI: return "norm_pi";
+    }
+    return "?";
+}
+inline bool afeStrToPPGDispMode(const char* s, AFE4490PPGDispMode& out) {
+    if      (strcmp(s, "no_norm")   == 0) { out = AFE4490PPGDispMode::NO_NORM;   return true; }
+    else if (strcmp(s, "norm")    == 0) { out = AFE4490PPGDispMode::NORM;    return true; }
+    else if (strcmp(s, "norm_pi") == 0) { out = AFE4490PPGDispMode::NORM_PI; return true; }
+    return false;
+}
 
 enum class AFE4490RF {
     RF_10K,
@@ -726,6 +760,11 @@ struct AFE4490Config {
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit Stage 2 enable for LED2
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
+    AFE4490PPGDispMode ppgdisp_mode;         // PPG display mode: NO_NORM (default) / NORM / NORM_PI (v0.116, §5.9)
+    float             ppgdisp_norm_rise_per_s; // NORM tracker: max frame growth per second, as a fraction of the frame (0.5)
+    float             ppgdisp_norm_win_s;    // NORM tracker: window of the max/min targets [s] (1.0); also the warm-up
+    float             ppgdisp_norm_tau_s;    // NORM tracker: fall time constant [s] (1.0)
+    float             ppgdisp_norm_headroom; // NORM tracker: the frame's own extrema map to ±1/H (1.15)
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
@@ -850,6 +889,13 @@ public:
     // Signal and filter configuration
     void setPPGChannel(AFE4490Channel channel);
     void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
+    // v0.116 (§5.9): display mode of ppg_disp and the parameters of its envelope tracker (NORM modes).
+    // Both take _state_mutex like setPPGChannel(); callable before or after begin(). Either one
+    // re-initialises the tracker (warm-up restarts, ppg_disp = 0 meanwhile in the NORM modes).
+    // Out-of-range tracker values: the whole call is ignored (logged).
+    void setPPGDispMode(AFE4490PPGDispMode mode);                                  // default NO_NORM
+    void setPPGDispNormTracker(float rise_per_s = 0.5f, float win_s = 1.0f,
+                               float tau_s = 1.0f, float headroom = 1.15f);  // rise 0.05–5 /s, win 0.2–5 s, τ 0.2–10 s, H 1–2
 
     // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
     void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
@@ -1121,6 +1167,41 @@ private:
             phase = 0;
             return true;
         }
+    };
+
+    // Amplitude tracker of the NORM display modes (§5.9, "SLEW", v0.116). Keeps a frame [lo, hi]
+    // around the display signal x: the targets are the max / min of x over the newest win_s,
+    // held as the extrema of alg_window_block_s blocks (the PI block clock) plus the running
+    // extrema of the current block. The frame grows towards a target outside it by at most
+    // rise_per_s × (hi − lo) per second (so a brief artefact saturates the trace but can only
+    // widen the frame a little while it sits in the window) and decays towards a target inside it
+    // with time constant tau_s (a trace that gets small is full-size again in 1–2 s). Until the
+    // first window is full the frame is the plain running extrema and update() reports not warmed.
+    // Headroom H multiplies the semi-amplitude, so the frame's own extrema map to ±1/H and the next
+    // beat has room before it clips. Chosen over √2·RMS (frame breathes at the heart rate), an
+    // instant-attack envelope (plateaus on a growing beat) and a plain max/min window (jumps when an
+    // extreme leaves the window): rationale §21.5; clamp at ±1 and headroom: §21.8.
+    struct PPGDispTracker {
+        static constexpr int kMaxBlocks = 50;     // ppgdisp_norm_win_s_max / alg_window_block_s
+        float rise_per_s = 0.5f, win_s = 1.0f, tau_s = 1.0f, headroom = 1.15f;   // set by the owner
+        void configure(float sample_rate_hz);     // derives the per-sample constants, then reset()
+        void reset();                             // empty frame: the warm-up restarts
+        // One sample in. Returns false while warming up (first window); otherwise writes centre
+        // and semi-amplitude (headroom included) and returns true.
+        bool update(float x, float& centre, float& semi);
+        bool  warmed() const { return _count >= _n_blocks; }
+        float hi()     const { return _hi; }
+        float lo()     const { return _lo; }
+    private:
+        WindowBlockClock _clock;
+        float _step_frac = 0.0f;                  // rise_per_s / fs: max growth per sample, as a fraction of the frame
+        float _alpha     = 0.0f;                  // 1 − exp(−1/(τ·fs)): fall EMA coefficient
+        int   _n_blocks  = 10;                    // blocks in the window (win_s / alg_window_block_s)
+        float _blk_max[kMaxBlocks], _blk_min[kMaxBlocks];
+        int   _idx = 0, _count = 0;
+        float _blocks_hi = -HUGE_VALF, _blocks_lo = HUGE_VALF;   // extrema over the stored blocks
+        float _cur_max   = -HUGE_VALF, _cur_min   = HUGE_VALF;   // running extrema of the current block
+        float _hi = 0.0f, _lo = 0.0f;
     };
 
     // EMA (Exponential Moving Average) estimator for one signal channel (mean + variance).
@@ -1464,6 +1545,10 @@ private:
 
     // ── PPG display filter (Butterworth bandpass, configurable via setPPGDispFilter()) ──
     BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz
+    AFE4490PPGDispMode _ppgdisp_mode;        // NO_NORM / NORM / NORM_PI (v0.116, §5.9)
+    PPGDispTracker    _ppgdisp_tracker;      // SLEW envelope of the NORM modes
+    float             _ppgdisp_pi_last;      // PI the cached A was computed from (NaN = none)
+    float             _ppgdisp_amp;          // A(PI) of NORM_PI, recomputed only when PI changes
 
     // ── HR1 moving average state (independent of PPG display filter) ──
     // Capacity of the moving-average buffer. Sized for the WORST CASE OF THE CATALOGUE at the
@@ -1626,6 +1711,9 @@ private:
     int      _pi_buf_idx;             // shared by both buffers (same cadence)
     uint32_t _pi_buf_count;
     void _pi_update_sample(float ot_ir, ProbeState probe_state);
+    // ppg_disp (§5.9): x = −BPF(ot_ch) in; writes _current_data.ppg_disp per _ppgdisp_mode (v0.116)
+    void  _ppgdisp_update(float x, ProbeState probe_state);
+    float _ppgdisp_amp_of_pi(float pi) const;
     void _pi_window_reset();          // empties the window (block sum, buffers, totals)
 
     // ── HR1 state ──
@@ -1929,6 +2017,17 @@ public:
     // PI (Perfusion Index) — decoupled from SpO2 (v0.101). No slow/async path, so
     // _pi_update_sample() IS the production function; no separate "_for_test" wrapper needed.
     void     test_feed_pi(float ot_ir, ProbeState probe_state) { _pi_update_sample(ot_ir, probe_state); }
+
+    // ppg_disp display modes (v0.116, §5.9). test_feed_ppgdisp() runs the production path from the
+    // OT of the display channel: band-pass, negation, mode. test_set_pi() plants the PI that
+    // NORM_PI reads (PI-METHOD-1 is not run here).
+    void  test_feed_ppgdisp(float ot_ch, ProbeState probe_state) { _ppgdisp_update(-_ppgdisp_bpf.process(ot_ch), probe_state); }
+    float test_ppg_disp()          const { return _current_data.ppg_disp; }
+    void  test_set_pi(float pi)          { _current_data.pi = pi; }
+    bool  test_ppgdisp_warmed()    const { return _ppgdisp_tracker.warmed(); }
+    float test_ppgdisp_frame_hi()  const { return _ppgdisp_tracker.hi(); }
+    float test_ppgdisp_frame_lo()  const { return _ppgdisp_tracker.lo(); }
+    float test_ppgdisp_amp_of_pi(float pi) const { return _ppgdisp_amp_of_pi(pi); }
     uint32_t test_pi_buf_count() const { return _pi_buf_count; }
     int      test_pi_buf_n() const     { return _pi_buf_n; }
     uint16_t test_pi_block_len()     const { return _pi_block_clock.len; }

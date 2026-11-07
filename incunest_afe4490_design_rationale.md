@@ -944,6 +944,8 @@ In peak-to-peak units the same SUBJ08 windows give 0 % below 0.5, 61 % at or abo
 below Granelli's p5; the capture's first rows show the problem in one line: PI 0.62 (≈ 1.8 in
 Masimo units, a normal neonate) with SQI 0.08.
 
+**Reference ranges by age (2026-11-05).** The published PI percentiles by population (adult, child, term and preterm newborn), the five levels proposed for the display and alarms, and what they imply for the 0.5/2.0 SQI ramp are collected in PulseNest `docs/pi_reference_ranges_by_age.md`.
+
 **Decisions (Alex, "adelante" to all four).** (a) DC = the window mean above. (b) **PI in
 peak-to-peak units, as `2√2 · RMS` of the band-passed signal** (`pi_rms_to_pp_ratio`): exact for a
 sinusoid, which the band-passed PPG nearly is (2.8–3.2 measured), so it under-reads a per-beat
@@ -1833,6 +1835,362 @@ unit is measured; the fix for the unit dependence is the normalisation above.
 of each session, `OT_LED1`, `OT_LED2`, `ProbeState`; percentiles in ppm; runs of `min(OT1,OT2) > thr`
 of ≥ 100 samples at 100/150/200/250/300/400 ppm. Quality per OT bin from
 `derived/replay_lib0.108/*_replay.csv` of SUBJ08 and SUBJ11.
+
+## 21. `ppg_disp` — normalized display modes, and a selector instead of new fields (2026-11-05)
+
+**Question (Alex, 2026-11-05).** `ppg_disp` is the band-passed optical transmittance of one channel
+(A/A, ~1e-6..1e-5, §1.3 of the spec): fine for an auto-ranging plot, useless for a display with a
+fixed frame. Alex wants, besides the current signal, (a) a version normalized to a fixed range and
+(b) a version whose range shrinks with low perfusion (PI), and asks whether to add fields to
+`AFE4490Data` or a function that selects among the three. The PI-weighted normalization had been
+promised in the `ppg_disp` comment since v0.69 (2026-08-21) and explicitly deferred by Alex then.
+
+**Prior art.** Nellcor, Masimo and Philips draw the plethysmographic waveform **auto-scaled**: it
+always fills its trace, and the manuals state that its amplitude is not proportional to pulse
+volume. Perfusion is shown separately: as a number (Masimo's PI, Nellcor's since OxiMax) or as an
+amplitude bar (Nellcor's "blip bar"). Mindray lets the operator set a fixed waveform gain. Mode (b),
+a waveform that shrinks with low perfusion, is in none of them as far as we know: it is this
+project's own choice and is justified here, not by precedent.
+
+### 21.1 Fields or a selector
+
+| Option | Cost | Benefit |
+|---|---|---|
+| A. Two new `float` fields (`ppg_disp_norm`, `ppg_disp_norm_pi`) | Two more columns in `$M1`–`$M4`, the capture CSV, every parser in `pulsenest_lab.py`, the fleet viewer, the tooltips, spec §2.1, the example; 8 B more per sample in a struct whose size the UDP batching watches | The three traces visible at once, live |
+| **B. One field, a mode selector (chosen)** | One enum, one config field, one setter, one `$SET`/`$LCFG` key; `$M1`–`$M4` unchanged | Same pattern as `setPPGChannel()`: a function chooses what goes into `ppg_disp`; a product shows one trace anyway |
+| C. Fields only in `AFE4490DebugData` | Keeps `AFE4490Data` clean but `$M4` would still have to carry them to be seen | Half of A's cost for the same benefit |
+
+B wins because nothing is lost: the raw mode is recomputable offline from `LED1_SUB`/`LED2_SUB` and
+the `afe:` records (the offline runner does exactly that), the normalized modes are deterministic
+functions of the same inputs, and the lab already band-passes the raw codes itself for its own PPG
+views. Seeing the three traces together, which is only needed while tuning the mapping, is a job
+for the lab on the raw columns, not for the library. The existing `$LCFG` mechanism makes the mode
+switchable at run time from the lab's configuration window without touching frames.
+
+### 21.2 The three modes
+
+`AFE4490PPGDispMode`: `NO_NORM` (what v0.69–v0.115 do, the default), `NORM`, `NORM_PI`. Spec §5.9
+is normative; the reasons:
+
+1. **Range `[−1, +1]`, not `[0, 1]`.** The band-pass removes the DC, so the waveform is bipolar
+   with zero mean. Forcing `[0, 1]` would mean an offset of 0.5 that every consumer would have to
+   remove again. A receiver that needs an unsigned value (a fixed-point waveform widget) applies
+   `0.5 + x/2` itself.
+2. **What divides the AC.** Three candidates: (i) a min/max tracker over a window (exactly ±1, but
+   one motion spike sets the scale for the whole window and a flat line follows); (ii) the RMS of
+   the band-passed signal with the 2√2 peak-to-peak convention PI-METHOD-1 already uses (§11), so
+   that the same number scales the waveform and the PI; (iii) a fixed PI reference,
+   `AC / (DC · PI_ref/100)`, the August sketch, which is a *proportional* display with a fixed
+   gain (what Mindray's gain setting gives). Chosen: (ii). (iii) is dropped as a mode: the PI
+   number already carries the proportional information, and it leaves a low-perfusion baby with an
+   invisible trace, which `NORM_PI` is designed to avoid. The 2√2 convention makes a sinusoid fill
+   exactly ±1; a real PPG has a crest factor of 2.8–3.2 (§11), so its systolic peak overshoots +1
+   by up to ~12 % and the trough undershoots less. The output is **clamped** to ±1: the consumer is
+   a display with a fixed frame, and a guaranteed range is worth more than the last 12 % of the
+   peak shape (the HR algorithms never see this signal).
+3. **Its own tracker, not SpO2's EMA.** The sketch of August reused `_spo2_ch_ir_ema`. Rejected: it
+   tracks IR only (`ppg_disp` can show RED), its time constant belongs to SpO2 and its reset rules
+   to the SpO2 hold logic. `ppg_disp` gets one `EmaChannel` on its own band-passed output
+   (mean ≈ 0, var = AC²), time constant `ppgdisp_norm_tau_s`. Provisional default 2 s, 4–6 beats
+   in a neonate; to be tuned on the HOSPNAV replays (§21.4). Shorter adapts faster after the probe
+   is placed and flattens respiratory amplitude modulation; longer keeps it. Warm-up 2τ (var at
+   86 %, amplitude 7 % high, clamped) before the first normalized sample.
+4. **`NORM_PI`: amplitude `A` from the published PI.** `A = 0.5 + 0.5 · ln(PI/PI_lo) / ln(PI_hi/PI_lo)`,
+   clamped to `[0.5, 1]`, with `PI_lo = spo2_pi_sqi_lo` (0.5 %) and `PI_hi = spo2_pi_sqi_hi` (2 %):
+   the trace is at half scale exactly where SpO2's SQI says the PI is too low to trust (0), and at
+   full scale where SQI is 1. Alex had asked for two new parameters; reusing the SQI pair was
+   preferred because it adds no parameter without provenance (the 0.5/2.0 pair's own provenance is
+   still open, see memory) and keeps one meaning of "low perfusion" in the library. Logarithmic
+   rather than linear because PI spans more than a decade in neonates (0.3–5 %); over 0.5–2 % the
+   two differ by at most 0.08 in `A` (PI = 1 %: 0.75 vs 0.67). The PI used is `AFE4490Data::pi`
+   (PI-METHOD-1, IR, 6 s window): the amplitude the operator sees tracks the number the operator
+   reads, even when the displayed channel is RED. PI = NaN (window filling, first 6 s after
+   placement) → `A = 0.5`: unknown perfusion is shown at the minimum, not hidden. The output is
+   clamped at ±1 after the scaling, not at ±A (§21.8, 2026-11-07).
+5. **No probe → flat line, not auto-gained noise.** In `NO_NORM` the filter runs regardless of the
+   probe state (unchanged). In `NORM` and `NORM_PI`, `probe_state ≠ PROBE_APPLIED` gives
+   `ppg_disp = 0` and resets the tracker: an auto-gain on noise makes a disconnected or
+   in-air probe look like a live patient, the one failure a display normalization must not have
+   (commercial monitors blank the pleth in that state). PI-METHOD-1 resets on the same condition.
+6. **Where it sits.** After the band-pass and the negation, before the struct write, inside the
+   existing `_state_mutex` scope (the mode setter takes the same mutex as `setPPGChannel()`). The
+   settle freeze of §5.8.4 applies unchanged: a frozen input gives a constant to the tracker too.
+
+### 21.3 Not changed, by design
+
+- `$M1`–`$M4` and the capture CSV carry `PPG_DISP` as before; a capture records the mode in `$LCFG`
+  (and the lab shows it in the PPG plot title), otherwise a `[−1, 1]` column would be ambiguous.
+- Nothing in HR1/HR2/HR3/SpO2/PI/RSQM/HGAC reads `ppg_disp`; the modes cannot change a measurement.
+- `NO_NORM` is bit-identical to v0.115 (a test asserts it).
+
+### 21.4 Open points
+
+- Whether `PI_lo`/`PI_hi` stay coupled to the SQI ramp or get their own parameters is decided
+  after the HOSPNAV replay, not before.
+- The IncuNest HMI already plots `ppg_disp` on a fixed scale (facts in §21.7); `NORM_PI` is the
+  intended product mode and `[−1, 1]` its contract.
+- Settled 2026-11-07: the estimator (SLEW, §21.5 addendum), the clamp at ±1 (§21.8) and the headroom
+  1.15 (§21.8); the display filter and the transport rate (§21.7) remain open.
+- **Open (Alex, 2026-11-07): are `PI_lo` = 0.5 % and `PI_hi` = 2 % the right thresholds for the
+  PI-dependent amplitude of `NORM_PI`?** They are borrowed from the SQI ramp (`spo2_pi_sqi_lo/_hi`,
+  §21.2 point 4), whose own provenance is open. To analyse: what ISO 80601-2-61 and the de-facto
+  standards say, what the manufacturers do (Masimo, Nellcor, Philips: at which PI they flag low
+  perfusion or shrink the pleth), the dependence on age (neonatal PI ranges: p5 0.70 / p95 4.5 %
+  in Granelli; PulseNest `docs/pi_reference_ranges_by_age.md`), and whether the two thresholds should
+  be settable from the HMI or kept fixed so as not to add complexity or confusion to the handling of
+  the incubator.
+
+### 21.5 The normalizer of `NORM` is not settled: RMS measured against peak-to-peak (2026-11-05)
+
+Point 2 of §21.2 chose `x / (√2·RMS)` on the strength of the 2.8–3.2 crest factor of §11. That
+figure was measured in PI's 0.5–5 Hz band. In `ppg_disp`'s 0.5–20 Hz band the systolic upstroke and
+the dicrotic notch survive and the crest factor is higher: peak-to-peak over RMS in 2 s windows is
+3.3–3.6 (p25–p75) on SUBJ08, SUBJ09 and SUBJ10 (the board's own `PPG` column, probe applied). The
+consequence, measured per beat on the same captures: with 2√2 the median beat fills ±1 exactly but
+the 95th percentile reaches 1.2–1.4, 14–16 % of all samples lie beyond ±1 and are clamped, and more
+than half of the beats show a flattened systolic crest. The "up to ~12 %" of the first draft was
+wrong. A classic envelope follower (instant attack, exponential decay towards the signal, centre at
+`(hi+lo)/2`) filled ±1 on the median beat with 0.2–0.9 % of samples clamped, centred the asymmetric
+waveform (peak +1.00, trough −1.00, where RMS gives −1.06), warmed up in one beat, and shrank the
+beats after an injected 5× spike no longer than RMS did (3 beats at τ = 1 s, 7 at τ = 2 s, RMS 8).
+
+The comparison was done before the criteria were written down, so it is not the decision. Alex fixed
+the criteria on 2026-11-05 (and two preferences that narrow the field):
+
+1. Scaling with PI (less PI, smaller range) — a property of `NORM_PI`, not of the normalizer; what
+   the normalizer owes it is a trace that really fills ±1 (median fill per beat ≈ 1).
+2. Risk of clipping when the pulse amplitude grows (samples beyond ±1, beats with fill > 1).
+3. Immunity to spikes (motion): **Alex's preference — a spike may saturate the plot but must not
+   re-scale it**, so the following beats keep their size. This excludes a pure instant-attack
+   envelope and asks for a rate-limited rise of the scale, or a robust (median) amplitude statistic.
+4. Update rate of the range: **continuous, asymmetric** — shrinking the range (trace gets small) may
+   be fast, 1–2 s; growing it must be slow or slew-limited, which is what makes 3 hold without an
+   artefact detector.
+5. Others: centring of the asymmetric waveform; behaviour without signal (flat line, already
+   decided); start-up time after placement; no dependency on HR1's beat detector; cost and state
+   per sample at 500 Hz; exact offline reproducibility; no distortion of the diastole between two
+   beats at low heart rate (short τ in bradycardia).
+
+Candidates still to be measured in that form: an envelope with slew-limited rise and fast decay,
+and a scale from the median amplitude of the last beats. The table of candidates against criteria,
+with the metrics above on SUBJ08–11, decides; spec §5.9 carries the RMS text until then, marked.
+
+**Addendum 2026-11-06/07 — measured and watched in PPGDISPLAB; decision: SLEW (Alex).** The
+window (PulseNest `pulsenest_lab_spec.md` §7.22) runs the library's own filter arithmetic on the raw
+OT of the HOSPNAV P1 captures (0.001–0.035 % from the board's `ppg_disp`) and four trackers,
+every parameter a control. Metrics per beat, detected on the normalized trace (the 2026-11-05
+scratch numbers above counted beats on the raw trace and merged them; they overstated the fill):
+
+| Tracker | Median fill SUBJ08 / 09 / 10 / 11 | Clipped samples | Watched by Alex (NORM_PI, clamp at ±1) |
+|---|---|---|---|
+| SLEW (rise 0.5/s, win 1 s, τ 1 s) | 0.53 / 0.85 / 0.45 / 0.79 | 1.6 / 8.7 / — / 5.3 % (H = 1); 0.9 / 5.3 / — / 1.7 % (H = 1.15) | looks right |
+| INSTANT (τ 1 s) | 0.62 / 1.00 / 0.60 / 1.00 | 0 % at any H | distorts: plateaus while a beat grows — the frame jumps on the very sample that makes the extreme, so the sample that should be the peak is pinned at the frame |
+| MAXMIN (win 1 s) | — | — | distorts: the frame jumps when an extreme leaves the window |
+| RMS (√2·RMS, τ 1 s) | — | 14–16 % (2026-11-05) | shape right, but the frame rises and falls continuously |
+
+Why RMS breathes: the scale is √(EMA of x²) with τ = 1 s, of the order of the neonatal cardiac period
+(0.4–0.5 s), so the EMA does not average several beats and oscillates inside each cycle; dividing by
+a scale that oscillates at the heart rate modulates the amplitude at that rate — the systolic peak is
+compressed (scale rising) and the diastole stretched (scale falling), and the dicrotic notch is the
+first thing to deform. τ = 3–4 s would reduce it at the price of 3–4 s of tracking; it is the reason
+PI-METHOD-1 uses a 6 s window and not a short EMA. SLEW has none of this by construction: its frame
+moves on 100 ms block extrema, grows at a bounded rate and falls with τ, so it is constant inside a
+cycle. INSTANT clips nothing and fills more, but the plateaus are a distortion of the waveform
+itself, which the fill metric does not see — the visual check decided against it. SUBJ10 is a noisy
+capture whose beats the detector under-counts; its numbers are indicative only.
+
+Decision (Alex, 2026-11-07): SLEW, with the window's parameters as library defaults — rise 0.5 of the
+frame per second, window 1.0 s, fall τ 1.0 s — and headroom 1.15 (§21.8). The contract of §5.9 is
+rewritten accordingly; the fill of the median beat is 0.45–0.85 rather than ≈ 1, because the largest
+beat of the last second is what fills the frame; Alex judged the trace right at that fill. Still
+open in §21.7: the display filter (BP2 vs BP2+LP4, corner 8–10 Hz) and the transport rate.
+
+**Why the rise is a linear rate limit and the fall an exponential (Alex asked, 2026-11-07, accepted).**
+Growing the frame is the response to a larger extreme, and a larger extreme is as likely an
+artefact as a real beat; a linear limit (a fraction of the frame per second) makes the response to a
+spike independent of the spike's size — a 5× or a 50× spike both widen the frame by the same few
+percent in 100 ms — which is exactly criterion 3. Shrinking the frame is the response to a smaller
+signal, and a smaller signal is always real (an artefact only adds amplitude), so it is safe to
+follow it faster the farther away the target is, which is what an exponential does; the exponential
+also smooths the steps of the window target when an old extreme leaves the window — the jumps Alex
+saw in MAXMIN. The window (1.0 s of 100 ms block extrema) is at least one neonatal beat; the headroom
+only reserves chart.
+
+**Prior art, stated carefully.** No manufacturer documents the dynamics of its waveform auto-scaling.
+What is documented: Masimo acknowledges that it auto-scales the pleth and that this masks amplitude
+changes (US 8414499 B2, US 2008/0188760 A1); Shelley 2007 (Anesth Analg 105:S31) states that every
+clinical oximeter displays the waveform with an auto-gain that maximizes its size and that some let
+the user disable it — neither says how the gain moves. Masimo's slew-rate limiting (US 6157850)
+applies to the displayed pulse rate (20 bpm per 2 s) and to PVI, not to the waveform. The one
+antecedent of an asymmetric envelope on the pulsatile waveform is Puritan-Bennett US 4883353 (1989):
+instant jump to a new extreme, hold for 1/8 of a cycle, then decay at a constant slope proportional
+to amplitude and period — the opposite asymmetry in the direction of the extreme (instant attack,
+rate-limited release), used for the saturation computation and to overlay the envelopes on the
+waveform, not to scale the display. SLEW therefore rests on the reasoning above and on the
+PPGDISPLAB measurements, not on documented manufacturer practice. (A sentence attributing a
+limited-attack / exponential-release auto-scale to Masimo and Nellcor was written in a side session
+on 2026-11-07 and withdrawn the same day when Alex asked for references: there are none.)
+
+**Implementation (v0.116, 2026-11-07) and what it measured.** `PPGDispTracker` in the library is
+the window's SLEW line by line (block extrema on the PI block clock, slew-limited rise, exponential
+fall, headroom), `_ppgdisp_update()` applies the mode and the clamp at ±1, and `test/test_ppgdisp/`
+pins eight behaviours (spec §5.9). Two things the implementation made precise:
+
+1. *A spike does re-scale the trace, partly and briefly.* The spec draft said a 5× spike of 100 ms
+   widens the frame by ≈ 5 %. It widens it by much more, because the spike's extreme stays in the
+   1 s target window and the frame keeps rising towards it for that whole second (exponentially,
+   since the step is a fraction of the current frame). Synthetic 2 Hz sine at 500 Hz, the
+   library's own band-pass, Python chain = library:
+
+   | rise /s | win s | τ s | frame growth | back within 5 % after | trace saturated |
+   |---|---|---|---|---|---|
+   | 0.5 | 1.0 | 1.0 | ×2.3 | 4.5 s | 0.25 s |
+   | 0.3 | 1.0 | 1.0 | ×1.8 | 4.1 s | 0.26 s |
+   | 0.2 | 1.0 | 1.0 | ×1.5 | 3.9 s | 0.27 s |
+   | 0.1 | 1.0 | 1.0 | ×1.2 | 3.2 s | 0.28 s |
+   | 0.2 | 0.5 | 1.0 | ×1.3 | 2.6 s | 0.27 s |
+
+   Criterion 3 is therefore met in degree: with the defaults the beats after a spike are drawn at
+   ~45 % of their size for a second or two, then recover. The same `rise_per_s` sets how long a
+   real ×2 amplitude step clips (doubling in ln 2 / rise: 1.4 s at 0.5, 3.5 s at 0.2). Alex chose
+   0.5 by eye on the HOSPNAV captures, where real motion artefacts last longer than 100 ms; the
+   defaults stand, and 0.2/s or a 0.5 s window are the knobs if the post-spike shrink proves
+   visible in the ward (the window's SPIKE button reproduces it).
+2. *A flat window must not trap the frame.* With a relative slew limit, a frame that has collapsed
+   to ~0 (probe applied, no pulse) could only grow back exponentially from ~0: ln(1e-6 / 1e-9) /
+   0.5 ≈ 15 s before a returning pulse is full size. The tracker therefore restarts its warm-up
+   whenever the frame is narrower than `pi_div_eps` (1e-9 A/A, three decades under the ADC noise
+   floor of OT, so no artefact can trigger it): the returning pulse shows one window later. The
+   fall after a ×0.5 step is 1 s (window) + 3τ ≈ 4 s to 95 %, not the "1–2 s" of the draft.
+
+### 21.6 What ISO 80601-2-61:2026 says about the waveform display, and the floor of `A` (2026-11-05)
+
+Alex brought a NotebookLM reading of the standard. Checked against the PDF (`PulseNest/docs/`):
+
+- 201.3.241 *normalized*: "displayed at constant pulse amplitude independent of the actual pulse
+  magnitude of the signal being displayed". `NORM` is exactly that.
+- 201.12.4.102 *Signal inadequacy*, NOTE 3: a non-normalized pulse waveform display satisfies the
+  requirement for an indicator with respect to %mod; "a normalized waveform by itself does not
+  satisfy this requirement and can mask an unreliable signal". NOTE 4: a non-normalized waveform
+  does not indicate inadequate DC signals. **NOTE 6: not posting SpO2 or pulse rate under inadequate
+  signals satisfies the requirement** — which the library already does (SpO2 hold reasons, §17; the
+  SQI ramp on PI). d) 1): if a non-normalized waveform is used as the indicator, the accompanying
+  document must describe the visible characteristic that identifies inadequate %mod.
+- AA.2.14: a non-scaled plethysmographic display can lack the resolution to reveal clinically
+  significant changes of pulsatile signal strength in the low range; scaling it to increase the
+  resolution there "can enhance the utility of the plethysmogram for assessing signal adequacy".
+- Not in the standard: any recommended scaling law (the "logarithmic, optimal compliance" label and
+  the "PI 0.2 % → 25 % of the screen" example were NotebookLM's); 201.3.212 is *data update
+  period*, a wrong citation.
+
+Consequences. The waveform is not what carries 201.12.4.102 for this library (NOTE 6 and the RSQM
+already do); its scaling is a usability choice judged by §21.5's criteria, the standard being a
+source, not a mandate. `NORM` is the display the standard warns about: it stays as a laboratory
+mode, and **`NORM_PI` is the product mode** (spec §5.9 says so). `NORM_PI` is the "appropriately
+scaled plethysmographic display" of AA.2.14; if it is ever declared as the %mod inadequacy
+indicator, d) 1) is met by one sentence: "the trace at half height means PI below 0.5 %".
+
+**Floor of `A` = 0.5, kept (Alex, 2026-11-05).** A lower floor (0.25 was floated, from the
+NotebookLM example, with no evidence behind it) would make low perfusion more conspicuous (4:1
+contrast instead of 2:1), but the IncuNest display is far smaller than a hospital multiparameter
+monitor, and the trace must keep showing the waveform's shape: the dicrotic notch is 10–20 % of the
+peak-to-peak amplitude and needs ~3 px, so `floor ≥ 20 / H` for a widget H pixels tall (0.33 at
+60 px, 0.20 at 100 px). 0.5 keeps the shape on any widget above 40 px, and the PI number, the SQI and
+the SpO2 hold already carry the perfusion message; the shrink is a secondary cue. Below PI 0.5 %
+(Granelli 2007: p1 of 10 000 newborns; Masimo "low perfusion" < 0.25 %) the trace is at its minimum
+whatever the floor, so widening the mapped range downwards would only redistribute the shrink where
+SpO2 is already withheld. The formula is `A = floor + (1 − floor) · ln(PI/PI_lo)/ln(PI_hi/PI_lo)`;
+the floor is one number to revisit if the HMI widget ever makes 0.5 illegible or 0.25 legible.
+
+### 21.7 The display chain downstream of `ppg_disp`: what exists and what it asks of the library (2026-11-06)
+
+Facts, read in the IncuNest repo on 2026-11-05/06 (not in this repo's control; recorded here because the
+display modes and the display filter are designed for this consumer):
+
+- motherBoard `CommTask` sends `CTRL,PPG,<byte>` to the HMI every 40 ms (25 Hz) with the *latest*
+  `ppg_disp` sample: a 500 → 25 Hz decimation by sample-and-hold, with no anti-alias filter.
+  `byte = 128 + round(ppg_disp / 1.6e-8)` clipped to 0–255: a fixed transport scale, kept fixed on
+  purpose by Pablo (commit e3a71567, 2026-08-15, "no adaptive scaling outside the library"); sent only
+  while the probe is applied. `PpgSnapshot` keeps 8 s at 50 Hz for ThingsBoard, same scale, same
+  sample-and-hold.
+- Display_HMI (CrowPanel 7", 800×480 px, ≈154 mm wide → ≈5.2 px/mm, measured 2026-11-06) draws
+  `ui_LockPPGChart`, an LVGL line chart of 460×105 px, Y range 0–255, `LOCK_PPG_POINTS = 128`,
+  circular update with a 6-point erase gap. **128 points was chosen by time, not by pixels:** Pablo's
+  commit f098e634 (2026-08-13) halved 256 points (10.2 s, "beats crammed together") to 128 = 5.1 s at
+  25 Hz because clinical monitors show 4–6 s; the chart was 665 px wide then and 460 px now, so one
+  point is ≈3.6 px and LVGL joins points with straight segments. Nothing ties the point count to the
+  width.
+- Sweep speed (Alex, 2026-11-06): the clinical convention for the pleth trace is **25 mm/s**, inherited
+  from ECG; 12.5 and 50 mm/s are optional alternatives. ISO 80601-2-61 does not fix one. On the
+  CrowPanel 25 mm/s is ≈130 px/s: the 460 px chart would hold ≈3.5 s, and today's 128 points over
+  460 px run at ≈17 mm/s.
+- Today's chart in numbers (2026-11-06, from the code; the panel's active area is *not* in the IncuNest
+  repo: Alex measured ≈154 mm screen width and ≈88 mm chart width with a ruler, ±1 mm, matching the usual
+  7" 800×480 TFT, 154 × 86 mm): chart 460 × 105 px ≈ 88 × 20 mm;
+  Y range 0–255 → 2.4 byte values per px; 128 points at 25 Hz = 5.12 s, 3.6 px per point;
+  sweep = 25 points/s × 3.6 px / 5.2 px/mm ≈ 90 px/s ≈ **17.3 mm/s**; erase gap 6 points ≈ 22 px ≈
+  0.24 s. At the standard 25 mm/s the same chart holds 3.5 s = 88 points at 25 Hz (or 176 at 50 Hz).
+- Prior art: Masimo's front end decimates to 62.5 Hz through a 519-tap FIR with a 7.5 Hz corner
+  before anything is displayed or processed (US 5,632,272; `PulseNest/docs/masimo_nellcor_spo2_prior_art.md`).
+
+Consequences for the library (open, to be settled with the lab test window before v0.116 is coded):
+
+1. **Aliasing.** 25 Hz gives a Nyquist of 12.5 Hz; the display band-pass (one biquad, 0.5–20 Hz,
+   6 dB/octave each side, an inherited default with no written rationale, spec §2.2) passes 20 Hz and
+   attenuates 40 Hz by only 6 dB, so 12.5–20 Hz content and noise fold into the trace. Small on a clean
+   PPG, not on a noisy one. Two remedies, both reasonable: a lower and steeper display filter in the
+   library (candidates: 4th order, corner 8–10 Hz, like PI's and Masimo's), so that any consumer at
+   ≥ 25 Hz is safe without knowing anything; and proper decimation (block average or FIR) in the
+   consumer. A lower corner also reduces the crest factor the normalizer has to absorb (§21.5).
+2. **Rate is a contract constant; geometry is not.** The transport rate should be one constant of the
+   library/motherboard/HMI contract, chosen for the largest display we expect, and each consumer derives
+   its point count from it: `points = rate × width_mm / sweep_mm_s`. Pixels and seconds change with
+   every screen; the rate does not need to. Candidates: 25 Hz (today), 50 Hz (`PpgSnapshot` already),
+   62.5 Hz (Masimo). At 25 mm/s and 5.2 px/mm, 25 Hz is 5.2 px per sample and the systolic upstroke
+   (100–150 ms) is 3 samples: visibly polygonal, and the crest can fall between two samples, a few %
+   lower than the library's. At 50 Hz both effects halve.
+3. For the lab test window (`PPGDISPLAB`, PulseNest): the filter (order, corner) and the transport rate
+   are *candidates* to choose with the window and then freeze; width px, height px, sweep speed and
+   px/mm are *parameters* of the window, never constants, because they belong to the HMI and will change.
+
+### 21.8 Scale by `A`, clamp at ±1 — not at ±A (2026-11-07)
+
+The first draft of §5.9 and the PPGDISPLAB window wrote `NORM_PI` as `A · clamp(u, −1, 1)`: the
+trace was clamped at ±A. Alex, seeing the cyan trace flatten against the magenta ±A line with the
+chart empty above it: *scaling adaptively is useful (the envelope shows the PI falling); clamping
+adaptively has no use.* Agreed, and the two are indeed separate decisions:
+
+- **Scaling by `A`** carries the PI: over seconds the envelope of the trace falls with the
+  perfusion. It is what justifies `NORM_PI` over `NORM` (ISO 201.12.4.102 NOTE 3, §21.6).
+- **Clamping at ±A** carries nothing. The consumer's byte has room up to ±1; with A = 0.63 a
+  clamp at ±A discards 37 % of the chart exactly when the most informative samples arrive: a beat
+  larger than the tracked range, i.e. an artefact, a perfusion step, or a tracker that has not
+  grown yet. Showing it above A, up to ±1, is what NOTE 3 asks for (do not mask an unreliable
+  signal). The only argument for ±A would be "the amplitude is an exact PI reading", and it is
+  not: `A(PI)` is a logarithmic approximation, and the envelope of several beats still reads A
+  when one beat overshoots.
+
+Measured in PPGDISPLAB (SLEW tracker, `NORM_PI`, HOSPNAV P1 captures, samples with the probe
+applied after the first 5 s), percentage of clamped samples:
+
+| Capture | median A | clamp at ±A | clamp at ±1 |
+|---|---|---|---|
+| SUBJ08 | 0.63 | 6.1 % | 1.6 % |
+| SUBJ09 | 1.00 | 8.9 % | 8.7 % |
+| SUBJ10 | 0.88 | 18.5 % | 13.6 % |
+| SUBJ11 | 1.00 | 5.3 % | 5.3 % |
+
+Where A < 1 the clipping falls to a quarter at no cost; where A = 1 nothing changes, and there the
+headroom factor (§21.7, candidate 1.15, measured 2026-11-06: halves the clipping of SLEW for ~12 %
+less fill) is still what reduces it. The two combine in one expression, which is now §5.9:
+
+```
+ppg_disp = clamp( A(PI) · u / H , −1, +1 )      u = (x − centre) / semi-amplitude,  H = headroom
+```
+
+Side finding: the window's `clip` metric had counted |A·u| > 1 from the start (a clamp at ±1)
+while its trace clamped at ±A, so the headroom table of 2026-11-06 already described the ±1
+variant and stands. v0.116 is not tagged, so there is no compatibility cost.
 
 ## Appendix — source rationale (to distill at consolidation)
 

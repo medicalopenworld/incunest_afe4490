@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.115
+# incunest_afe4490 — Specification v0.116
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -58,7 +58,8 @@ The AFE4490 produces 6 signals per sample. All are read internally:
             │
             └─→ ot_led1 / ot_led2 (gain-invariant, §5.1) →
                     ├─→ selected channel (setPPGChannel: LED1/LED2) → bandpass filter
-                    │       (setPPGDispFilter) → negate → ppg_disp (display only, v0.69, §2.1)
+                    │       (setPPGDispFilter) → negate → mode NO_NORM | NORM | NORM_PI (setPPGDispMode,
+                    │       v0.116, §5.9) → ppg_disp (display only, v0.69, §2.1)
                     ├─→ HR1 (peak detection)
                     ├─→ bandpass 0.5–5 Hz → decimate ×10 → HR2 (autocorrelation)
                     ├─→ LP 10 Hz → decimate ×10 → 512-sample Hann → FFT → HPS → HR3
@@ -166,13 +167,15 @@ struct AFE4490Data {
     int32_t led2_sub;   // LED2-ALED2 — RED ambient-corrected (frame: LED2_SUB)
     int32_t led1_sub;   // LED1-ALED1 — IR ambient-corrected  (frame: LED1_SUB)
     // Processed outputs
-    float   ppg_disp;   // PPG display signal, OT domain (v0.69): BPF(ot_led1/ot_led2) + negated.
-                        // A/A units, tiny magnitude (~1e-5..1e-6) — NOT normalized (candidate
-                        // ppg_disp_norm, PI-weighted [0..1], is backlog). Gain-invariant like the
-                        // algorithms below — no discontinuity when HGAC changes RF, unlike the
-                        // raw-ADC-code led1_sub/led2_sub it replaced. Display only, no algorithm
-                        // consumes it (there is no separate `ppg` field — removed pre-v0.69, HR1
-                        // reads ot_led1 directly, see §1.3).
+    float   ppg_disp;   // PPG display signal (v0.69): BPF(ot_led1/ot_led2) + negated, then the
+                        // display mode (v0.116, §5.9): NO_NORM = A/A, tiny magnitude (~1e-5..1e-6),
+                        // auto-range plots only (default, bit-identical to v0.69–v0.115);
+                        // NORM = [−1, +1], own tracker; NORM_PI = NORM × A, A ∈ [0.5, 1],
+                        // clamped to ±1 after scaling
+                        // from PI. Gain-invariant like the algorithms below — no discontinuity
+                        // when HGAC changes RF, unlike the raw-ADC-code led1_sub/led2_sub it
+                        // replaced. Display only, no algorithm consumes it (there is no separate
+                        // `ppg` field — removed pre-v0.69, HR1 reads ot_led1 directly, see §1.3).
     float   spo2;       // SpO2 in %
     float   spo2_sqi;   // SpO2 Signal Quality Index [0–1]: PI-based; 0=no finger, 1=PI ≥ 2%
     float   spo2_r;     // R ratio: (AC_red/DC_red)/(AC_ir/DC_ir) — for calibration
@@ -258,6 +261,11 @@ struct AFE4490Config {
     bool              afe_stg2_en_led2;        // STAGE2EN2 (D14 of TIA_AMB_GAIN) — explicit enable; also forced ON when AMBDAC > 0
     uint8_t           afe_ambdac_uA;         // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
     AFE4490Channel    ppgdisp_channel;       // PPG display channel selection
+    AFE4490PPGDispMode ppgdisp_mode;         // PPG display mode: NO_NORM (default) / NORM / NORM_PI (v0.116, §5.9)
+    float             ppgdisp_norm_rise_per_s; // NORM tracker: max frame growth per second, as a fraction of the frame (v0.116, §5.9; 0.5)
+    float             ppgdisp_norm_win_s;    // NORM tracker: window of the max/min targets [s] (1.0)
+    float             ppgdisp_norm_tau_s;    // NORM tracker: fall time constant [s] (1.0)
+    float             ppgdisp_norm_headroom; // NORM tracker: frame extrema map to ±1/H (1.15)
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
@@ -317,6 +325,13 @@ AFE4490Config getConfig();
 ```cpp
 void setPPGChannel(AFE4490Channel channel);
 void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
+// v0.116 (§5.9): display mode of ppg_disp and the parameters of its envelope tracker (NORM modes).
+// Both take _state_mutex like setPPGChannel(); callable before or after begin(). Either one
+// re-initialises the tracker (warm-up restarts, ppg_disp = 0 meanwhile in the NORM modes).
+// Out-of-range tracker values: the whole call is ignored and logged (logE).
+void setPPGDispMode(AFE4490PPGDispMode mode);        // default NO_NORM
+void setPPGDispNormTracker(float rise_per_s = 0.5f, float win_s = 1.0f,
+                           float tau_s = 1.0f, float headroom = 1.15f);  // rise 0.05–5 /s, win 0.2–5 s, τ 0.2–10 s, H 1–2; else ignored
 // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
 void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
@@ -471,6 +486,16 @@ After `stop()`, `begin()` can be called again to restart from a clean state. Con
 enum class AFE4490Channel {
     LED1,  // ot_led1 (IR)  — default
     LED2   // ot_led2 (RED)
+};
+
+// PPG display mode (setPPGDispMode() / ppg_disp, §5.9; v0.116). Selects what the band-passed,
+// negated OT of the chosen channel becomes before it is written to ppg_disp. One field, one
+// selector — not three fields (rationale §21.1). Values are fixed: they travel in $CFG/$LCFG.
+enum class AFE4490PPGDispMode : uint8_t {
+    NO_NORM = 0,  // A/A, as v0.69–v0.115 — default (named OT_AC in the drafts until 2026-11-07)
+    NORM    = 1,  // [−1, +1]: centred and divided by its slew-limited envelope (§5.9), clamped
+    NORM_PI = 2   // NORM scaled by A = 0.5 + 0.5·ln(PI/PI_lo)/ln(PI_hi/PI_lo), A ∈ [0.5, 1],
+                  // clamped to [−1, +1] after scaling (never to ±A)
 };
 
 
@@ -665,6 +690,10 @@ inline bool        afeStrToCF(const char* s, AFE4490CFCode& out);
 // Stage 2 gain
 inline const char* afeRGToStr(AFE4490RG g);      // → "0dB"/"3.5dB"/"6dB"/"9.5dB"/"12dB"
 inline bool        afeStrToRG(const char* s, AFE4490RG& out);
+
+// PPG display mode (v0.116, §5.9) — the $SET/$LCFG key is ppgdisp_mode
+inline const char* afePPGDispModeToStr(AFE4490PPGDispMode m);   // → "no_norm"/"norm"/"norm_pi"
+inline bool        afeStrToPPGDispMode(const char* s, AFE4490PPGDispMode& out);
 ```
 
 ---
@@ -2052,6 +2081,130 @@ own `$CFG`, and counting it twice would tell the host a move happened that it it
 
 ---
 
+### 5.9 `ppg_disp` — the display waveform and its normalization modes (v0.116)
+
+**Status: design agreed 2026-11-05 (Alex); estimator, clamp and headroom settled 2026-11-07 (Alex,
+with the PPGDISPLAB window of PulseNest); implemented in v0.116 (2026-11-07, `PPGDispTracker`,
+`_ppgdisp_update()`, `test/test_ppgdisp/`).** Rationale §21 holds the alternatives and why. The
+three modes, for a user manual: **`NO_NORM`** — the waveform as measured, no scaling (auto-ranging
+plots); **`NORM`** — vertically scaled to a constant pulse amplitude (ISO 80601-2-61 201.3.241
+"normalized"); **`NORM_PI`** — vertically scaled, with the amplitude following the perfusion
+index (full size at PI ≥ 2 %, half size at PI ≤ 0.5 %). `$SET`/`$LCFG` key `ppgdisp_mode` =
+`no_norm` / `norm` / `norm_pi`.
+
+`ppg_disp` is a display signal. No algorithm reads it (§1.3); nothing here can change a measurement.
+
+**Common front (unchanged since v0.69).** `x = −BPF(ot_ch)`, `ot_ch` = `ot_led1` or `ot_led2` per
+`setPPGChannel()`, `BPF` the Butterworth band-pass of `setPPGDispFilter()` (0.5–20 Hz default),
+negated so that systole peaks up. Runs on every sample inside `_process_sample()`, after HGAC, under
+the settle freeze of §5.8.4 (a frozen input gives a constant here too).
+
+**Mode `NO_NORM` (default).** `ppg_disp = x` [A/A]. Bit-identical to v0.69–v0.115, probe state
+ignored. Magnitude ~1e-6..1e-5 (DC OT ~1e-4 with the probe applied, times PI 1–2 %): for
+auto-ranging plots only.
+
+**Mode `NORM`.** A slew-limited envelope tracker ("SLEW", chosen by Alex on 2026-11-07 among four
+candidates measured and watched in PPGDISPLAB — rationale §21.5) keeps a frame `[lo, hi]` around
+`x`, and
+
+```
+centre = (hi + lo) / 2          semi = (hi − lo) / 2 · H          u = (x − centre) / semi
+ppg_disp = clamp(u, −1, +1)     H = ppgdisp_norm_headroom (1.15)
+```
+
+The frame, updated at every sample:
+- **Targets** `t_hi` / `t_lo` = the maximum / minimum of `x` over the newest `ppgdisp_norm_win_s`
+  (1.0 s), kept as the extrema of 100 ms blocks (`alg_window_block_s`, the PI block clock) plus the
+  running extrema of the current block: two floats per block (`PPGDispTracker::kMaxBlocks` = 50
+  for the 5 s maximum), not a full-rate buffer; the window is re-scanned once per block.
+- **Rise, slew-limited:** when a target lies outside the frame, `hi` (or `lo`) moves towards it by at
+  most `ppgdisp_norm_rise_per_s` × (`hi` − `lo`) per second (0.5: exponential growth, the frame
+  doubles in ln 2 / 0.5 = 1.4 s; a doubled beat clips until then). **Measured (synthetic 2 Hz
+  sine, rationale §21.5):** a 5× spike of 100 ms saturates the trace for 0.25 s, but the spike's
+  extreme stays in the 1 s window and the frame keeps growing towards it for that second — ×2.3
+  at most with rise 0.5/s (×1.5 with 0.2/s, ×1.2 with 0.1/s) — and the frame is back within 5 %
+  about 4.5 s after the spike. So a spike re-scales the trace *partly and briefly*; Alex's
+  criterion 3 (saturate, never re-scale) is met in degree, not absolutely, and `rise_per_s` and
+  `win_s` are the two knobs that trade it against the response to a real amplitude step.
+- **Fall, exponential:** when the target lies inside the frame, `hi` / `lo` decay towards it with
+  time constant `ppgdisp_norm_tau_s` (1.0 s). The old extremes stay in the window for `win_s`
+  first, so after a ×0.5 step the trace is at 90 % of full size after 1 s + 2.3τ, 95 % after
+  1 s + 3τ ≈ 4 s, 98 % after 5 s (criterion 4, asymmetric: shrink faster than grow, and without
+  the window's steps — the exponential smooths them).
+- **Warm-up:** until the first window is full (`ppgdisp_norm_win_s` after the probe is applied) the
+  frame is the plain running extrema; the first normalized sample appears after one window. A
+  frame narrower than `pi_div_eps` (a flat window: probe applied, no pulse, output 0) restarts
+  the warm-up, so a returning pulse shows after one window instead of growing out of a ~0 frame
+  at the slew limit (which would take ln(ratio)/rise ≈ 15 s from 1e-9 to 1e-6 A/A).
+- **Headroom** `H` multiplies the semi-amplitude so that the frame's own extrema map to ±1/H: the
+  next beat, which the tracker cannot predict, has 15 % before it clips (measured 2026-11-06, SLEW,
+  SUBJ08/09/11: H = 1.15 halves the clipped samples, 1.6/8.7/5.3 % → 0.9/5.3/1.7 %, for ~12 % less
+  fill; 1.25 gains little more). The headroom lives here and not in a consumer because every
+  consumer receives the clamped value and cannot recover what lies beyond ±1.
+
+Properties the choice rests on (rationale §21.5, measured on SUBJ08–11 with the window's chain,
+which reproduces the library's `ppg_disp` to 0.001–0.035 %): the frame is constant inside a cardiac
+cycle by construction (an RMS scale with τ ≈ the neonatal period oscillates at the heart rate and
+compresses the systolic peak and stretches the diastole; an instant-attack frame jumps on the very
+sample that makes the extreme and flattens a growing beat into plateaus; a plain max/min window
+jumps when an extreme leaves the window); the asymmetric waveform is centred (peak and trough both
+reach the frame); no dependency on HR1's detector; deterministic, so the offline runner reproduces
+it. Median fill per beat with H = 1: 0.53 / 0.85 / 0.45 / 0.79 (SUBJ08–11) — the largest beat of
+the last second fills the frame, the median beat is smaller; clipped samples 1.6 / 8.7 / — / 5.3 %
+at H = 1 (SUBJ10 is a noisy capture). `semi` below `pi_div_eps` → `ppg_disp = 0`.
+**Probe gate:** while `probe_state ≠ PROBE_APPLIED`, or while the tracker is warming up, `ppg_disp
+= 0` and the tracker is reset (as PI-METHOD-1 does) — an auto-gain must never turn noise from an
+in-air or disconnected probe into a live-looking trace.
+**`NORM` is a "normalized" display in the sense of ISO 80601-2-61:2026 201.3.241**, the kind its
+201.12.4.102 NOTE 3 says can mask an unreliable signal by itself: it is a laboratory mode, for
+comparison, not the product mode (rationale §21.6).
+
+**Mode `NORM_PI` — the product mode.** `ppg_disp = clamp(A · u, −1, +1)` — the
+normalized waveform **scaled by `A` and then clamped at ±1, never at ±A** (Alex, 2026-11-07,
+rationale §21.8): `A` sets the amplitude of a typical beat, so that the envelope tracks the PI;
+the clamp is the physical full scale of the consumer's byte. A beat larger than the tracked range
+shows above `A`, up to ±1, which is information (artefact, a perfusion step, a tracker still
+growing) that a clamp at ±A would throw away while leaving 1 − A of the chart unused. With
+`PI = AFE4490Data::pi`
+(PI-METHOD-1, IR, whatever the displayed channel), `PI_lo = spo2_pi_sqi_lo`, `PI_hi = spo2_pi_sqi_hi`
+(§10.3, 0.5 % and 2 %), floor 0.5:
+
+```
+A = 0.5 + 0.5 · ln(PI / PI_lo) / ln(PI_hi / PI_lo),  clamped to [0.5, 1];   A = 0.5 if PI is NaN
+```
+
+Half scale where SpO2's SQI already says the perfusion is too low to trust, full scale where SQI is
+1, logarithmic in between (PI = 1 % → 0.75). An unknown PI (window filling) shows the waveform at the
+minimum, not hidden. The probe gate of `NORM` applies. The floor of 0.5 is a compromise for a
+display far smaller than a hospital monitor's (Alex, 2026-11-05): low perfusion must show, and the
+waveform's shape (the dicrotic notch, 10–20 % of the peak-to-peak) must stay legible — `floor ≥
+20 / H` for a widget `H` px tall, so 0.5 is safe above 40 px. This is the "appropriately scaled
+plethysmographic display" of the standard's AA.2.14; the library's compliance with 201.12.4.102
+rests on withholding SpO2 (its NOTE 6) and on the RSQM, not on this trace.
+
+**Configuration and telemetry.** `AFE4490Config::ppgdisp_mode`, `ppgdisp_norm_rise_per_s`,
+`ppgdisp_norm_win_s`, `ppgdisp_norm_tau_s`, `ppgdisp_norm_headroom`; `setPPGDispMode()`,
+`setPPGDispNormTracker()` (§2.4); codec `afePPGDispModeToStr()` (§3b). `$M1`–`$M4`
+carry `PPG_DISP` unchanged; the mode travels in `$CFG`/`$LCFG` (key `ppgdisp_mode`), so a capture is
+only interpretable with its `$LCFG` — the lab titles the PPG plot with it and fixes the Y axis to
+±1 in the NORM modes.
+
+**Tests (`test/test_ppgdisp/`, 8, host build, Unity, CI §9.10).** (1) `NO_NORM` is −BPF(x) sample by
+sample, bit-identical to a `TestBiquadFilter` of the same design, probe state ignored (the v0.69–
+v0.115 path); (2) `NORM` on sinusoids of three amplitudes × two DC levels → 0 during the warm-up
+window, then peaks at ±1/H within 2 %; (3) ×2 step → clipped 0.3 s after it, ±1/H within 2 %
+after 5 s; ×0.5 step → within 6 % after 4 s, 3 % after 5 s; (4) `NORM_PI`: A at PI = 0.2, 0.5, 1,
+2, 5 % and NaN; peaks at A/H for PI 0.5 and 1 %; a cycle three times the frame reaches ±1, not
+±A; (5) probe not applied → exactly 0 and a reset (not warmed) tracker; re-application warms up
+again; (6) a 5× spike of 100 ms saturates the trace, the frame grows at most ×2.6, saturation
+lasts ≤ 0.35 s, and 5 s later frame and output are within 5 % of before; (7) a flat input gives 0
+(no amplified noise) and a returning pulse shows one window later, full size within 3 s; (8)
+`setPPGDispNormTracker()` ignores out-of-range values, `getConfig()` reads the four back, a 2 s
+window is a 2 s warm-up, H = 1 maps the frame to ±1, and the codec round-trips. The per-sample
+cost is two compares, two compare-and-moves and a division; one `logf` per PI change.
+
+---
+
 ## 6. Hardware interface (SPI)
 
 | Parameter   | Value                           | Source      |
@@ -2919,6 +3072,11 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 |---|---|---|---|---|
 | DC removal time constant | `spo2_ema_mean_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 2.0 s (SpO2), 1.6 s (HR1) | SpO2, HR1 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
 | Input channel selection | `setPPGChannel()` default | LED1 | `ppg_disp` only (v0.69) | Selects ot_led1 vs ot_led2 for the display waveform; HR1/HR2/HR3/SpO2 always consume both OT channels directly, not gated by this selector |
+| Display mode | `ppgdisp_mode` (`setPPGDispMode()`) | `NO_NORM` | `ppg_disp` only (v0.116, §5.9) | `NO_NORM` A/A as before; `NORM` [−1, +1] by its slew-limited envelope tracker; `NORM_PI` = NORM × A, A ∈ [0.5, 1] from PI through `spo2_pi_sqi_lo/hi`, clamped at ±1 |
+| Display tracker rise | `ppgdisp_norm_rise_per_s` (`setPPGDispNormTracker()`) | 0.5 /s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Max growth of the frame per second as a fraction of itself: a spike saturates the trace but cannot re-scale it (rationale §21.5) |
+| Display tracker window | `ppgdisp_norm_win_s` (`setPPGDispNormTracker()`) | 1.0 s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Window of the max/min targets, from 100 ms block extrema; also the warm-up |
+| Display tracker fall τ | `ppgdisp_norm_tau_s` (`setPPGDispNormTracker()`) | 1.0 s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Exponential decay of the frame towards a smaller target: a small trace is full-size again in 1–2 s |
+| Display headroom | `ppgdisp_norm_headroom` (`setPPGDispNormTracker()`) | 1.15 (measured 2026-11-06, rationale §21.8) | `ppg_disp` NORM modes | Frame extrema map to ±1/H: halves the clipped samples for ~12 % less fill |
 | Decimation factor | `_hr2_decim.factor`, `_hr3_decim.factor` (each derived from its own target rate) | ×10 at 500 Hz | HR2 / HR3 respectively | One chain per filtered path; holds each decimated rate at 50 Hz before autocorrelation / FFT — see §5.3.1 |
 
 ---
@@ -2938,6 +3096,8 @@ See §5.1 for algorithm description.
 | Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 | No-finger detection guard |
 | SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | Nellcor/Masimo clinical threshold | PI below this → SQI = 0 |
 | SQI PI upper bound | `spo2_pi_sqi_hi` | 2.0 % | Nellcor/Masimo clinical threshold | PI above this → SQI = 1 |
+
+Provenance of the 0.5/2.0 pair is still open. Reference ranges by age (adult, child, term and preterm newborn), in the same peak-to-peak units, with the sources: PulseNest `docs/pi_reference_ranges_by_age.md` (2026-11-05). In newborns 0.5 % is Granelli's p1 (a defensible "do not publish"), while 2.0 % is above the neonatal median, so a normal newborn at PI 1.2 gets SQI ≈ 0.47.
 
 ---
 
@@ -3310,6 +3470,12 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.116  | 2026-11-07    | **`ppg_disp` display modes (§5.9; design agreed by Alex 2026-11-05, estimator, clamp     |
+|         |               | and headroom 2026-11-07).** `AFE4490PPGDispMode` `NO_NORM` (default, bit-identical to v0.115) / `NORM`    |
+|         |               | [−1, +1] by a slew-limited envelope tracker (rise/win/τ/headroom, settled 2026-11-07) /   |
+|         |               | `NORM_PI` = NORM × A, A ∈ [0.5, 1], clamped at ±1 after scaling (never at ±A),           |
+|         |               | logarithmic in PI between `spo2_pi_sqi_lo` and `_hi`. Flat line without a probe. One   |
+|         |               | field and a selector, not new fields; `$M1`–`$M4` unchanged. Rationale §21.             |
 | v0.115  | 2026-11-01    | **`rsqm_ot_thr` 1.5e-4 → 2.5e-4 (§5.6.2; Alex 2026-11-01).** Second real-patient          |
 |         |               | calibration, four HOSPNAV babies: applied-probe maximum 119 ppm on the channel that       |
 |         |               | decides the AND (RED on this probe unit), 156 ppm on the other; in-air minimum 592 ppm.   |
