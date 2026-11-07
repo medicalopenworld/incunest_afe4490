@@ -410,7 +410,7 @@ void test_spo2_method_switch_is_immediate() {
 // ── PI upper bound (v0.101): an impossible PI withholds SpO2 instead of scoring SQI = 1 ────
 // a_ir 15000 → PI = 2·15000·1.4e-10/1.4e-5 × 100 = 30 % (×0.9 band-pass gain at 1 Hz ≈ 27 %),
 // above spo2_pi_max (20 %): the pre-v0.101 code clamped the OUTPUT of the SQI ramp and reported
-// SQI = 1 here. Raising the bound through the third parameter of setSpO2PiSqiThresholds() restores it.
+// SQI = 1 here. Raising the bound through the third parameter of setSpO2SqiPiThresholds() restores it.
 void test_spo2_pi_above_max_invalidates() {
     INCUNEST_AFE4490 afe;
     feed_spo2_sine(afe, 15000.0f, 15000.0f * 0.5538f, 1.0f, CONVERGED_SAMPLES);
@@ -418,7 +418,7 @@ void test_spo2_pi_above_max_invalidates() {
     TEST_ASSERT_TRUE(isnan(afe.test_spo2()));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, afe.test_spo2_sqi());
     TEST_ASSERT_EQUAL_FLOAT(20.0f, afe.getConfig().spo2_pi_max);
-    afe.setSpO2PiSqiThresholds(0.5f, 2.0f, 40.0f);
+    afe.setSpO2SqiPiThresholds(0.5f, 2.0f, 40.0f);
     feed_spo2_sine(afe, 15000.0f, 15000.0f * 0.5538f, 1.0f, DECIM_RAW);   // next window update
     TEST_ASSERT_FALSE(isnan(afe.test_spo2()));
     TEST_ASSERT_EQUAL_FLOAT(1.0f, afe.test_spo2_sqi());

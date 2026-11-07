@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.116 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.117 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.116"
+#define INCUNEST_AFE4490_VERSION "0.117"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -226,7 +226,8 @@ struct AFE4490Data {
                               //   NORM    — x centred and divided by its slew-limited envelope, clamped to
                               //             [−1, +1]: constant pulse amplitude (ISO 80601-2-61 201.3.241)
                               //   NORM_PI — NORM × A(PI), A ∈ [0.5, 1] logarithmic in the perfusion index
-                              //             between spo2_pi_sqi_lo and _hi, clamped to [−1, +1] after the
+                              //             between ppgdisp_norm_pi_lo and _hi (own parameters since
+                              //             v0.117, not the SQI ramp's), clamped to [−1, +1] after the
                               //             scaling (never to ±A): the product mode, the envelope tracks PI
                               // 0 in the NORM modes while the probe is not applied or the tracker warms up.
                               // Gain-invariant like the algorithms (§5.1/§5.2): no discontinuity when
@@ -765,6 +766,8 @@ struct AFE4490Config {
     float             ppgdisp_norm_win_s;    // NORM tracker: window of the max/min targets [s] (1.0); also the warm-up
     float             ppgdisp_norm_tau_s;    // NORM tracker: fall time constant [s] (1.0)
     float             ppgdisp_norm_headroom; // NORM tracker: the frame's own extrema map to ±1/H (1.15)
+    float             ppgdisp_norm_pi_lo;    // NORM_PI: PI at and below which A = 0.5 [%] (0.5; v0.117, own parameter)
+    float             ppgdisp_norm_pi_hi;    // NORM_PI: PI at and above which A = 1 [%] (2.0; v0.117, own parameter)
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;      // HR2 bandpass lower cutoff [Hz]
@@ -782,8 +785,8 @@ struct AFE4490Config {
     float             spo2_window_s;               // SpO2 averaging window [s] (v0.102; 2–12 s, setSpO2WindowS)
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
-    float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
-    float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
+    float             spo2_sqi_pi_lo;            // PI below this → SQI=0 [%]
+    float             spo2_sqi_pi_hi;            // PI above this → SQI=1 [%]
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
     float             spo2_r_method2_reg_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%]
@@ -896,6 +899,12 @@ public:
     void setPPGDispMode(AFE4490PPGDispMode mode);                                  // default NO_NORM
     void setPPGDispNormTracker(float rise_per_s = 0.5f, float win_s = 1.0f,
                                float tau_s = 1.0f, float headroom = 1.15f);  // rise 0.05–5 /s, win 0.2–5 s, τ 0.2–10 s, H 1–2
+    // v0.117: the PI thresholds of NORM_PI's amplitude, A = 0.5 at and below pi_lo, 1 at and above pi_hi.
+    // Separate from the SQI ramp's spo2_sqi_pi_lo/_hi (Alex, 2026-11-07): the SQI says whether the
+    // SpO2 measurement is reliable, this says whether THIS baby's perfusion is low — two questions,
+    // each with its own evidence (rationale §21.4). Defaults coincide with the SQI pair's values.
+    // Valid: 0 < pi_lo < pi_hi ≤ 20 %; else the call is ignored (logged).
+    void setPPGDispNormPI(float pi_lo_pct = 0.5f, float pi_hi_pct = 2.0f);
 
     // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
     void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
@@ -919,7 +928,7 @@ public:
     // PI-based SQI thresholds [%], in peak-to-peak units (v0.101, the industry's PI): SQI ramps 0→1
     // from lo to hi; above max_pct the PI is physiologically impossible (a DC transient, e.g. the
     // probe coming off before probe_state notices) and SpO2 is withheld.
-    void setSpO2PiSqiThresholds(float lo_pct, float hi_pct, float max_pct = 20.0f);
+    void setSpO2SqiPiThresholds(float lo_pct, float hi_pct, float max_pct = 20.0f);
     // R method in force (v0.100): 1 = RMS ratio, 2 = regression on derivatives (default). Both
     // run on every sample, so switching is immediate; anything else is rejected and logged.
     void setSpO2RMethod(uint8_t method);
@@ -1549,6 +1558,8 @@ private:
     PPGDispTracker    _ppgdisp_tracker;      // SLEW envelope of the NORM modes
     float             _ppgdisp_pi_last;      // PI the cached A was computed from (NaN = none)
     float             _ppgdisp_amp;          // A(PI) of NORM_PI, recomputed only when PI changes
+    float             _ppgdisp_norm_pi_lo;   // NORM_PI thresholds [%] (v0.117, own parameters)
+    float             _ppgdisp_norm_pi_hi;
 
     // ── HR1 moving average state (independent of PPG display filter) ──
     // Capacity of the moving-average buffer. Sized for the WORST CASE OF THE CATALOGUE at the
@@ -1823,8 +1834,8 @@ private:
     float    _pi_window_s;
     float    _spo2_min;
     float    _spo2_max;
-    float    _spo2_pi_sqi_lo;
-    float    _spo2_pi_sqi_hi;
+    float    _spo2_sqi_pi_lo;
+    float    _spo2_sqi_pi_hi;
     float    _spo2_pi_max;
     uint8_t  _spo2_r_method;
     float    _spo2_r_method2_reg_corr_min;

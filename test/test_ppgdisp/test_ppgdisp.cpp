@@ -211,6 +211,35 @@ void test_tracker_setter_ranges_config_and_codec() {
     TEST_ASSERT_FALSE(afeStrToPPGDispMode("scaled", m));
 }
 
+// ── 9. NORM_PI thresholds are their own parameters, not the SQI ramp's (v0.117) ────────────────
+void test_norm_pi_thresholds_are_decoupled_from_sqi() {
+    INCUNEST_AFE4490 afe;
+    AFE4490Config c = afe.getConfig();
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.5f, c.ppgdisp_norm_pi_lo);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.0f, c.ppgdisp_norm_pi_hi);
+    afe.setSpO2SqiPiThresholds(0.2f, 1.0f);                // the SQI ramp moves...
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.50f, afe.test_ppgdisp_amp_of_pi(0.5f));   // ...A(PI) does not
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.75f, afe.test_ppgdisp_amp_of_pi(1.0f));
+    afe.setPPGDispNormPI(2.0f, 1.0f);                       // lo ≥ hi: ignored
+    afe.setPPGDispNormPI(0.5f, 25.0f);                      // above the displayed range: ignored
+    afe.setPPGDispNormPI(0.0f, 2.0f);                       // lo must be positive: ignored
+    c = afe.getConfig();
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.5f, c.ppgdisp_norm_pi_lo);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.0f, c.ppgdisp_norm_pi_hi);
+    afe.setPPGDispNormPI(1.0f, 4.0f);                       // own pair: A(2 %) = 0.75, A(1 %) = 0.5
+    c = afe.getConfig();
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, c.ppgdisp_norm_pi_lo);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 4.0f, c.ppgdisp_norm_pi_hi);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.75f, afe.test_ppgdisp_amp_of_pi(2.0f));
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.50f, afe.test_ppgdisp_amp_of_pi(1.0f));
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 1.00f, afe.test_ppgdisp_amp_of_pi(4.0f));
+    afe.setPPGDispMode(AFE4490PPGDispMode::NORM_PI);      // and the trace follows the new pair
+    afe.test_set_pi(2.0f);
+    Feeder f(afe);
+    f.run(1e-6f, 4.0f, 1.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.02f * FULL, 0.75f * FULL, f.out_max);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_ot_ac_is_minus_bandpass_bit_exact);
@@ -221,5 +250,6 @@ int main(int, char**) {
     RUN_TEST(test_spike_saturates_briefly_frame_bounded_and_recovers);
     RUN_TEST(test_flat_signal_is_zero_and_pulse_reacquires_in_one_window);
     RUN_TEST(test_tracker_setter_ranges_config_and_codec);
+    RUN_TEST(test_norm_pi_thresholds_are_decoupled_from_sqi);
     return UNITY_END();
 }

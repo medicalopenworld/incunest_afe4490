@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.116
+# incunest_afe4490 — Specification v0.117
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -266,6 +266,8 @@ struct AFE4490Config {
     float             ppgdisp_norm_win_s;    // NORM tracker: window of the max/min targets [s] (1.0)
     float             ppgdisp_norm_tau_s;    // NORM tracker: fall time constant [s] (1.0)
     float             ppgdisp_norm_headroom; // NORM tracker: frame extrema map to ±1/H (1.15)
+    float             ppgdisp_norm_pi_lo;    // NORM_PI: PI at and below which A = 0.5 [%] (0.5; v0.117, own parameter)
+    float             ppgdisp_norm_pi_hi;    // NORM_PI: PI at and above which A = 1 [%] (2.0; v0.117, own parameter)
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
     float             ppgdisp_f_high_hz;     // PPG display bandpass upper cutoff [Hz]
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
@@ -284,8 +286,8 @@ struct AFE4490Config {
     float             spo2_min;                  // valid output lower bound [%]
     float             spo2_max;                  // valid output upper bound [%]
     float             spo2_min_dc;               // no-finger DC threshold [adc_code]
-    float             spo2_pi_sqi_lo;            // PI below this → SQI=0 [%]
-    float             spo2_pi_sqi_hi;            // PI above this → SQI=1 [%]
+    float             spo2_sqi_pi_lo;            // PI below this → SQI=0 [%] (spo2_pi_sqi_lo until v0.116)
+    float             spo2_sqi_pi_hi;            // PI above this → SQI=1 [%] (spo2_pi_sqi_hi until v0.116)
     uint8_t           spo2_r_method;             // 1 or 2 (v0.100): the method spo2_r_method_id names
     float             spo2_r_method2_reg_corr_min;           // R-METHOD-2: r below this → SpO2 invalid, SQI=0
     float             spo2_pi_max;               // PI above this → physiologically impossible → SpO2 invalid, SQI=0 [%] (v0.101)
@@ -332,6 +334,9 @@ void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
 void setPPGDispMode(AFE4490PPGDispMode mode);        // default NO_NORM
 void setPPGDispNormTracker(float rise_per_s = 0.5f, float win_s = 1.0f,
                            float tau_s = 1.0f, float headroom = 1.15f);  // rise 0.05–5 /s, win 0.2–5 s, τ 0.2–10 s, H 1–2; else ignored
+// v0.117: NORM_PI's own PI thresholds (A = 0.5 at and below pi_lo, 1 at and above pi_hi), separate from
+// the SQI ramp's spo2_sqi_pi_lo/_hi. Valid 0 < pi_lo < pi_hi ≤ 20 %; else ignored (logE).
+void setPPGDispNormPI(float pi_lo_pct = 0.5f, float pi_hi_pct = 2.0f);
 // HR2 bandpass filter cutoffs (default 0.5–5 Hz); callable before or after begin()
 void setHR2Filter(float f_low_hz = 0.5f, float f_high_hz = 5.0f);
 // HR3 bandpass filter cutoffs (default 0.4–15 Hz); callable before or after begin()
@@ -349,7 +354,7 @@ void setSpO2WindowS(float window_s);                        // SpO2 averaging wi
 void setPIWindowS(float window_s);                          // PI averaging window [s], clamped 2–12, independent of SpO2's (v0.102)
 void setSpO2Range(float min_pct, float max_pct);           // valid SpO2 output range [%]
 void setSpO2MinDC(float counts);                           // no-finger DC threshold [adc_code]
-void setSpO2PiSqiThresholds(float lo_pct, float hi_pct);  // PI-based SQI thresholds [%]
+void setSpO2SqiPiThresholds(float lo_pct, float hi_pct, float max_pct = 20.0f);  // the SQI's PI thresholds [%] (setSpO2PiSqiThresholds until v0.116)
 void setSpO2RMethod(uint8_t method);                       // 1 = RMS ratio, 2 = regression on derivatives (default, v0.100)
 void setSpO2RMethod2RegCorrMin(float r);                              // R-METHOD-2 validity gate on r (default 0.8)
 bool setSpO2RCurve(const char* id, const char* r_method_id, float a, float b);  // R curve + the R method it was fitted with (v0.98; replaces setSpO2Coefficients)
@@ -1044,7 +1049,7 @@ NaN pass-through.
 sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %) → SpO2 invalid, SQI = 0
 ```
 
-PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2PiSqiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_method2_reg_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_method2_reg_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
+PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2SqiPiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_method2_reg_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_method2_reg_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
 **Pulse gate (v0.110, rationale §17).** With `spo2_pulse_gate_enable` (default true; `setSpO2PulseGateEnable()`,
 `$SET spo2_pulse_gate_enable`) SpO2 is also withheld while `AFE4490Data::hr3` is NaN, i.e. while HR3's
@@ -1070,7 +1075,7 @@ Enumerators carry the `HOLD_` prefix (`HOLD_NONE` … `HOLD_PULSE`, v0.113), as 
 The PI definition has changed twice (v0.101: units ×2√2 and a band-pass instead of the EMA; the
 intermediate 2026-10-05 state never reached a board) and nothing in a capture said which number
 its PI column held: HOSPNAV SUBJ08 reads a median PI of 1.66 under the old definition and ≈ 3 under
-the current one, same baby. The SQI thresholds (`spo2_pi_sqi_lo/hi`), `spo2_pi_max` and every
+the current one, same baby. The SQI thresholds (`spo2_sqi_pi_lo/hi`), `spo2_pi_max` and every
 comparison with a published neonatal threshold depend on it. So the definition carries an id,
 `PI_METHOD_ID`, by the R-method rule: it changes if and only if, for the same input, PI comes out
 as a different number; parameters (`pi_window_s`, `pi_bp_f_*`) travel in the configuration and do
@@ -2166,15 +2171,22 @@ the clamp is the physical full scale of the consumer's byte. A beat larger than 
 shows above `A`, up to ±1, which is information (artefact, a perfusion step, a tracker still
 growing) that a clamp at ±A would throw away while leaving 1 − A of the chart unused. With
 `PI = AFE4490Data::pi`
-(PI-METHOD-1, IR, whatever the displayed channel), `PI_lo = spo2_pi_sqi_lo`, `PI_hi = spo2_pi_sqi_hi`
-(§10.3, 0.5 % and 2 %), floor 0.5:
+(PI-METHOD-1, IR, whatever the displayed channel), `PI_lo = ppgdisp_norm_pi_lo`, `PI_hi =
+ppgdisp_norm_pi_hi` (own parameters since v0.117, `setPPGDispNormPI()`; defaults 0.5 % and 2 %),
+floor 0.5:
 
 ```
 A = 0.5 + 0.5 · ln(PI / PI_lo) / ln(PI_hi / PI_lo),  clamped to [0.5, 1];   A = 0.5 if PI is NaN
 ```
 
-Half scale where SpO2's SQI already says the perfusion is too low to trust, full scale where SQI is
-1, logarithmic in between (PI = 1 % → 0.75). An unknown PI (window filling) shows the waveform at the
+Half scale at and below `PI_lo`, full scale at and above `PI_hi`, logarithmic in between (PI = 1 %
+→ 0.75). The defaults coincide with the SQI ramp's `spo2_sqi_pi_lo/_hi`, but **the two pairs are
+separate parameters (v0.117, Alex 2026-11-07)**: the SQI measures whether the SpO2 reading is
+reliable (a property of the algorithm and the sensor noise, to be calibrated against |error| vs PI),
+the display amplitude tells the operator whether this baby's perfusion is low (a clinical, age-
+dependent question: a preterm with PI 0.8 % may be normal for its age with a reliable SpO2; a
+PI 1.5 % reading may be an artefact with a doubtful SpO2). Each pair is to be justified on its own
+evidence; they stay equal only if the evidence lands on the same numbers (rationale §21.4). An unknown PI (window filling) shows the waveform at the
 minimum, not hidden. The probe gate of `NORM` applies. The floor of 0.5 is a compromise for a
 display far smaller than a hospital monitor's (Alex, 2026-11-05): low perfusion must show, and the
 waveform's shape (the dicrotic notch, 10–20 % of the peak-to-peak) must stay legible — `floor ≥
@@ -2183,8 +2195,9 @@ plethysmographic display" of the standard's AA.2.14; the library's compliance wi
 rests on withholding SpO2 (its NOTE 6) and on the RSQM, not on this trace.
 
 **Configuration and telemetry.** `AFE4490Config::ppgdisp_mode`, `ppgdisp_norm_rise_per_s`,
-`ppgdisp_norm_win_s`, `ppgdisp_norm_tau_s`, `ppgdisp_norm_headroom`; `setPPGDispMode()`,
-`setPPGDispNormTracker()` (§2.4); codec `afePPGDispModeToStr()` (§3b). `$M1`–`$M4`
+`ppgdisp_norm_win_s`, `ppgdisp_norm_tau_s`, `ppgdisp_norm_headroom`, `ppgdisp_norm_pi_lo`,
+`ppgdisp_norm_pi_hi` (v0.117); `setPPGDispMode()`, `setPPGDispNormTracker()`, `setPPGDispNormPI()`
+(§2.4); codec `afePPGDispModeToStr()` (§3b). `$M1`–`$M4`
 carry `PPG_DISP` unchanged; the mode travels in `$CFG`/`$LCFG` (key `ppgdisp_mode`), so a capture is
 only interpretable with its `$LCFG` — the lab titles the PPG plot with it and fixes the Y axis to
 ±1 in the NORM modes.
@@ -3072,11 +3085,13 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 |---|---|---|---|---|
 | DC removal time constant | `spo2_ema_mean_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 2.0 s (SpO2), 1.6 s (HR1) | SpO2, HR1 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
 | Input channel selection | `setPPGChannel()` default | LED1 | `ppg_disp` only (v0.69) | Selects ot_led1 vs ot_led2 for the display waveform; HR1/HR2/HR3/SpO2 always consume both OT channels directly, not gated by this selector |
-| Display mode | `ppgdisp_mode` (`setPPGDispMode()`) | `NO_NORM` | `ppg_disp` only (v0.116, §5.9) | `NO_NORM` A/A as before; `NORM` [−1, +1] by its slew-limited envelope tracker; `NORM_PI` = NORM × A, A ∈ [0.5, 1] from PI through `spo2_pi_sqi_lo/hi`, clamped at ±1 |
+| Display mode | `ppgdisp_mode` (`setPPGDispMode()`) | `NO_NORM` | `ppg_disp` only (v0.116, §5.9) | `NO_NORM` A/A as before; `NORM` [−1, +1] by its slew-limited envelope tracker; `NORM_PI` = NORM × A, A ∈ [0.5, 1] from PI through `spo2_sqi_pi_lo/hi`, clamped at ±1 |
 | Display tracker rise | `ppgdisp_norm_rise_per_s` (`setPPGDispNormTracker()`) | 0.5 /s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Max growth of the frame per second as a fraction of itself: a spike saturates the trace but cannot re-scale it (rationale §21.5) |
 | Display tracker window | `ppgdisp_norm_win_s` (`setPPGDispNormTracker()`) | 1.0 s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Window of the max/min targets, from 100 ms block extrema; also the warm-up |
 | Display tracker fall τ | `ppgdisp_norm_tau_s` (`setPPGDispNormTracker()`) | 1.0 s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Exponential decay of the frame towards a smaller target: a small trace is full-size again in 1–2 s |
 | Display headroom | `ppgdisp_norm_headroom` (`setPPGDispNormTracker()`) | 1.15 (measured 2026-11-06, rationale §21.8) | `ppg_disp` NORM modes | Frame extrema map to ±1/H: halves the clipped samples for ~12 % less fill |
+| Display PI lower threshold | `ppgdisp_norm_pi_lo` (`setPPGDispNormPI()`) | 0.5 % (the SQI pair's value; own evidence pending, rationale §21.4) | `ppg_disp` NORM_PI | A = 0.5 at and below: this baby's perfusion shown as low. Separate from `spo2_sqi_pi_lo` since v0.117 |
+| Display PI upper threshold | `ppgdisp_norm_pi_hi` (`setPPGDispNormPI()`) | 2.0 % (idem) | `ppg_disp` NORM_PI | A = 1 at and above; logarithmic between the two |
 | Decimation factor | `_hr2_decim.factor`, `_hr3_decim.factor` (each derived from its own target rate) | ×10 at 500 Hz | HR2 / HR3 respectively | One chain per filtered path; holds each decimated rate at 50 Hz before autocorrelation / FFT — see §5.3.1 |
 
 ---
@@ -3094,8 +3109,8 @@ See §5.1 for algorithm description.
 | DC EMA time constant | `spo2_ema_mean_tau_s` | 2.0 s | f_c ≈ 0.08 Hz << 0.5 Hz (30 bpm min HR); same signal as RSQM → same τ | Speed of DC baseline tracking |
 | SpO2 averaging window | `spo2_window_s` (`setSpO2WindowS()`, 2–12 s) | 6.0 s | True sliding window (v0.102, rationale §12) — replaces the EMA τ 6 s, which averaged like a 12 s window: ISO 80601-2-61:2026 Annex JJ.2 d) 6–10 s for a *transfer standard*; between 2–4 s (neonatal resuscitation/IH research) and 8 s (NICU default) — rationale §4.5; 2 s floor keeps "short window + alarm delay" (McClure 2016) reachable | Noise vs. response of R/SpO2; the window IS the warm-up (first value when full) |
 | Minimum DC level (no-finger threshold) | `spo2_min_dc` | 1000 counts | Below this DC, SpO2 and SQI are forced to 0 | No-finger detection guard |
-| SQI PI lower bound | `spo2_pi_sqi_lo` | 0.5 % | Nellcor/Masimo clinical threshold | PI below this → SQI = 0 |
-| SQI PI upper bound | `spo2_pi_sqi_hi` | 2.0 % | Nellcor/Masimo clinical threshold | PI above this → SQI = 1 |
+| SQI PI lower bound | `spo2_sqi_pi_lo` (`spo2_pi_sqi_lo` until v0.116) | 0.5 % | Nellcor/Masimo clinical threshold | PI below this → SQI = 0. Measurement reliability, not the display's "low perfusion" (`ppgdisp_norm_pi_lo`, §5.9) |
+| SQI PI upper bound | `spo2_sqi_pi_hi` (`spo2_pi_sqi_hi` until v0.116) | 2.0 % | Nellcor/Masimo clinical threshold | PI above this → SQI = 1 |
 
 Provenance of the 0.5/2.0 pair is still open. Reference ranges by age (adult, child, term and preterm newborn), in the same peak-to-peak units, with the sources: PulseNest `docs/pi_reference_ranges_by_age.md` (2026-11-05). In newborns 0.5 % is Granelli's p1 (a defensible "do not publish"), while 2.0 % is above the neonatal median, so a normal newborn at PI 1.2 gets SQI ≈ 0.47.
 
@@ -3111,7 +3126,7 @@ See §5.1, *Perfusion Index (PI)* and rationale §11.
 | Band-pass upper cutoff | `pi_bp_f_high_hz` | 15.0 Hz | HR3's ceiling (3rd harmonic of 260 BPM = 13 Hz): a magnitude needs the harmonics — 5 Hz read −25 % at 220 vs 60 BPM on the MS100; noise above 10 Hz unmeasurable in the lowest-PI decile of a neonate (rationale §11) | HR-independence of PI |
 | Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; blocks of `alg_window_block_s` = 100 ms, buffers `alg_window_buf_len_max` = 120) | 6 s | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements) | PI settling time / noise |
 | RMS → peak-to-peak | `pi_rms_to_pp_ratio` | 2√2 | Exact for a sinusoid; band-passed PPG measured 2.79/2.92 (neonates), 3.0–3.2 (MS100) → under-reads a per-beat Max−Min by 0–12 %. Per-beat peaks (Masimo/Nellcor exact) need a beat detector: PILAB option, not library | PI in the industry's units |
-| PI upper bound | `spo2_pi_max` | 20 % | Top of the DISPLAYED range of Masimo 0.02–20 (LAB-9204A Rad-57 manual; whitepaper lab3410f defines PI only as pulsatile/non-pulsatile), Mindray 0.05–20 (BeneVision N-Series operator's manual), Nellcor 0.03–20 (PM-1000N service manual, Table 2-1 note 6); links in PulseNest `docs/ppg_neonatal_manufacturer_references.md`. None discloses its estimator; ISO 80601-2-61:2026 201.3.245 defines %mod only as ≈ AC/DC × 100. A display convention, not a physiological limit (open: PulseNest BACKLOG 2026-10-22); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2PiSqiThresholds(lo, hi, max)`) |
+| PI upper bound | `spo2_pi_max` | 20 % | Top of the DISPLAYED range of Masimo 0.02–20 (LAB-9204A Rad-57 manual; whitepaper lab3410f defines PI only as pulsatile/non-pulsatile), Mindray 0.05–20 (BeneVision N-Series operator's manual), Nellcor 0.03–20 (PM-1000N service manual, Table 2-1 note 6); links in PulseNest `docs/ppg_neonatal_manufacturer_references.md`. None discloses its estimator; ISO 80601-2-61:2026 201.3.245 defines %mod only as ≈ AC/DC × 100. A display convention, not a physiological limit (open: PulseNest BACKLOG 2026-10-22); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2SqiPiThresholds(lo, hi, max)`) |
 | Pulse gate | `spo2_pulse_gate_enable` | true | §5.1 *Pulse gate*; rationale §17 (measured 2026-10-20) | SpO2 withheld (reason 7) while `AFE4490Data::hr3` is NaN (`setSpO2PulseGateEnable()`) |
 | Hold reason | `AFE4490Data::spo2_hold_reason` | — | §5.1 *Hold reason*: first failing gate, codes 0–7 | output, `$M4` field 37 |
 
@@ -3470,11 +3485,19 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.117  | 2026-11-07    | **`NORM_PI` thresholds decoupled from the SQI ramp (§5.9; Alex 2026-11-07).** New         |
+|         |               | `AFE4490Config::ppgdisp_norm_pi_lo/_hi` (0.5 / 2 %: the SQI pair's values until each pair  |
+|         |               | has its own evidence, rationale §21.4) and `setPPGDispNormPI()`. The SQI says whether   |
+|         |               | the SpO2 measurement is reliable; the display amplitude says whether this baby's        |
+|         |               | perfusion is low: two questions, two pairs. **Renamed:** `spo2_pi_sqi_lo/_hi` →         |
+|         |               | `spo2_sqi_pi_lo/_hi` and `setSpO2PiSqiThresholds()` → `setSpO2SqiPiThresholds()` (the   |
+|         |               | SQI's PI thresholds, parallel to the display's); API only, no `$SET`/`$LCFG` key carries |
+|         |               | them. Test 9 of `test/test_ppgdisp/`.                                                   |
 | v0.116  | 2026-11-07    | **`ppg_disp` display modes (§5.9; design agreed by Alex 2026-11-05, estimator, clamp     |
 |         |               | and headroom 2026-11-07).** `AFE4490PPGDispMode` `NO_NORM` (default, bit-identical to v0.115) / `NORM`    |
 |         |               | [−1, +1] by a slew-limited envelope tracker (rise/win/τ/headroom, settled 2026-11-07) /   |
 |         |               | `NORM_PI` = NORM × A, A ∈ [0.5, 1], clamped at ±1 after scaling (never at ±A),           |
-|         |               | logarithmic in PI between `spo2_pi_sqi_lo` and `_hi`. Flat line without a probe. One   |
+|         |               | logarithmic in PI between `spo2_sqi_pi_lo` and `_hi`. Flat line without a probe. One   |
 |         |               | field and a selector, not new fields; `$M1`–`$M4` unchanged. Rationale §21.             |
 | v0.115  | 2026-11-01    | **`rsqm_ot_thr` 1.5e-4 → 2.5e-4 (§5.6.2; Alex 2026-11-01).** Second real-patient          |
 |         |               | calibration, four HOSPNAV babies: applied-probe maximum 119 ppm on the channel that       |
@@ -3573,10 +3596,10 @@ specification; `scripts/check_version.py` requires it.
 |         |               | sums): settles EXACTLY at 6 s, no EMA, no seed, no lead/lag between          |
 |         |               | numerator and denominator. **PI is now peak-to-peak** (`2√2·RMS`, Nellcor/   |
 |         |               | Masimo's definition, ISO *%mod*): the old RMS-based PI was ÷2.8–3.2 of it,   |
-|         |               | so `spo2_pi_sqi_lo/hi` (0.5/2.0, copied from those manufacturers) fired ~3×  |
+|         |               | so `spo2_sqi_pi_lo/hi` (0.5/2.0, copied from those manufacturers) fired ~3×  |
 |         |               | too early — HOSPNAV SUBJ08 scored SQI 0.08 at a normal 1.8 % (pp). **PI      |
 |         |               | upper bound** `spo2_pi_max` = 20 % (third parameter of                        |
-|         |               | `setSpO2PiSqiThresholds()`, `AFE4490Config::spo2_pi_max`): above it SpO2 is  |
+|         |               | `setSpO2SqiPiThresholds()`, `AFE4490Config::spo2_pi_max`): above it SpO2 is  |
 |         |               | withheld — the ramp's output-only clamp used to publish SQI = 1 on the DC    |
 |         |               | transient of a probe coming off (closes the 2026-08-22 finding). `_spo2_     |
 |         |               | update()`'s SQI also guards a not-yet-valid (`NaN`) PI explicitly instead of |
@@ -4782,7 +4805,7 @@ specification; `scripts/check_version.py` requires it.
 |         |               | updated accordingly.                                                       |
 | v0.24   | 2026-04-24    | Algorithm parameters exposed in AFE4490Config and runtime-configurable      |
 |         |               | via 13 new setters (setSpO2WarmupS, setSpO2EmaMeanTauS, setSpO2EmaVarTauS,   |
-|         |               | setSpO2Range, setSpO2MinDC, setSpO2PiSqiThresholds, setHR1DcTauS,         |
+|         |               | setSpO2Range, setSpO2MinDC, setSpO2SqiPiThresholds, setHR1DcTauS,         |
 |         |               | setHR1MaCutoffHz, setHR1SqiCvMax, setHR2MinCorr, setHR2UpdateInterval,    |
 |         |               | setHR3UpdateInterval, setHRValidRange). hr_search_{min,max}_bpm now        |
 |         |               | derived from hr_{min,max}_bpm ± 3 BPM guard band.                         |

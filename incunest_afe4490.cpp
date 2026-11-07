@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.116 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.117 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -71,9 +71,9 @@ namespace {
     // after an EmaChannel reset.
     constexpr float    spo2_div_eps        = 1e-9f;    // A/A — division-safety guard only
     // SQI: Perfusion Index thresholds (Nellcor/Masimo clinical reference).
-    // PI < spo2_pi_sqi_lo → SQI=0. PI ≥ spo2_pi_sqi_hi → SQI=1. Linear ramp in between.
-    constexpr float    spo2_pi_sqi_lo      = 0.5f;     // % — PI below this → SQI = 0
-    constexpr float    spo2_pi_sqi_hi      = 2.0f;     // % — PI above this → SQI = 1
+    // PI < spo2_sqi_pi_lo → SQI=0. PI ≥ spo2_sqi_pi_hi → SQI=1. Linear ramp in between.
+    constexpr float    spo2_sqi_pi_lo      = 0.5f;     // % — PI below this → SQI = 0
+    constexpr float    spo2_sqi_pi_hi      = 2.0f;     // % — PI above this → SQI = 1
     // Both in PEAK-TO-PEAK units since v0.101 (the units Nellcor/Masimo quote them in; the library's
     // PI was RMS-based until then, i.e. ÷2.8–3.2, so these gates fired ~3× too early — rationale §11).
     // Upper bound: the industry's DISPLAYED range tops at 20 % — Masimo 0.02–20 (LAB-9204A, Rad-57
@@ -128,11 +128,17 @@ namespace {
     constexpr float    ppgdisp_norm_win_s      = 1.0f;   // s  — max/min target window (≥ one neonatal beat); warm-up
     constexpr float    ppgdisp_norm_tau_s      = 1.0f;   // s  — fall time constant
     constexpr float    ppgdisp_norm_headroom   = 1.15f;  // frame extrema map to ±1/H (halves clipping, rationale §21.8)
-    constexpr float    ppgdisp_norm_pi_floor   = 0.5f;   // A at and below spo2_pi_sqi_lo (NORM_PI); 1 at and above _hi
+    constexpr float    ppgdisp_norm_pi_floor   = 0.5f;   // A at and below spo2_sqi_pi_lo (NORM_PI); 1 at and above _hi
     constexpr float    ppgdisp_norm_rise_min = 0.05f, ppgdisp_norm_rise_max = 5.0f;   // setter validity
     constexpr float    ppgdisp_norm_win_min  = 0.2f,  ppgdisp_norm_win_max  = 5.0f;   // 5 s = PPGDispTracker::kMaxBlocks blocks
     constexpr float    ppgdisp_norm_tau_min  = 0.2f,  ppgdisp_norm_tau_max  = 10.0f;
     constexpr float    ppgdisp_norm_hr_min   = 1.0f,  ppgdisp_norm_hr_max   = 2.0f;
+    // NORM_PI thresholds (v0.117): own parameters, separate from the SQI ramp's spo2_sqi_pi_lo/hi
+    // (Alex, 2026-11-07: measurement reliability vs this baby's perfusion are two questions). The
+    // defaults are the SQI pair's values until each pair has its own evidence (rationale §21.4).
+    constexpr float    ppgdisp_norm_pi_lo    = 0.5f;    // % — A = floor at and below
+    constexpr float    ppgdisp_norm_pi_hi    = 2.0f;    // % — A = 1 at and above
+    constexpr float    ppgdisp_norm_pi_max   = 20.0f;   // % — setter bound: top of the displayed PI range (spo2_pi_max)
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
     constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
@@ -418,6 +424,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _ppgdisp_channel(AFE4490Channel::LED1),
       _ppgdisp_bpf(),
       _ppgdisp_mode(AFE4490PPGDispMode::NO_NORM), _ppgdisp_tracker(), _ppgdisp_pi_last(NAN), _ppgdisp_amp(ppgdisp_norm_pi_floor),
+      _ppgdisp_norm_pi_lo(ppgdisp_norm_pi_lo), _ppgdisp_norm_pi_hi(ppgdisp_norm_pi_hi),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
       _hr1_refractory_samples(0),
       _hr1_dc_alpha(0.0f),
@@ -448,8 +455,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _pi_window_s(pi_window_s),
       _spo2_min(spo2_min),
       _spo2_max(spo2_max),
-      _spo2_pi_sqi_lo(spo2_pi_sqi_lo),
-      _spo2_pi_sqi_hi(spo2_pi_sqi_hi),
+      _spo2_sqi_pi_lo(spo2_sqi_pi_lo),
+      _spo2_sqi_pi_hi(spo2_sqi_pi_hi),
       _spo2_pi_max(spo2_pi_max),
       _spo2_r_method(spo2_r_method_default),
       _spo2_r_method2_reg_corr_min(spo2_r_method2_reg_corr_min),
@@ -939,6 +946,18 @@ void INCUNEST_AFE4490::setPPGDispNormTracker(float rise_per_s, float win_s, floa
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+void INCUNEST_AFE4490::setPPGDispNormPI(float pi_lo_pct, float pi_hi_pct) {
+    if (!(pi_lo_pct > 0.0f && pi_lo_pct < pi_hi_pct && pi_hi_pct <= ppgdisp_norm_pi_max)) {
+        ESP_LOGE(TAG, "setPPGDispNormPI: out of range (lo %.3f hi %.3f) — ignored", pi_lo_pct, pi_hi_pct);
+        return;
+    }
+    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
+    _ppgdisp_norm_pi_lo = pi_lo_pct;
+    _ppgdisp_norm_pi_hi = pi_hi_pct;
+    _ppgdisp_pi_last = NAN;                 // the cached A is stale
+    if (_initialized) xSemaphoreGive(_state_mutex);
+}
+
 void INCUNEST_AFE4490::setHR2Filter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _hr2_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
@@ -1041,10 +1060,10 @@ void INCUNEST_AFE4490::setSpO2Range(float min_pct, float max_pct) {
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setSpO2PiSqiThresholds(float lo_pct, float hi_pct, float max_pct) {
+void INCUNEST_AFE4490::setSpO2SqiPiThresholds(float lo_pct, float hi_pct, float max_pct) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _spo2_pi_sqi_lo = lo_pct;
-    _spo2_pi_sqi_hi = hi_pct;
+    _spo2_sqi_pi_lo = lo_pct;
+    _spo2_sqi_pi_hi = hi_pct;
     _spo2_pi_max    = max_pct;
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
@@ -1228,6 +1247,8 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.ppgdisp_norm_win_s   = _ppgdisp_tracker.win_s;
     cfg.ppgdisp_norm_tau_s   = _ppgdisp_tracker.tau_s;
     cfg.ppgdisp_norm_headroom = _ppgdisp_tracker.headroom;
+    cfg.ppgdisp_norm_pi_lo   = _ppgdisp_norm_pi_lo;
+    cfg.ppgdisp_norm_pi_hi   = _ppgdisp_norm_pi_hi;
     cfg.ppgdisp_f_low_hz     = _ppgdisp_bpf.f_low;
     cfg.ppgdisp_f_high_hz    = _ppgdisp_bpf.f_high;
     cfg.hr2_f_low_hz     = _hr2_bpf.f_low;
@@ -1246,8 +1267,8 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.pi_window_s           = _pi_window_s;
     cfg.spo2_min              = _spo2_min;
     cfg.spo2_max              = _spo2_max;
-    cfg.spo2_pi_sqi_lo        = _spo2_pi_sqi_lo;
-    cfg.spo2_pi_sqi_hi        = _spo2_pi_sqi_hi;
+    cfg.spo2_sqi_pi_lo        = _spo2_sqi_pi_lo;
+    cfg.spo2_sqi_pi_hi        = _spo2_sqi_pi_hi;
     cfg.spo2_pi_max           = _spo2_pi_max;
     cfg.spo2_pulse_gate_enable = _spo2_pulse_gate_enable;
     _copy_spo2_r_id(cfg.pi_method_id, PI_METHOD_ID);
@@ -2654,9 +2675,9 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     if (_current_data.spo2_hold_reason == SpO2HoldReason::HOLD_NONE) {
         _current_data.spo2 = fminf(spo2, _spo2_max);
         // SQI: Perfusion Index linearly mapped to [0, 1].
-        // PI < spo2_pi_sqi_lo → SQI = 0 (very weak signal). PI ≥ spo2_pi_sqi_hi → SQI = 1
+        // PI < spo2_sqi_pi_lo → SQI = 0 (very weak signal). PI ≥ spo2_sqi_pi_hi → SQI = 1
         // (full quality, per Nellcor/Masimo thresholds).
-        float sqi = (_current_data.pi - _spo2_pi_sqi_lo) / (_spo2_pi_sqi_hi - _spo2_pi_sqi_lo);
+        float sqi = (_current_data.pi - _spo2_sqi_pi_lo) / (_spo2_sqi_pi_hi - _spo2_sqi_pi_lo);
         _current_data.spo2_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
         _current_data.spo2     = NAN;
@@ -2698,13 +2719,13 @@ void INCUNEST_AFE4490::_ppgdisp_update(float x, ProbeState probe_state) {
 }
 
 // A(PI) of NORM_PI: floor at PI_lo and below, 1 at PI_hi and above, logarithmic in between
-// (PI spans more than a decade in neonates); PI_lo/PI_hi are the SQI ramp's spo2_pi_sqi_lo/_hi,
-// so "low perfusion" has one meaning in the library. NaN (window filling) → the floor: unknown
-// perfusion is shown at the minimum, not hidden.
+// (PI spans more than a decade in neonates). PI_lo/PI_hi are ppgdisp_norm_pi_lo/_hi — own
+// parameters since v0.117, no longer the SQI ramp's (two questions, rationale §21.4). NaN (window
+// filling) → the floor: unknown perfusion is shown at the minimum, not hidden.
 float INCUNEST_AFE4490::_ppgdisp_amp_of_pi(float pi) const {
-    if (isnan(pi) || pi <= 0.0f || _spo2_pi_sqi_hi <= _spo2_pi_sqi_lo) return ppgdisp_norm_pi_floor;
+    if (isnan(pi) || pi <= 0.0f || _ppgdisp_norm_pi_hi <= _ppgdisp_norm_pi_lo) return ppgdisp_norm_pi_floor;
     const float a = ppgdisp_norm_pi_floor
-                  + (1.0f - ppgdisp_norm_pi_floor) * logf(pi / _spo2_pi_sqi_lo) / logf(_spo2_pi_sqi_hi / _spo2_pi_sqi_lo);
+                  + (1.0f - ppgdisp_norm_pi_floor) * logf(pi / _ppgdisp_norm_pi_lo) / logf(_ppgdisp_norm_pi_hi / _ppgdisp_norm_pi_lo);
     return clampf(a, ppgdisp_norm_pi_floor, 1.0f);
 }
 

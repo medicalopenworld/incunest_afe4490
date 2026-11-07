@@ -937,7 +937,7 @@ De Felice 2002 high illness severity ≤ 1.24 (0.86 vs 2.02); Hakan 2013 term da
 
 Two consequences the first cut had not seen. (1) **The decoupling had silently changed PI's
 scale**: the EMA subtraction let through the < 0.5 Hz and > 5 Hz content, worth 16–36 % of the
-AC. With `spo2_pi_sqi_lo/hi` = 0.5/2.0 unchanged, SUBJ08 went from the board's mean SQI 0.61 to
+AC. With `spo2_sqi_pi_lo/hi` = 0.5/2.0 unchanged, SUBJ08 went from the board's mean SQI 0.61 to
 10.8 % of windows at SQI 0 and only 9.6 % at SQI 1. (2) **Those thresholds were copied from
 Nellcor/Masimo, whose PI is peak-to-peak, while the library's had always been RMS — ÷2.8–3.2.**
 In peak-to-peak units the same SUBJ08 windows give 0 % below 0.5, 61 % at or above 2.0 and 0.2 %
@@ -952,7 +952,7 @@ sinusoid, which the band-passed PPG nearly is (2.8–3.2 measured), so it under-
 Max − Min by 0–12 %; it needs no beat detector and is the smoother of the two on a quiet subject
 (SUBJ09: 4.5 % vs 8.7 %). The per-beat median (Masimo/Nellcor exactly; more robust on a moving
 subject, SUBJ08 28 % vs 42 %) is kept as a PILAB experiment — it would ride on HR1's detector.
-(c) Band-pass 0.5–15 Hz (previous section). (d) `spo2_pi_sqi_lo/hi` stay 0.5/2.0, now in the
+(c) Band-pass 0.5–15 Hz (previous section). (d) `spo2_sqi_pi_lo/hi` stay 0.5/2.0, now in the
 units they were quoted in, and **`spo2_pi_max` = 20 %** (the top of every manufacturer's displayed
 range: Masimo 0.02–20, Mindray 0.05–20, Nellcor 0.03–20) withholds SpO2 above it — closing the
 2026-08-22 finding that the SQI ramp clamped its *output* only, so a 147 % "PI" during the DC
@@ -992,7 +992,7 @@ the one parameter to revisit — the decimation/buffer architecture does not nee
 ### Scope boundaries, by design (not oversights)
 
 - **No `$SET`/`$LCFG` exposure yet.** `setPIFilter()` (mirroring `setHR2Filter()`) and the third
-  parameter of `setSpO2PiSqiThresholds()` exist and `getConfig()` reports `pi_bp_f_low_hz`,
+  parameter of `setSpO2SqiPiThresholds()` exist and `getConfig()` reports `pi_bp_f_low_hz`,
   `pi_bp_f_high_hz` and `spo2_pi_max`, but wiring them into the firmware's `$SET`/`$LCFG`
   commands and `pulsenest_lab.py`'s LIB CONFIG window is a separate, cross-repo task (PulseNest
   fw + spec), out of scope here.
@@ -1896,11 +1896,21 @@ is normative; the reasons:
    is placed and flattens respiratory amplitude modulation; longer keeps it. Warm-up 2τ (var at
    86 %, amplitude 7 % high, clamped) before the first normalized sample.
 4. **`NORM_PI`: amplitude `A` from the published PI.** `A = 0.5 + 0.5 · ln(PI/PI_lo) / ln(PI_hi/PI_lo)`,
-   clamped to `[0.5, 1]`, with `PI_lo = spo2_pi_sqi_lo` (0.5 %) and `PI_hi = spo2_pi_sqi_hi` (2 %):
+   clamped to `[0.5, 1]`, with `PI_lo = spo2_sqi_pi_lo` (0.5 %) and `PI_hi = spo2_sqi_pi_hi` (2 %):
    the trace is at half scale exactly where SpO2's SQI says the PI is too low to trust (0), and at
    full scale where SQI is 1. Alex had asked for two new parameters; reusing the SQI pair was
    preferred because it adds no parameter without provenance (the 0.5/2.0 pair's own provenance is
-   still open, see memory) and keeps one meaning of "low perfusion" in the library. Logarithmic
+   still open, see memory) and keeps one meaning of "low perfusion" in the library. **Reversed
+   2026-11-07 (v0.117, Alex):** the two uses answer two different questions — the SQI, whether the
+   SpO2 *measurement* is reliable (algorithm and sensor noise; to be calibrated against |error| vs
+   PI on HOSPNAV); the display amplitude, whether *this baby's perfusion* is low (clinical and
+   age-dependent; what a nurse expects from a commercial monitor). Crossed cases exist: a preterm
+   with PI 0.8 %, normal for its age, with a reliable SpO2; a PI 1.5 % artefact with a doubtful
+   SpO2. So `NORM_PI` got its own pair, `ppgdisp_norm_pi_lo/_hi` (`setPPGDispNormPI()`), with the
+   SQI pair's values as defaults; each pair is justified on its own evidence and they stay equal
+   only if the evidence says so, documented as coincidence by evidence and not by economy of
+   parameters (§21.4). The SQI pair was renamed `spo2_sqi_pi_lo/_hi` at the same time (the SQI's
+   PI thresholds, parallel to the display's PI thresholds; Alex's suggestion). Logarithmic
    rather than linear because PI spans more than a decade in neonates (0.3–5 %); over 0.5–2 % the
    two differ by at most 0.08 in `A` (PI = 1 %: 0.75 vs 0.67). The PI used is `AFE4490Data::pi`
    (PI-METHOD-1, IR, 6 s window): the amplitude the operator sees tracks the number the operator
@@ -1932,8 +1942,11 @@ is normative; the reasons:
 - Settled 2026-11-07: the estimator (SLEW, §21.5 addendum), the clamp at ±1 (§21.8) and the headroom
   1.15 (§21.8); the display filter and the transport rate (§21.7) remain open.
 - **Open (Alex, 2026-11-07): are `PI_lo` = 0.5 % and `PI_hi` = 2 % the right thresholds for the
-  PI-dependent amplitude of `NORM_PI`?** They are borrowed from the SQI ramp (`spo2_pi_sqi_lo/_hi`,
-  §21.2 point 4), whose own provenance is open. To analyse: what ISO 80601-2-61 and the de-facto
+  PI-dependent amplitude of `NORM_PI`?** Since v0.117 they are their own parameters
+  (`ppgdisp_norm_pi_lo/_hi`), decoupled from the SQI ramp's `spo2_sqi_pi_lo/_hi` (§21.2 point 4,
+  reversed), whose own provenance is also open; the analysis treats the two pairs separately and
+  unifies them only if the evidence lands on the same numbers. Parked until there is time. To
+  analyse: what ISO 80601-2-61 and the de-facto
   standards say, what the manufacturers do (Masimo, Nellcor, Philips: at which PI they flag low
   perfusion or shrink the pleth), the dependence on age (neonatal PI ranges: p5 0.70 / p95 4.5 %
   in Granelli; PulseNest `docs/pi_reference_ranges_by_age.md`), and whether the two thresholds should
