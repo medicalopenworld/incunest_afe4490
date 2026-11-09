@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.117
+# incunest_afe4490 — Specification v0.118
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -2086,7 +2086,7 @@ own `$CFG`, and counting it twice would tell the host a move happened that it it
 
 ---
 
-### 5.9 `ppg_disp` — the display waveform and its normalization modes (v0.116)
+### 5.9 `ppg_disp` — the display waveform and its normalization modes (v0.116; band-pass reset at the probe gate v0.118)
 
 **Status: design agreed 2026-11-05 (Alex); estimator, clamp and headroom settled 2026-11-07 (Alex,
 with the PPGDISPLAB window of PulseNest); implemented in v0.116 (2026-11-07, `PPGDispTracker`,
@@ -2102,11 +2102,20 @@ index (full size at PI ≥ 2 %, half size at PI ≤ 0.5 %). `$SET`/`$LCFG` key `
 **Common front (unchanged since v0.69).** `x = −BPF(ot_ch)`, `ot_ch` = `ot_led1` or `ot_led2` per
 `setPPGChannel()`, `BPF` the Butterworth band-pass of `setPPGDispFilter()` (0.5–20 Hz default),
 negated so that systole peaks up. Runs on every sample inside `_process_sample()`, after HGAC, under
-the settle freeze of §5.8.4 (a frozen input gives a constant here too).
+the settle freeze of §5.8.4 (a frozen input gives a constant here too). **The band-pass is reset while
+`probe_state ≠ PROBE_APPLIED` (v0.118, every mode), exactly as PI-METHOD-1's:** it precharges to
+steady state on the first sample it then sees, so the OT step between air (~5.9e-4) and tissue
+(~1.2e-4, §5.8) — some 400 times a beat of PI 1 % — never enters the filter. Until v0.117 the filter
+ran through the step: its high-pass tail (τ ≈ 0.32 s) was still ~100× the beat when `PROBE_APPLIED`
+was confirmed 0.2 s later, the SLEW warm-up took those extrema as its frame, and the τ = 1 s fall
+needed ~5 s more to shed them — the trace took 7–8 s to fill after an application (IncuNest HMI,
+2026-11-08; rationale §21.9).
 
-**Mode `NO_NORM` (default).** `ppg_disp = x` [A/A]. Bit-identical to v0.69–v0.115, probe state
-ignored. Magnitude ~1e-6..1e-5 (DC OT ~1e-4 with the probe applied, times PI 1–2 %): for
-auto-ranging plots only.
+**Mode `NO_NORM` (default).** `ppg_disp = x` [A/A]. Exactly 0 while the probe is not applied (the
+band-pass of a constant, v0.118) and, from the first applied sample on, the filter of v0.69–v0.117
+with a precharged instead of an inherited state: the two outputs coincide once the application
+transient of the old path has died (~2 s). Magnitude ~1e-6..1e-5 (DC OT ~1e-4 with the probe
+applied, times PI 1–2 %): for auto-ranging plots only.
 
 **Mode `NORM`.** A slew-limited envelope tracker ("SLEW", chosen by Alex on 2026-11-07 among four
 candidates measured and watched in PPGDISPLAB — rationale §21.5) keeps a frame `[lo, hi]` around
@@ -2158,8 +2167,13 @@ it. Median fill per beat with H = 1: 0.53 / 0.85 / 0.45 / 0.79 (SUBJ08–11) —
 the last second fills the frame, the median beat is smaller; clipped samples 1.6 / 8.7 / — / 5.3 %
 at H = 1 (SUBJ10 is a noisy capture). `semi` below `pi_div_eps` → `ppg_disp = 0`.
 **Probe gate:** while `probe_state ≠ PROBE_APPLIED`, or while the tracker is warming up, `ppg_disp
-= 0` and the tracker is reset (as PI-METHOD-1 does) — an auto-gain must never turn noise from an
-in-air or disconnected probe into a live-looking trace.
+= 0` and the tracker and the band-pass are reset (as PI-METHOD-1 does) — an auto-gain must never
+turn noise from an in-air or disconnected probe into a live-looking trace.
+**Start-up after an application (v0.118):** 0.2 s until `PROBE_APPLIED` is confirmed
+(`rsqm_probe_state_min_s`) + one window (`ppgdisp_norm_win_s`, 1 s) of warm-up → the trace is full
+size from its first sample in `NORM`. In `NORM_PI` it is at A = 0.5 until PI publishes
+(`pi_window_s`, 6 s after the application) and at A(PI) from then on: an unknown perfusion is shown
+at the minimum, not hidden (below), so the trace *grows* at 6 s rather than shrinking.
 **`NORM` is a "normalized" display in the sense of ISO 80601-2-61:2026 201.3.241**, the kind its
 201.12.4.102 NOTE 3 says can mask an unreliable signal by itself: it is a laboratory mode, for
 comparison, not the product mode (rationale §21.6).
@@ -2202,9 +2216,9 @@ carry `PPG_DISP` unchanged; the mode travels in `$CFG`/`$LCFG` (key `ppgdisp_mod
 only interpretable with its `$LCFG` — the lab titles the PPG plot with it and fixes the Y axis to
 ±1 in the NORM modes.
 
-**Tests (`test/test_ppgdisp/`, 8, host build, Unity, CI §9.10).** (1) `NO_NORM` is −BPF(x) sample by
-sample, bit-identical to a `TestBiquadFilter` of the same design, probe state ignored (the v0.69–
-v0.115 path); (2) `NORM` on sinusoids of three amplitudes × two DC levels → 0 during the warm-up
+**Tests (`test/test_ppgdisp/`, 10, host build, Unity, CI §9.10).** (1) `NO_NORM` is −BPF(x) sample by
+sample, bit-identical to a `TestBiquadFilter` of the same design reset while the probe is not
+applied, and exactly 0 there (v0.118); (2) `NORM` on sinusoids of three amplitudes × two DC levels → 0 during the warm-up
 window, then peaks at ±1/H within 2 %; (3) ×2 step → clipped 0.3 s after it, ±1/H within 2 %
 after 5 s; ×0.5 step → within 6 % after 4 s, 3 % after 5 s; (4) `NORM_PI`: A at PI = 0.2, 0.5, 1,
 2, 5 % and NaN; peaks at A/H for PI 0.5 and 1 %; a cycle three times the frame reaches ±1, not
@@ -2213,8 +2227,12 @@ again; (6) a 5× spike of 100 ms saturates the trace, the frame grows at most ×
 lasts ≤ 0.35 s, and 5 s later frame and output are within 5 % of before; (7) a flat input gives 0
 (no amplified noise) and a returning pulse shows one window later, full size within 3 s; (8)
 `setPPGDispNormTracker()` ignores out-of-range values, `getConfig()` reads the four back, a 2 s
-window is a 2 s warm-up, H = 1 maps the frame to ±1, and the codec round-trips. The per-sample
-cost is two compares, two compare-and-moves and a division; one `logf` per PI change.
+window is a 2 s warm-up, H = 1 maps the frame to ±1, and the codec round-trips; (9) `NORM_PI`'s
+thresholds are its own, not the SQI ramp's (v0.117); (10) an application (OT 5.9e-4 in air →
+1.2e-4 + a beat of PI 1 %, `PROBE_APPLIED` 0.2 s after the step): `NO_NORM` is 0 before and
+beat-sized after, `NORM` is 0 during the warm-up window and within 5 % of ±1/H in the first second
+after it (v0.118; the v0.117 chain needed ~8 s). The per-sample cost is two compares, two
+compare-and-moves and a division; one `logf` per PI change.
 
 ---
 
@@ -3485,6 +3503,13 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.118  | 2026-11-09    | **`ppg_disp` band-pass reset while the probe is not applied (§5.9; Alex 2026-11-09).**  |
+|         |               | As PI-METHOD-1's filter: precharged on the first applied sample, so the air-to-tissue  |
+|         |               | OT step of an application never enters the SLEW warm-up. Trace full size 1.2 s after  |
+|         |               | the application in `NORM` (0.2 s confirmation + 1 s window) instead of 7–8 s          |
+|         |               | (IncuNest HMI 2026-11-08; rationale §21.9). Every mode: `NO_NORM` is exactly 0 while  |
+|         |               | the probe is not applied and loses the application transient; no API or key change.   |
+|         |               | `NORM_PI` keeps A = 0.5 until PI publishes at 6 s (decided, not an oversight). Test 10. |
 | v0.117  | 2026-11-07    | **`NORM_PI` thresholds decoupled from the SQI ramp (§5.9; Alex 2026-11-07).** New         |
 |         |               | `AFE4490Config::ppgdisp_norm_pi_lo/_hi` (0.5 / 2 %: the SQI pair's values until each pair  |
 |         |               | has its own evidence, rationale §21.4) and `setPPGDispNormPI()`. The SQI says whether   |

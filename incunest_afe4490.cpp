@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.117 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.118 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -2324,11 +2324,8 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
     // in §5.1/§5.2: an RF change from HGAC no longer creates a scaling discontinuity here).
     float raw_ppg = (_ppgdisp_channel == AFE4490Channel::LED2) ? as.ot_led2 : as.ot_led1;
 
-    float filtered = _ppgdisp_bpf.process(raw_ppg);
-
-    // negated: AFE raw falls on systole; invert for conventional PPG polarity (peaks up). Then the
-    // display mode (§5.9, v0.116): NO_NORM writes it as is; NORM / NORM_PI scale it to [−1, +1].
-    _ppgdisp_update(-filtered, _rsqm_probe_state);
+    // Band-pass (reset while the probe is not applied), negation, display mode (§5.9).
+    _ppgdisp_process(raw_ppg, _rsqm_probe_state);
     _current_data.led1       = led1;
     _current_data.led2       = led2;
     _current_data.aled1      = aled1;
@@ -2693,6 +2690,22 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 // warming up or a degenerate frame → 0, so an auto-gain never turns noise into a live-looking trace.
 // Runs under _state_mutex inside _process_sample(); PI is the one PI-METHOD-1 published last
 // (100 ms cadence), A is recomputed only when it changes (one logf per PI block, not per sample).
+// The display chain from the OT of the display channel. While the probe is not applied the band-pass
+// is reset on every sample (v0.118), exactly as PI-METHOD-1's _pi_bpf: it precharges to steady state
+// on the next sample it sees, so the OT step between air and tissue (×5, some 400 beats of PI 1 %)
+// never enters the filter. Until v0.117 the filter ran continuously: the step's high-pass tail
+// (0.5 Hz, τ ≈ 0.32 s) was still 100× the beat when PROBE_APPLIED was confirmed 0.2 s later, the SLEW
+// warm-up took those extrema as its frame, and the τ = 1 s fall needed ln(100) ≈ 4.6 s more to shed
+// them: the IncuNest HMI trace took 7–8 s to fill after an application (seen 2026-11-08, reproduced
+// on the lab's replica; rationale §21.9). The reset applies in every mode, so NO_NORM is exactly 0
+// while the probe is not applied (the band-pass of a constant) and from the first applied sample on
+// it is the same filter with a precharged instead of an inherited state. Negated: the AFE raw falls
+// on systole; conventional PPG polarity peaks up.
+void INCUNEST_AFE4490::_ppgdisp_process(float ot_ch, ProbeState probe_state) {
+    if (probe_state != ProbeState::PROBE_APPLIED) _ppgdisp_bpf.reset();
+    _ppgdisp_update(-_ppgdisp_bpf.process(ot_ch), probe_state);
+}
+
 void INCUNEST_AFE4490::_ppgdisp_update(float x, ProbeState probe_state) {
     if (_ppgdisp_mode == AFE4490PPGDispMode::NO_NORM) {
         _current_data.ppg_disp = x;

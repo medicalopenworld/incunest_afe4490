@@ -8,7 +8,8 @@
 // rise slew-limited to rise_per_s × frame per second; fall exponential with tau_s; headroom H maps
 // the frame's extrema to ±1/H), clamped to [−1, +1]. NORM_PI multiplies by A(PI) ∈ [0.5, 1] and
 // clamps at ±1 — never at ±A. test_feed_ppgdisp() runs the production path from the OT of the
-// display channel; test_set_pi() plants the PI that NORM_PI reads.
+// display channel; test_set_pi() plants the PI that NORM_PI reads. Since v0.118 the band-pass is
+// reset while the probe is not applied (as PI's), in every mode.
 
 static constexpr float FS   = 500.0f;
 static constexpr float H    = 1.15f;            // ppgdisp_norm_headroom default
@@ -40,18 +41,22 @@ struct Feeder {
 void setUp() {}
 void tearDown() {}
 
-// ── 1. NO_NORM (default) is −BPF(x), sample by sample, exactly: the v0.69–v0.115 output ───────────
+// ── 1. NO_NORM (default) is −BPF(x), sample by sample, exactly, with the band-pass reset while the
+//       probe is not applied (v0.118): 0 there, the same filter from the first applied sample on ────
 void test_ot_ac_is_minus_bandpass_bit_exact() {
     INCUNEST_AFE4490 afe;
     INCUNEST_AFE4490::TestBiquadFilter ref;
     ref.init_bp(0.5f, 20.0f, FS);
     ref.reset();
     TEST_ASSERT_EQUAL(AFE4490PPGDispMode::NO_NORM, afe.getConfig().ppgdisp_mode);
-    for (int n = 0; n < 2000; n++) {
+    for (int n = 0; n < 3000; n++) {
+        const bool applied = (n < 1000) || (n >= 2000);
         const float x = 1.4e-5f + 1e-6f * sinf(2.0f * (float)M_PI * 2.0f * (float)n / FS) + (n == 700 ? 5e-6f : 0.0f);
-        afe.test_feed_ppgdisp(x, n < 1000 ? ProbeState::PROBE_APPLIED : ProbeState::PROBE_DISCONNECTED);
+        afe.test_feed_ppgdisp(x, applied ? ProbeState::PROBE_APPLIED : ProbeState::PROBE_DISCONNECTED);
+        if (!applied) ref.reset();
         const float expect = -ref.process(x);
-        TEST_ASSERT_TRUE_MESSAGE(afe.test_ppg_disp() == expect, "NO_NORM must be bit-identical to -BPF(x), probe state ignored");
+        TEST_ASSERT_TRUE_MESSAGE(afe.test_ppg_disp() == expect, "NO_NORM must be bit-identical to -BPF(x) with the reset of the probe gate");
+        if (!applied) TEST_ASSERT_TRUE_MESSAGE(afe.test_ppg_disp() == 0.0f, "NO_NORM is exactly 0 while the probe is not applied");
     }
 }
 
@@ -240,6 +245,37 @@ void test_norm_pi_thresholds_are_decoupled_from_sqi() {
     TEST_ASSERT_FLOAT_WITHIN(0.02f * FULL, 0.75f * FULL, f.out_max);
 }
 
+// ── 10. An application: OT 5.9e-4 in air → 1.2e-4 + a beat of PI 1 %, PROBE_APPLIED confirmed 0.2 s
+//        after the step (rsqm_probe_state_min_s). The band-pass is reset until then (v0.118), so the
+//        step never enters the SLEW warm-up: NORM is full size in the first second after the warm-up
+//        window. With the v0.117 chain (filter running through the step) the same input needed ~8 s
+//        (rationale §21.9). NO_NORM: 0 while not applied, and only the beat afterwards. ────────────
+void test_application_step_never_enters_the_frame() {
+    for (int mode = 0; mode < 2; mode++) {
+        INCUNEST_AFE4490 afe;
+        afe.setPPGDispMode(mode == 0 ? AFE4490PPGDispMode::NO_NORM : AFE4490PPGDispMode::NORM);
+        Feeder f(afe);
+        f.f_hz = 2.5f;
+        f.dc = 5.9e-4f;
+        f.run(0.0f, 3.0f, 1.0f, ProbeState::PROBE_OT_HIGH);                 // in air, no pulse
+        TEST_ASSERT_TRUE_MESSAGE(f.all_zero, "not applied -> 0 in every mode");
+        f.dc = 1.2e-4f;
+        f.run(0.6e-6f, 0.2f, 0.2f, ProbeState::PROBE_OT_HIGH);             // tissue, state not yet confirmed
+        TEST_ASSERT_TRUE(f.all_zero);
+        if (mode == 0) {
+            f.run(0.6e-6f, 0.5f, 0.5f);                                     // NO_NORM: the beat, not the step
+            TEST_ASSERT_TRUE_MESSAGE(f.out_max < 2.0f * 0.6e-6f && f.out_min > -2.0f * 0.6e-6f,
+                                     "NO_NORM after application must be beat-sized, not the 4.7e-4 step");
+        } else {
+            f.run(0.6e-6f, 0.9f, 0.9f);                                     // the warm-up window (as test 5)
+            TEST_ASSERT_TRUE_MESSAGE(f.all_zero, "NORM: 0 during the warm-up window");
+            f.run(0.6e-6f, 1.1f, 1.0f);                                     // the first second of output
+            TEST_ASSERT_FLOAT_WITHIN(0.05f * FULL, FULL, f.out_max);
+            TEST_ASSERT_FLOAT_WITHIN(0.05f * FULL, -FULL, f.out_min);
+        }
+    }
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_ot_ac_is_minus_bandpass_bit_exact);
@@ -251,5 +287,6 @@ int main(int, char**) {
     RUN_TEST(test_flat_signal_is_zero_and_pulse_reacquires_in_one_window);
     RUN_TEST(test_tracker_setter_ranges_config_and_codec);
     RUN_TEST(test_norm_pi_thresholds_are_decoupled_from_sqi);
+    RUN_TEST(test_application_step_never_enters_the_frame);
     return UNITY_END();
 }

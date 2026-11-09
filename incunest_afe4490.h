@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.117 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.118 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.117"
+#define INCUNEST_AFE4490_VERSION "0.118"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -230,6 +230,9 @@ struct AFE4490Data {
                               //             v0.117, not the SQI ramp's), clamped to [−1, +1] after the
                               //             scaling (never to ±A): the product mode, the envelope tracks PI
                               // 0 in the NORM modes while the probe is not applied or the tracker warms up.
+                              // In every mode the band-pass is reset while the probe is not applied
+                              // (v0.118, as PI's): NO_NORM is 0 there, and the air-to-tissue OT step of
+                              // an application never reaches the trace or the NORM frame.
                               // Gain-invariant like the algorithms (§5.1/§5.2): no discontinuity when
                               // HGAC changes RF, unlike the raw-ADC-code led1_sub/led2_sub it replaced.
                               // Display only — not an input to algorithms.
@@ -1723,6 +1726,7 @@ private:
     uint32_t _pi_buf_count;
     void _pi_update_sample(float ot_ir, ProbeState probe_state);
     // ppg_disp (§5.9): x = −BPF(ot_ch) in; writes _current_data.ppg_disp per _ppgdisp_mode (v0.116)
+    void  _ppgdisp_process(float ot_ch, ProbeState probe_state);   // band-pass (reset while not applied), negate, mode
     void  _ppgdisp_update(float x, ProbeState probe_state);
     float _ppgdisp_amp_of_pi(float pi) const;
     void _pi_window_reset();          // empties the window (block sum, buffers, totals)
@@ -2032,7 +2036,7 @@ public:
     // ppg_disp display modes (v0.116, §5.9). test_feed_ppgdisp() runs the production path from the
     // OT of the display channel: band-pass, negation, mode. test_set_pi() plants the PI that
     // NORM_PI reads (PI-METHOD-1 is not run here).
-    void  test_feed_ppgdisp(float ot_ch, ProbeState probe_state) { _ppgdisp_update(-_ppgdisp_bpf.process(ot_ch), probe_state); }
+    void  test_feed_ppgdisp(float ot_ch, ProbeState probe_state) { _ppgdisp_process(ot_ch, probe_state); }
     float test_ppg_disp()          const { return _current_data.ppg_disp; }
     void  test_set_pi(float pi)          { _current_data.pi = pi; }
     bool  test_ppgdisp_warmed()    const { return _ppgdisp_tracker.warmed(); }

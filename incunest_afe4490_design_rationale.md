@@ -2205,6 +2205,58 @@ Side finding: the window's `clip` metric had counted |A·u| > 1 from the start (
 while its trace clamped at ±A, so the headroom table of 2026-11-06 already described the ±1
 variant and stands. v0.116 is not tagged, so there is no compatibility cost.
 
+### 21.9 The application transient: why the trace took 7–8 s to fill, and the band-pass reset (2026-11-09)
+
+**Observed.** IncuNest motherBoard 18.57.0 (lib v0.117, `NORM_PI`, `CTRL,PPG` = 128 + 127·`ppg_disp`
+at 25 Hz) on the V18 with the MS100 simulator, 2026-11-08: after applying the probe the HMI trace
+takes more than 5 s to fill its chart. Transport and HMI are linear and stateless, so the behaviour
+is the library's. Brief from the IncuNest session: `IncuNest/Firmware/docs/notes/2026-11-09-brief-libreria-ppg-disp-arranque-lento.md`.
+
+**Causes, confirmed in the v0.117 code and reproduced on the lab's replica of the chain
+(`PPGDispCalc`, PulseNest `sim_ppgdisp_start`, 2026-11-09).**
+
+1. The display band-pass `_ppgdisp_bpf` ran continuously from `begin()`, in every probe state;
+   `_pi_bpf` is reset on every sample while the probe is not applied and precharges to steady state
+   on the first applied sample (`BiquadFilter::process()`). An asymmetry without a reason: an
+   oversight of v0.116, not a decision. Applying the probe steps the OT from ~5.9e-4 (air) to
+   ~1.2e-4 (tissue): 4.7e-4, some 400 times a beat of 1.2e-6 (PI 1 %). The 0.5 Hz high-pass lets
+   the step decay with τ ≈ 0.32 s; `PROBE_APPLIED` is confirmed 0.2 s after it, when the tail is
+   still ~100× the beat; the SLEW warm-up (1 s of plain running extrema) takes it as the frame; the
+   extrema stay in the 1 s window another second; then the frame falls with τ = 1 s, and ×100 is
+   ln(100) ≈ 4.6 s. Measured on the replica with a synthetic step of exactly these numbers and a
+   2.5 Hz beat: the trace sustains 80 % of its steady peak-to-peak **8.0 s** after the application in
+   `NORM` and `NORM_PI` (6.5 s with a PI 3 % beat). The HGAC's residual RF steps during the first
+   seconds (~1 % of the DC, the RF tolerance, §12) are a second, smaller source of the same kind
+   and are not addressed here.
+2. PI is NaN until `pi_window_s` (6 s) fills, and `A(NaN)` is the floor 0.5 by design (§21.6): in
+   `NORM_PI` the trace is at half height for the first 6 s whatever the perfusion, then full.
+
+The 14 re-applications of the SUBJ08 capture (2026-09-23) do not show the effect: all are
+probe-state flickers with the probe on the foot (OT 1.37e-4 → 1.35e-4, no step), and there the old
+and the new chain behave the same. No capture in the corpus holds a real air-to-tissue application;
+the 8 s rest on the OT in air of §5.8 and match what the IncuNest bench showed.
+
+**Alternatives (the IncuNest brief's table, assessed here).**
+
+| | Where | What | Verdict |
+|---|---|---|---|
+| A | library | reset `_ppgdisp_bpf` while not applied, as `_pi_bpf` | **adopted (v0.118)**: attacks the cause at zero cost; on the replica the trace is full size from the first sample after the warm-up window (1.2 s after the application) |
+| B | library | fixed blanking of 2–3 s after `PROBE_APPLIED` | hides the symptom; worse than A in everything |
+| C | library | restart the warm-up when the targets fall far below the frame for a window | covers other collapses, but a new heuristic with a threshold to justify; a real PI drop would blank the trace 1 s. Not now |
+| D | IncuNest | short fall τ (0.2–0.3 s) | the frame would breathe inside the neonatal cardiac cycle, what §21.5 rejected in RMS. Diagnostic only |
+| E | library | A = 1 or the last A while PI is NaN | inverts §21.6's decision; with a low PI the trace would shrink at 6 s, which reads as deterioration. **Kept at 0.5** (Alex 2026-11-09): growing at 6 s reads as warming up |
+| F | IncuNest | shorten `pi_window_s` | changes a measurement for a display reason. Rejected |
+| G | HMI | auto-scale on screen | Pablo's rule; the HMI lacks the information. Rejected |
+
+**A in every mode, not only in the NORM modes (Alex, 2026-11-09).** One chain, one filter state
+whatever the mode, and the lab's replica follows it. The price: `NO_NORM` is no longer bit-identical
+to v0.69–v0.117 around an application — it is exactly 0 while the probe is not applied (the
+band-pass of a constant precharges to 0) and loses the application transient that the lab's
+auto-ranging plot used to show; in steady state it is the same filter. Test 1 of `test_ppgdisp`
+now pins the gated identity, test 10 the application. The alternative (reset only in `NORM` /
+`NORM_PI`) would have kept `NO_NORM` untouched at the cost of two filter histories depending on
+the mode, and a mode switch at run time inheriting whichever state the other mode left.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design
