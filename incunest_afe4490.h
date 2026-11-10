@@ -897,11 +897,12 @@ public:
     // different signal enters them). Callable before or after begin().
     void setPPGChannel(AFE4490Channel channel);
     // The display chain's corners (§5.9): a Butterworth band-pass f_low–f_high (1st order per side)
-    // followed, since v0.119, by a 4th-order Butterworth low-pass at f_high (LowPass4, as HR3's), so
-    // the high side falls at 30 dB/octave and f_high is a −3 dB corner of each stage (−6 dB in all).
+    // followed, since v0.119, by two low-pass biquads at f_high (LowPass4 with the Q pair of a
+    // 5th-order Butterworth), so the high side falls at 30 dB/octave and f_high is the −3 dB corner
+    // of the WHOLE chain, for any f_low < f_high < fs/2 (the pair's gain at f_high is exactly 1).
     // The low side stays 1st order on purpose: a steep high-pass at 0.5 Hz rings for seconds on an
     // OT drift. Consumer rule: a consumer that samples ppg_disp at rate R without its own anti-alias
-    // filter should keep f_high ≤ 0.4·R (≥ 12 dB at its Nyquist, ≥ 40 dB at 2.5·f_high) or
+    // filter should keep f_high ≤ 0.4·R (≥ 10 dB at its Nyquist, ≥ 40 dB at 2.5·f_high) or
     // ≤ 0.3·R for ≥ 20 dB at its Nyquist. Takes _state_mutex; resets both filters; callable before
     // or after begin(). No range check (the biquad design clamps nothing): keep f_high < fs/2.
     void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
@@ -1126,6 +1127,15 @@ private:
             f_high = f_high_hz;
             _s1.init_lp(f_high_hz, sample_rate_hz, 0.54119610f);
             _s2.init_lp(f_high_hz, sample_rate_hz, 1.30656296f);
+        }
+        // The two pole pairs of a 5TH-order Butterworth (Q = 0.6180 and 1.6180), for a chain that
+        // already has that filter's real pole: a 1st-order low-pass at the same corner (ppg_disp's
+        // band-pass, v0.119). The pair's gain at f_high is Q1·Q2 = 1, so the chain keeps the −3 dB
+        // of its 1st-order stage at f_high, whatever f_high is. Does not reset state.
+        void init_butter5_pairs(float f_high_hz, float sample_rate_hz) {
+            f_high = f_high_hz;
+            _s1.init_lp(f_high_hz, sample_rate_hz, 0.61803399f);
+            _s2.init_lp(f_high_hz, sample_rate_hz, 1.61803399f);
         }
         void reset() { _s1.reset(); _s2.reset(); }
         inline float process(float x) { return _s2.process(_s1.process(x)); }
@@ -1568,7 +1578,7 @@ private:
     // ── PPG display filters (setPPGDispFilter(), §5.9): band-pass, then a 4th-order low-pass at the
     //    same f_high (v0.119). Both reset while the probe is not applied (v0.118). ──
     BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz, 1st order per side
-    LowPass4          _ppgdisp_lpf;          // 4th-order Butterworth at f_high (20 Hz): the high side
+    LowPass4          _ppgdisp_lpf;          // Butterworth-5 pole pairs at f_high (20 Hz): the high side
     AFE4490PPGDispMode _ppgdisp_mode;        // NO_NORM / NORM / NORM_PI (v0.116, §5.9)
     PPGDispTracker    _ppgdisp_tracker;      // SLEW envelope of the NORM modes
     float             _ppgdisp_pi_last;      // PI the cached A was computed from (NaN = none)

@@ -914,12 +914,13 @@ void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
 }
 
 // Display chain corners (§5.9). One f_high designs both stages: the band-pass's high side and the
-// 4th-order low-pass (v0.119). getConfig() reads ppgdisp_f_high_hz back from the band-pass.
+// two low-pass biquads (v0.119), whose Q pair makes f_high the −3 dB corner of the whole chain.
+// getConfig() reads ppgdisp_f_high_hz back from the band-pass.
 void INCUNEST_AFE4490::setPPGDispFilter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _ppgdisp_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
     _ppgdisp_bpf.reset();
-    _ppgdisp_lpf.init(f_high_hz, (float)_afe_sample_rate_hz);
+    _ppgdisp_lpf.init_butter5_pairs(f_high_hz, (float)_afe_sample_rate_hz);
     _ppgdisp_lpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
@@ -2049,7 +2050,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
         _hr1_ma_len = (uint32_t)hr1_ma_max_len;
     }
     _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
-    _ppgdisp_lpf.init(_ppgdisp_lpf.f_high, sample_rate_hz);
+    _ppgdisp_lpf.init_butter5_pairs(_ppgdisp_lpf.f_high, sample_rate_hz);
     _ppgdisp_tracker.configure(sample_rate_hz);
     _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, sample_rate_hz);
     _hr3_lp.init(_hr3_lp.f_high, sample_rate_hz);
@@ -2696,9 +2697,13 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 // Runs under _state_mutex inside _process_sample(); PI is the one PI-METHOD-1 published last
 // (100 ms cadence), A is recomputed only when it changes (one logf per PI block, not per sample).
 // The display chain from the OT of the display channel: band-pass (0.5–20 Hz, 1st order per side),
-// then a 4th-order Butterworth low-pass at the same f_high (v0.119). The low-pass gives the high
-// side 30 dB/octave in all: with the default 20 Hz, −6 dB at 20 Hz, −13 dB at 25 Hz, −42 dB at
-// 50 Hz, −76 dB at 100 Hz (the band-pass alone: −3, −4, −9, −16). Neonatal PPG has harmonics to
+// then two low-pass biquads at the same f_high with the Q pair of a 5th-order Butterworth (v0.119):
+// the band-pass supplies that filter's real pole, the pair's gain at f_high is exactly 1, so the
+// chain is −3 dB at f_high for ANY corner (a plain 4th-order Butterworth there would make it −6 dB,
+// −3 dB near 0.8·f_high: the corner the user asks for would not be the one applied; Alex
+// 2026-11-10). The high side falls at 30 dB/octave in all: with the default 20 Hz, −3 dB at 20 Hz,
+// −10 dB at 25 Hz, −41 dB at 50 Hz, −76 dB at 100 Hz (the band-pass alone: −3, −4, −9, −16), flat
+// within +0.2 dB below. Neonatal PPG has harmonics to
 // ~16 Hz (h6 ≈ 1 % of the fundamental, SUBJ08–11), so the visible cost is ~2 % of the systolic peak
 // and 20 ms of delay; what the order buys is that a consumer sampling ppg_disp at 50 Hz with no
 // anti-alias filter of its own (IncuNest's CommTask) does not fold mains and driver interference at

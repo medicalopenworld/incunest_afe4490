@@ -2262,7 +2262,7 @@ now pins the gated identity, test 10 the application. The alternative (reset onl
 `NORM_PI`) would have kept `NO_NORM` untouched at the cost of two filter histories depending on
 the mode, and a mode switch at run time inheriting whichever state the other mode left.
 
-### 21.10 The high side of the display filter: 4th order at `f_high`, low side untouched, 20 Hz kept (2026-11-10)
+### 21.10 The high side of the display filter: 30 dB/octave with `f_high` the −3 dB corner of the chain, low side untouched, 20 Hz kept (2026-11-10)
 
 **Where it comes from.** A brief of the IncuNest session (2026-11-10, approved by Alex; measured on
 PulseNest's SUBJ08–11 HOSPNAV captures, read-only) asked for the high side of `ppg_disp`'s filter to go
@@ -2295,37 +2295,60 @@ its baseline:
 | whole chain | 20 Hz | 25 Hz | 50 Hz (mains) | 100 Hz |
 |---|---|---|---|---|
 | band-pass alone (v0.118) | −3.0 | −4.2 | −9.0 | −15.5 dB |
-| + LP4 at 20 Hz | −6.0 | −12.7 | −41.8 | −76 |
-| + LP4 at 15 Hz | −13.5 | −22.2 | −51.9 | −86 |
-| + LP4 at 12 Hz | −20.9 | −29.9 | −59.7 | −94 |
+| + Butterworth LP4 at 20 Hz (first draft, discarded) | −6.0 | −12.7 | −41.8 | −76 |
+| + Butterworth LP4 at 15 Hz (first draft) | −13.5 | −22.2 | −51.9 | −86 |
+| + Butterworth LP4 at 12 Hz (first draft) | −20.9 | −29.9 | −59.7 | −94 |
+| **+ Butterworth-5 pairs at 20 Hz (adopted)** | **−3.0** | **−10.3** | **−41.2** | **−76** |
+| + Butterworth-5 pairs at 15 Hz | −12.9 | −22.6 | −53.9 | −89 |
 
 **Decisions.**
 
-- *4th order on the high side, in cascade, order fixed.* `LowPass4` (two biquads with the Butterworth
-  Q pairs, −3 dB at `f_high`, each section precharging on its own after `reset()`), the block HR3 has
-  used since v0.97. Not PI's: PI-METHOD-1's AC filter is the same 2nd-order band-pass as the display's
+- *Two more biquads on the high side, in cascade, order fixed.* `LowPass4` (each section precharging
+  on its own after `reset()`), the block HR3 has used since v0.97, here with another Q pair (next
+  point but two). Not PI's: PI-METHOD-1's AC filter is the same 2nd-order band-pass as the display's
   (the brief said "HR3 and PI"; only HR3). One implementation, one set of tests; the order is not a
   parameter.
 - *Low side untouched.* A high-order high-pass at 0.5 Hz has seconds of settling and overshoot on an OT
   drift, which is exactly the application transient v0.118 removed (§21.9).
-- *Same API and keys; `f_high` means the −3 dB corner of each stage.* `setPPGDispFilter()`,
-  `ppgdisp_f_low_hz` / `ppgdisp_f_high_hz`. Nothing for a consumer to call when upgrading.
+- *`f_high` is the −3 dB corner of the whole chain, for any corner (Alex, 2026-11-10, before the
+  tag).* The first draft cascaded a 4th-order Butterworth (Q 0.5412 / 1.3066, −3 dB at `f_high`) after
+  the band-pass (−3 dB at `f_high`): −6 dB at `f_high`, −3 dB near 0.8·`f_high` (16 Hz for 20). Alex's
+  objection: the user asks for 20 Hz and gets 16. Three ways out: (a) document "−6 dB at `f_high`"
+  (keeps the confusion); (b) design the low-pass at a scaled corner (~1.2·`f_high`) so the sum lands
+  near −3 dB (approximate, and the factor depends on `f_low` and on the warping); (c) give the two
+  biquads the pole pairs of a **5th-order** Butterworth, Q = 1/(2·cos 72°) = 0.6180 and 1/(2·cos 36°)
+  = 1.6180. Adopted (c): a 2nd-order low-pass's gain at its own corner is its Q, and 0.6180 × 1.6180
+  = 1 exactly, so the pair adds nothing at `f_high`; the band-pass is exactly −3 dB at its prewarped
+  edges by construction; hence the chain is −3.01 dB at `f_high` for any `f_low` < `f_high` < fs/2
+  and any sample rate, not only 20 Hz (checked with the library's coefficient formulas at 250, 500
+  and 1000 Hz for 0.5–5, 0.5–10, 0.5–15, 0.5–20, 0.5–30, 0.5–40, 0.1–20, 2–20 and 5–10 Hz: −3.01 dB
+  in all 27; test 11 pins 20 and 10 Hz). It is a Butterworth-5 only approximately: the band-pass's
+  high pole is not at `f_high` but slightly below (18.97 Hz for 0.5–20: the roots of s² + BW·s + Ω0²),
+  which leaves a +0.16 dB hump at ~6 Hz with the defaults; accepted (1.9 %, about a pixel and a half
+  of IncuNest's chart on the harmonics there, not on the beat). Price against the first draft: 2.4 dB
+  less at 1.25·`f_high` (−10.3 instead of −12.7 dB), 0.6 dB less at 50 Hz; in exchange the pulse band
+  is flat to 15 Hz (−0.2 dB there; the first draft −2.3 dB). The cost table above (peak difference,
+  delay) was measured with the first draft and was not re-measured with the adopted pair; the group
+  delay of the whole chain is 30 ms at 5–10 Hz (31 ms in the first draft), rising to 40 ms at 20 Hz.
+- *Same API and keys.* `setPPGDispFilter()`, `ppgdisp_f_low_hz` / `ppgdisp_f_high_hz`,
+  `LowPass4::init_butter5_pairs()` inside. Nothing for a consumer to call when upgrading.
 - *Reset with the band-pass at the probe gate.* Both filters precharge on the first applied sample
   (§21.9); test 10 still passes unchanged.
-- *Default kept at 20 Hz (Alex, 2026-11-10).* 15 Hz was the alternative: the same visible cost (~2 px
-  on the peak, +8 ms) and 10 dB more margin at a 50 Hz consumer's Nyquist, and the number HR3 and PI
+- *Default kept at 20 Hz (Alex, 2026-11-10).* 15 Hz was the alternative: a similar visible cost and
+  12 dB more margin at a 50 Hz consumer's Nyquist, and the number HR3 and PI
   already use as the upper edge of the pulse band. Alex kept 20 Hz because IncuNest moves its
   transport to 50 Hz, where the folded signal is negligible with either; IncuNest sets its corner
   explicitly in `initSPO2()` anyway, and so does PulseNest's firmware, so the library default reaches
   only the example and the tests.
 - *Consumer rule, with the numbers corrected.* The brief stated "`f_high` ≤ 0.4 × consumer rate gives
   ≥ 20 dB at Nyquist". Its own table says otherwise: at 0.4·R the Nyquist is 1.25·`f_high`, where the
-  chain is −12.7 dB; ≥ 20 dB needs `f_high` ≤ 0.3·R (Nyquist = 1.67·`f_high`, −22 dB). The spec gives
-  both figures. For IncuNest at 50 Hz with 20 Hz: 13 dB at its Nyquist, 42 dB at the mains, which is
-  what the change is for.
+  first draft was −12.7 dB and the adopted chain is −10.3 dB; ≥ 20 dB needs `f_high` ≤ 0.3·R (Nyquist
+  = 1.67·`f_high`, −22.7 dB). The spec gives both figures (≥ 10 dB and ≥ 20 dB). For IncuNest at
+  50 Hz with 20 Hz: 10 dB at its Nyquist, 41 dB at the mains, which is what the change is for; with
+  16 Hz it gets the first draft's response back (−20 dB at 25 Hz, −51 dB at 50 Hz).
 
 **What it changes for PulseNest.** `NO_NORM` on the lab's plots and in the captures is the new chain
-(10–20 Hz attenuated, +20 ms); PPGDISPLAB's replica (`PPGDispCalc`) makes `BP2+LP4` its default
+(flat to 15 Hz, −3 dB at 20 Hz, about +20 ms); PPGDISPLAB's replica (`PPGDispCalc`) makes `BP2+LP4` its default
 filter; the firmware keeps `setPPGDispFilter(0.5, 20)` and is rebuilt with the new pin. No
 measurement changes.
 

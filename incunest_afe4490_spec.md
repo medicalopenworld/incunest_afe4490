@@ -215,7 +215,7 @@ Initializes SPI, configures the chip with default values, attaches ISR to DRDY, 
 | ENSEPGAIN      | 0 (single gain)               |
 | NUMAV          | 7 (8 averages, max 9 at 500Hz)|
 | PPG channel    | LED1 (ot_led1)                |
-| Filter         | 0.5–20 Hz band-pass + 4th-order low-pass at 20 Hz (§5.9) |
+| Filter         | 0.5–20 Hz band-pass + two low-pass biquads at 20 Hz; −3 dB at 20 Hz in all (§5.9) |
 
 ### 2.3 Chip configuration
 ```cpp
@@ -269,7 +269,7 @@ struct AFE4490Config {
     float             ppgdisp_norm_pi_lo;    // NORM_PI: PI at and below which A = 0.5 [%] (0.5; v0.117, own parameter)
     float             ppgdisp_norm_pi_hi;    // NORM_PI: PI at and above which A = 1 [%] (2.0; v0.117, own parameter)
     float             ppgdisp_f_low_hz;      // PPG display bandpass lower cutoff [Hz]
-    float             ppgdisp_f_high_hz;     // PPG display upper cutoff [Hz]: band-pass and 4th-order low-pass (v0.119)
+    float             ppgdisp_f_high_hz;     // PPG display upper cutoff [Hz]: −3 dB corner of the whole chain (v0.119)
     float             hr2_f_low_hz;          // HR2 bandpass lower cutoff [Hz]
     float             hr2_f_high_hz;         // HR2 bandpass upper cutoff [Hz]
     float             hr3_f_high_hz;         // HR3 bandpass upper cutoff [Hz]
@@ -2086,7 +2086,7 @@ own `$CFG`, and counting it twice would tell the host a move happened that it it
 
 ---
 
-### 5.9 `ppg_disp` — the display waveform and its normalization modes (v0.116; band-pass reset at the probe gate v0.118; 4th-order high side v0.119)
+### 5.9 `ppg_disp` — the display waveform and its normalization modes (v0.116; band-pass reset at the probe gate v0.118; steep high side v0.119)
 
 **Status: design agreed 2026-11-05 (Alex); estimator, clamp and headroom settled 2026-11-07 (Alex,
 with the PPGDISPLAB window of PulseNest); implemented in v0.116 (2026-11-07, `PPGDispTracker`,
@@ -2101,28 +2101,35 @@ index (full size at PI ≥ 2 %, half size at PI ≤ 0.5 %). `$SET`/`$LCFG` key `
 
 **Common front.** `x = −LP4(BPF(ot_ch))`, `ot_ch` = `ot_led1` or `ot_led2` per `setPPGChannel()`,
 `BPF` the Butterworth band-pass of `setPPGDispFilter()` (0.5–20 Hz default, 1st order per side, the
-filter of v0.69–v0.118) and `LP4` (v0.119) a 4th-order Butterworth low-pass at the same `f_high`
-(`LowPass4`, the block HR3 uses), negated so that systole peaks up. Runs on every sample inside
+filter of v0.69–v0.118) and `LP4` (v0.119) two low-pass biquads at the same `f_high` (`LowPass4`,
+the block HR3 uses, here with the Q pair of a 5th-order Butterworth, 0.6180 and 1.6180:
+`init_butter5_pairs()`), negated so that systole peaks up. Runs on every sample inside
 `_process_sample()`, after HGAC, under the settle freeze of §5.8.4 (a frozen input gives a constant
 here too).
 
-**The high side is 4th order, the low side is not (v0.119; brief of the IncuNest session 2026-11-10,
-Alex).** With `f_high` = 20 Hz the chain is −6 dB at 20 Hz, −13 dB at 25 Hz, −42 dB at 50 Hz and
-−76 dB at 100 Hz (the band-pass alone: −3, −4, −9, −16 dB). Measured on SUBJ08–11 (rationale §21.10):
+**The high side is steep, the low side is not (v0.119; brief of the IncuNest session 2026-11-10,
+Alex).** With `f_high` = 20 Hz the chain is −3 dB at 20 Hz, −10 dB at 25 Hz, −41 dB at 50 Hz and
+−76 dB at 100 Hz (the band-pass alone: −3, −4, −9, −16 dB), flat within +0.2 dB below.
+**`f_high` is the −3 dB corner of the whole chain, for any `f_low` < `f_high` < fs/2:** the band-pass
+is exactly −3 dB at its prewarped edge and supplies the real pole of a 5th-order Butterworth; the two
+biquads are that filter's pole pairs, whose gain at `f_high` is Q1·Q2 = 1 exactly. (A plain 4th-order
+Butterworth there, the first v0.119 draft, made the chain −6 dB at `f_high` and −3 dB near
+0.8·`f_high`: the corner asked for was not the one applied; Alex 2026-11-10, rationale §21.10.)
+Measured on SUBJ08–11 with that first draft, an upper bound of the cost of this one (rationale §21.10):
 the neonatal pulse has harmonics to ~16 Hz (h6 ≈ 1 % of the fundamental), the low-pass costs ~2 % of
 the systolic peak (≈ 2 px of IncuNest's chart) and 20 ms of delay, and what it buys is not the
 signal — at 50 Hz of transport the folded signal is negligible with any corner — but mains and driver
 interference at 50/100 Hz, which a 50 Hz consumer folds exactly onto its baseline (§7, a residual
-risk never measured). `f_high` keeps its name, key and setter; only its meaning widens: the −3 dB
-corner of each of the two stages. The order is fixed (one implementation, one set of tests). The low
+risk never measured). `f_high` keeps its name, key, setter and meaning (the −3 dB corner). The
+order is fixed (one implementation, one set of tests). The low
 side stays 1st order on purpose: a steep high-pass at 0.5 Hz has seconds of settling and overshoot on
 an OT drift, the very thing v0.118 removed. **Consumer rule:** a consumer that samples `ppg_disp` at
 rate R with no anti-alias filter of its own (IncuNest's `CommTask`, sample-and-hold) should keep
-`f_high` ≤ 0.4·R for ≥ 12 dB at its Nyquist (and ≥ 40 dB at 2.5·`f_high`, where the mains sits for
+`f_high` ≤ 0.4·R for ≥ 10 dB at its Nyquist (and ≥ 40 dB at 2.5·`f_high`, where the mains sits for
 R = 50 Hz), or ≤ 0.3·R for ≥ 20 dB at its Nyquist; a consumer at 25 Hz needs `f_high` ≤ 10 Hz for
 the first figure. The default stays 20 Hz (Alex, 2026-11-10; IncuNest moves its transport to 50 Hz
-and sets its corner explicitly in `initSPO2()`); 15 Hz, with the same visible cost and 10 dB more
-margin, was the alternative.
+and sets its corner explicitly in `initSPO2()`); 15 Hz, with a similar visible cost and 12 dB more
+margin at 25 Hz (−23 dB; −54 dB at 50 Hz), was the alternative.
 
 **Both filters are reset while `probe_state ≠ PROBE_APPLIED` (v0.118, every mode), exactly as
 PI-METHOD-1's:** each section precharges to steady state on the first sample it then sees, so the OT step between air (~5.9e-4) and tissue
@@ -2238,7 +2245,7 @@ only interpretable with its `$LCFG` — the lab titles the PPG plot with it and 
 ±1 in the NORM modes.
 
 **Tests (`test/test_ppgdisp/`, 11, host build, Unity, CI §9.10).** (1) `NO_NORM` is −LP4(BPF(x))
-sample by sample, bit-identical to a `TestBiquadFilter` + `TestLowPass4` of the same design reset
+sample by sample, bit-identical to a `TestBiquadFilter` + `TestLowPass4` (`init_butter5_pairs()`) of the same design reset
 while the probe is not applied, and exactly 0 there (v0.118, v0.119); (2) `NORM` on sinusoids of three amplitudes × two DC levels → 0 during the warm-up
 window, then peaks at ±1/H within 2 %; (3) ×2 step → clipped 0.3 s after it, ±1/H within 2 %
 after 5 s; ×0.5 step → within 6 % after 4 s, 3 % after 5 s; (4) `NORM_PI`: A at PI = 0.2, 0.5, 1,
@@ -2253,8 +2260,9 @@ thresholds are its own, not the SQI ramp's (v0.117); (10) an application (OT 5.9
 1.2e-4 + a beat of PI 1 %, `PROBE_APPLIED` 0.2 s after the step): `NO_NORM` is 0 before and
 beat-sized after, `NORM` is 0 during the warm-up window and within 5 % of ±1/H in the first second
 after it (v0.118; the v0.117 chain needed ~8 s); (11) with the default corners, a 2.5 Hz tone passes
-within 1 dB, 25 Hz is attenuated ≥ 12 dB and 50 Hz ≥ 40 dB (v0.119; the band-pass alone gave 4 and
-9 dB). The per-sample cost is two compares, two compare-and-moves and a division, plus the two
+within 1 dB, 20 Hz is at −3 dB, 25 Hz is attenuated ≥ 10 dB and 50 Hz ≥ 40 dB, and with `f_high`
+= 10 Hz the −3 dB point is at 10 Hz and 12.5 Hz is attenuated ≥ 10 dB (v0.119; the band-pass alone
+gave 4 and 9 dB at 25 and 50 Hz). The per-sample cost is two compares, two compare-and-moves and a division, plus the two
 biquads of the low-pass (v0.119); one `logf` per PI change.
 
 ---
@@ -3526,13 +3534,14 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
-| v0.119  | 2026-11-10    | **`ppg_disp` high side to 4th order (§5.9; brief of the IncuNest session, Alex 2026-11-10).** |
-|         |               | A 4th-order Butterworth low-pass at `f_high` follows the band-pass: −13 dB at 25 Hz,    |
-|         |               | −42 dB at 50 Hz with the 20 Hz default (band-pass alone: −4, −9 dB), ~2 % of the       |
-|         |               | systolic peak and 20 ms of delay; the low side stays 1st order. Same API and keys;      |
-|         |               | `f_high` now the −3 dB corner of both stages; consumer rule `f_high` ≤ 0.4·R (≥ 12 dB  |
-|         |               | at Nyquist) or ≤ 0.3·R (≥ 20 dB); default 20 Hz kept (Alex). Reset with the band-pass  |
-|         |               | at the probe gate. Test 11; test 1 pins the new chain. Rationale §21.10.                |
+| v0.119  | 2026-11-10    | **`ppg_disp` steep high side (§5.9; brief of the IncuNest session, Alex 2026-11-10).**   |
+|         |               | Two low-pass biquads at `f_high` follow the band-pass, with the Q pair of a 5th-order   |
+|         |               | Butterworth (the band-pass supplies its real pole): `f_high` stays the −3 dB corner of  |
+|         |               | the whole chain for any corner; −10 dB at 25 Hz, −41 dB at 50 Hz with the 20 Hz default |
+|         |               | (band-pass alone: −4, −9 dB); the low side stays 1st order. Same API and keys;          |
+|         |               | consumer rule `f_high` ≤ 0.4·R (≥ 10 dB at Nyquist) or ≤ 0.3·R (≥ 20 dB); default 20 Hz |
+|         |               | kept (Alex). Reset with the band-pass at the probe gate. Test 11; test 1 pins the new   |
+|         |               | chain. Rationale §21.10.                                                                |
 | v0.118  | 2026-11-09    | **`ppg_disp` band-pass reset while the probe is not applied (§5.9; Alex 2026-11-09).**  |
 |         |               | As PI-METHOD-1's filter: precharged on the first applied sample, so the air-to-tissue  |
 |         |               | OT step of an application never enters the SLEW warm-up. Trace full size 1.2 s after  |

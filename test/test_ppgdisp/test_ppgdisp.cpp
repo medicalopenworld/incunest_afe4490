@@ -50,7 +50,7 @@ void test_ot_ac_is_minus_bandpass_bit_exact() {
     INCUNEST_AFE4490::TestLowPass4     ref_lp;
     ref.init_bp(0.5f, 20.0f, FS);
     ref.reset();
-    ref_lp.init(20.0f, FS);
+    ref_lp.init_butter5_pairs(20.0f, FS);
     ref_lp.reset();
     TEST_ASSERT_EQUAL(AFE4490PPGDispMode::NO_NORM, afe.getConfig().ppgdisp_mode);
     for (int n = 0; n < 3000; n++) {
@@ -280,12 +280,15 @@ void test_application_step_never_enters_the_frame() {
     }
 }
 
-// ── 11. The high side is 4th order (v0.119): with the default corners (0.5–20 Hz) a tone at 25 Hz
-//        (the Nyquist of a 50 Hz consumer) is attenuated ≥ 12 dB, one at 50 Hz (mains, folded onto
-//        the baseline by that consumer) ≥ 40 dB, and the band (2.5 Hz) passes within 1 dB. The
-//        v0.118 chain (band-pass alone) gave −4 and −9 dB. Steady-state peak after 3 s, NO_NORM. ──
-static float chain_gain_at(float f_hz) {
+// ── 11. The high side is steep and f_high is the −3 dB corner of the WHOLE chain (v0.119): with
+//        the default corners (0.5–20 Hz) a tone at 20 Hz is at −3 dB, one at 25 Hz (the Nyquist of
+//        a 50 Hz consumer) is attenuated ≥ 10 dB, one at 50 Hz (mains, folded onto the baseline by
+//        that consumer) ≥ 40 dB, and the band (2.5 Hz) passes within 1 dB. The same holds at another
+//        corner (0.5–10 Hz: −3 dB at 10 Hz, ≥ 10 dB at 12.5 Hz). The v0.118 chain (band-pass alone)
+//        gave −4 and −9 dB at 25 and 50 Hz. Steady-state peak after 3 s, NO_NORM. ──
+static float chain_gain_at(float f_hz, float f_high_hz = 0.0f) {
     INCUNEST_AFE4490 afe;
+    if (f_high_hz > 0.0f) afe.setPPGDispFilter(0.5f, f_high_hz);
     Feeder f(afe);
     f.f_hz = f_hz;
     f.run(1e-6f, 3.0f, 1.0f);
@@ -295,8 +298,11 @@ static float chain_gain_at(float f_hz) {
 
 void test_high_side_is_fourth_order() {
     TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(2.5f) > 0.89f, "2.5 Hz must pass within 1 dB");
-    TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(25.0f) < 0.251f, "25 Hz must be attenuated >= 12 dB (default f_high 20 Hz)");
+    TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.02f, 0.7071f, chain_gain_at(20.0f), "f_high (default 20 Hz) must be the -3 dB corner of the chain");
+    TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(25.0f) < 0.316f, "25 Hz must be attenuated >= 10 dB (default f_high 20 Hz)");
     TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(50.0f) < 0.010f, "50 Hz must be attenuated >= 40 dB (default f_high 20 Hz)");
+    TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.02f, 0.7071f, chain_gain_at(10.0f, 10.0f), "f_high = 10 Hz must be the -3 dB corner too");
+    TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(12.5f, 10.0f) < 0.316f, "12.5 Hz must be attenuated >= 10 dB with f_high 10 Hz");
 }
 
 int main(int, char**) {
