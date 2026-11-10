@@ -2166,6 +2166,11 @@ Consequences for the library (open, to be settled with the lab test window befor
    are *candidates* to choose with the window and then freeze; width px, height px, sweep speed and
    px/mm are *parameters* of the window, never constants, because they belong to the HMI and will change.
 
+**Settled 2026-11-10 (v0.119, §21.10):** the high side of the display filter is 4th order at `f_high`
+(default kept at 20 Hz), and IncuNest moves its transport to 50 Hz. The 8–10 Hz corner of point 1 was
+written for a 25 Hz consumer; at 50 Hz the folded signal is negligible with any corner and the order,
+not the corner, is what matters (mains and drivers at 50/100 Hz).
+
 ### 21.8 Scale by `A`, clamp at ±1 — not at ±A (2026-11-07)
 
 The first draft of §5.9 and the PPGDISPLAB window wrote `NORM_PI` as `A · clamp(u, −1, 1)`: the
@@ -2256,6 +2261,73 @@ auto-ranging plot used to show; in steady state it is the same filter. Test 1 of
 now pins the gated identity, test 10 the application. The alternative (reset only in `NORM` /
 `NORM_PI`) would have kept `NO_NORM` untouched at the cost of two filter histories depending on
 the mode, and a mode switch at run time inheriting whichever state the other mode left.
+
+### 21.10 The high side of the display filter: 4th order at `f_high`, low side untouched, 20 Hz kept (2026-11-10)
+
+**Where it comes from.** A brief of the IncuNest session (2026-11-10, approved by Alex; measured on
+PulseNest's SUBJ08–11 HOSPNAV captures, read-only) asked for the high side of `ppg_disp`'s filter to go
+from 1st order (the biquad band-pass, 6 dB/octave per side) to 4th order Butterworth, in cascade with
+the band-pass, with the same API and keys, and for a consumer rule in the spec. Context: IncuNest's
+`CommTask` samples `ppg_disp` by sample-and-hold with no anti-alias filter (§21.7), and moves from 25 to
+50 Hz in the same change.
+
+**What was measured (brief's tables; windows of 10.24 s with the probe applied, artefacts discarded,
+median; 1 px of IncuNest's chart ≈ 1.1 % of the beat's peak-to-peak).** Harmonics of the neonatal PPG
+relative to the fundamental (HR 158–170 bpm): h2 (~5.5 Hz) 26–32 %, h3 (~8 Hz) 8–12 %, h4 (~11 Hz)
+4–6.5 %, h5 (~13.5 Hz) 1.4–3.3 %, h6 (~16 Hz) 0.7–1.5 %; power above 12.5 Hz 0.03–0.15 %. No dicrotic
+notch visible. Masimo's 7.5 Hz corner (1997) is no justification for a low corner here.
+
+| 4th-order low-pass at | RMS difference | max difference (systolic peak) | delay |
+|---|---|---|---|
+| 20 Hz | 0.3–0.55 % | 1.7–2.4 % (~2 px) | 20 ms |
+| 15 Hz | 0.3–0.6 % | 1.6–2.2 % (~2 px) | 28 ms |
+| 12 Hz | 0.5–1.0 % | 2.8–4.1 % (~3 px) | 36 ms |
+| 10 Hz | 0.6–1.6 % | 3.9–5.3 % (~5 px) | 42 ms |
+| 8 Hz | 0.8–2.2 % | 4.6–6.6 % (~6 px) | 54 ms |
+
+Folded signal and own noise when the consumer samples (RMS of what lands in band, % of peak-to-peak):
+band-pass alone 0.22–0.96 % at 25 Hz, 0.04–0.09 % at 50 Hz; with the low-pass at 20 Hz 0.20–0.91 % /
+0.01–0.02 %; at 15 Hz 0.15–0.72 % / ≤ 0.01 %. At 50 Hz it is negligible with any corner, SUBJ08 (PI
+0.7 %) included. What justifies the order is deterministic interference (mains 50/100 Hz, phototherapy
+and heater drivers; spec §7, a residual risk never measured), which a 50 Hz consumer folds exactly onto
+its baseline:
+
+| whole chain | 20 Hz | 25 Hz | 50 Hz (mains) | 100 Hz |
+|---|---|---|---|---|
+| band-pass alone (v0.118) | −3.0 | −4.2 | −9.0 | −15.5 dB |
+| + LP4 at 20 Hz | −6.0 | −12.7 | −41.8 | −76 |
+| + LP4 at 15 Hz | −13.5 | −22.2 | −51.9 | −86 |
+| + LP4 at 12 Hz | −20.9 | −29.9 | −59.7 | −94 |
+
+**Decisions.**
+
+- *4th order on the high side, in cascade, order fixed.* `LowPass4` (two biquads with the Butterworth
+  Q pairs, −3 dB at `f_high`, each section precharging on its own after `reset()`), the block HR3 has
+  used since v0.97. Not PI's: PI-METHOD-1's AC filter is the same 2nd-order band-pass as the display's
+  (the brief said "HR3 and PI"; only HR3). One implementation, one set of tests; the order is not a
+  parameter.
+- *Low side untouched.* A high-order high-pass at 0.5 Hz has seconds of settling and overshoot on an OT
+  drift, which is exactly the application transient v0.118 removed (§21.9).
+- *Same API and keys; `f_high` means the −3 dB corner of each stage.* `setPPGDispFilter()`,
+  `ppgdisp_f_low_hz` / `ppgdisp_f_high_hz`. Nothing for a consumer to call when upgrading.
+- *Reset with the band-pass at the probe gate.* Both filters precharge on the first applied sample
+  (§21.9); test 10 still passes unchanged.
+- *Default kept at 20 Hz (Alex, 2026-11-10).* 15 Hz was the alternative: the same visible cost (~2 px
+  on the peak, +8 ms) and 10 dB more margin at a 50 Hz consumer's Nyquist, and the number HR3 and PI
+  already use as the upper edge of the pulse band. Alex kept 20 Hz because IncuNest moves its
+  transport to 50 Hz, where the folded signal is negligible with either; IncuNest sets its corner
+  explicitly in `initSPO2()` anyway, and so does PulseNest's firmware, so the library default reaches
+  only the example and the tests.
+- *Consumer rule, with the numbers corrected.* The brief stated "`f_high` ≤ 0.4 × consumer rate gives
+  ≥ 20 dB at Nyquist". Its own table says otherwise: at 0.4·R the Nyquist is 1.25·`f_high`, where the
+  chain is −12.7 dB; ≥ 20 dB needs `f_high` ≤ 0.3·R (Nyquist = 1.67·`f_high`, −22 dB). The spec gives
+  both figures. For IncuNest at 50 Hz with 20 Hz: 13 dB at its Nyquist, 42 dB at the mains, which is
+  what the change is for.
+
+**What it changes for PulseNest.** `NO_NORM` on the lab's plots and in the captures is the new chain
+(10–20 Hz attenuated, +20 ms); PPGDISPLAB's replica (`PPGDispCalc`) makes `BP2+LP4` its default
+filter; the firmware keeps `setPPGDispFilter(0.5, 20)` and is rebuilt with the new pin. No
+measurement changes.
 
 ## Appendix — source rationale (to distill at consolidation)
 

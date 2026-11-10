@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.118 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.119 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -422,7 +422,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _afe_stg2_en_led2(true),
       _afe_ambdac_uA(0),
       _ppgdisp_channel(AFE4490Channel::LED1),
-      _ppgdisp_bpf(),
+      _ppgdisp_bpf(), _ppgdisp_lpf(),
       _ppgdisp_mode(AFE4490PPGDispMode::NO_NORM), _ppgdisp_tracker(), _ppgdisp_pi_last(NAN), _ppgdisp_amp(ppgdisp_norm_pi_floor),
       _ppgdisp_norm_pi_lo(ppgdisp_norm_pi_lo), _ppgdisp_norm_pi_hi(ppgdisp_norm_pi_hi),
       _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
@@ -487,7 +487,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
     memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
     _current_data = AFE4490Data{};
-    _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;
+    _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;  _ppgdisp_lpf.f_high = 20.0f;   // one f_high (v0.119)
     _ppgdisp_tracker.rise_per_s = ppgdisp_norm_rise_per_s; _ppgdisp_tracker.win_s = ppgdisp_norm_win_s;
     _ppgdisp_tracker.tau_s      = ppgdisp_norm_tau_s;      _ppgdisp_tracker.headroom = ppgdisp_norm_headroom;
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
@@ -908,15 +908,19 @@ void INCUNEST_AFE4490::setAmbDac(uint8_t uA) {
 void INCUNEST_AFE4490::setPPGChannel(AFE4490Channel channel) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _ppgdisp_channel = channel;
-    // Reset filter state: changing channel means a different signal enters the filter
-    _ppgdisp_bpf.reset();
+    // Reset filter state: changing channel means a different signal enters the filters
+    _ppgdisp_bpf.reset(); _ppgdisp_lpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
+// Display chain corners (§5.9). One f_high designs both stages: the band-pass's high side and the
+// 4th-order low-pass (v0.119). getConfig() reads ppgdisp_f_high_hz back from the band-pass.
 void INCUNEST_AFE4490::setPPGDispFilter(float f_low_hz, float f_high_hz) {
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
     _ppgdisp_bpf.init_bp(f_low_hz, f_high_hz, (float)_afe_sample_rate_hz);
     _ppgdisp_bpf.reset();
+    _ppgdisp_lpf.init(f_high_hz, (float)_afe_sample_rate_hz);
+    _ppgdisp_lpf.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1412,7 +1416,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _hr1_sample_idx     = 0;
     _hr1_interval_count = 0;
     memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
-    _ppgdisp_bpf.reset();
+    _ppgdisp_bpf.reset(); _ppgdisp_lpf.reset();
     _ppgdisp_tracker.reset(); _ppgdisp_pi_last = NAN;
     _hr2_bpf.reset();
     _hr2_buf_idx = 0; _hr2_buf_count = 0;
@@ -2045,6 +2049,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
         _hr1_ma_len = (uint32_t)hr1_ma_max_len;
     }
     _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
+    _ppgdisp_lpf.init(_ppgdisp_lpf.f_high, sample_rate_hz);
     _ppgdisp_tracker.configure(sample_rate_hz);
     _hr2_bpf.init_bp(_hr2_bpf.f_low, _hr2_bpf.f_high, sample_rate_hz);
     _hr3_lp.init(_hr3_lp.f_high, sample_rate_hz);
@@ -2690,10 +2695,18 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 // warming up or a degenerate frame → 0, so an auto-gain never turns noise into a live-looking trace.
 // Runs under _state_mutex inside _process_sample(); PI is the one PI-METHOD-1 published last
 // (100 ms cadence), A is recomputed only when it changes (one logf per PI block, not per sample).
-// The display chain from the OT of the display channel. While the probe is not applied the band-pass
-// is reset on every sample (v0.118), exactly as PI-METHOD-1's _pi_bpf: it precharges to steady state
-// on the next sample it sees, so the OT step between air and tissue (×5, some 400 beats of PI 1 %)
-// never enters the filter. Until v0.117 the filter ran continuously: the step's high-pass tail
+// The display chain from the OT of the display channel: band-pass (0.5–20 Hz, 1st order per side),
+// then a 4th-order Butterworth low-pass at the same f_high (v0.119). The low-pass gives the high
+// side 30 dB/octave in all: with the default 20 Hz, −6 dB at 20 Hz, −13 dB at 25 Hz, −42 dB at
+// 50 Hz, −76 dB at 100 Hz (the band-pass alone: −3, −4, −9, −16). Neonatal PPG has harmonics to
+// ~16 Hz (h6 ≈ 1 % of the fundamental, SUBJ08–11), so the visible cost is ~2 % of the systolic peak
+// and 20 ms of delay; what the order buys is that a consumer sampling ppg_disp at 50 Hz with no
+// anti-alias filter of its own (IncuNest's CommTask) does not fold mains and driver interference at
+// 50/100 Hz onto its baseline (rationale §21.10). The low side stays 1st order: a steep high-pass
+// at 0.5 Hz rings for seconds on an OT drift, the very thing v0.118 removed. While the probe is not
+// applied both filters are reset on every sample (v0.118), exactly as PI-METHOD-1's _pi_bpf: each
+// section precharges to steady state on the next sample it sees, so the OT step between air and
+// tissue (×5, some 400 beats of PI 1 %) never enters the chain. Until v0.117 the filter ran continuously: the step's high-pass tail
 // (0.5 Hz, τ ≈ 0.32 s) was still 100× the beat when PROBE_APPLIED was confirmed 0.2 s later, the SLEW
 // warm-up took those extrema as its frame, and the τ = 1 s fall needed ln(100) ≈ 4.6 s more to shed
 // them: the IncuNest HMI trace took 7–8 s to fill after an application (seen 2026-11-08, reproduced
@@ -2702,8 +2715,8 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
 // it is the same filter with a precharged instead of an inherited state. Negated: the AFE raw falls
 // on systole; conventional PPG polarity peaks up.
 void INCUNEST_AFE4490::_ppgdisp_process(float ot_ch, ProbeState probe_state) {
-    if (probe_state != ProbeState::PROBE_APPLIED) _ppgdisp_bpf.reset();
-    _ppgdisp_update(-_ppgdisp_bpf.process(ot_ch), probe_state);
+    if (probe_state != ProbeState::PROBE_APPLIED) { _ppgdisp_bpf.reset(); _ppgdisp_lpf.reset(); }
+    _ppgdisp_update(-_ppgdisp_lpf.process(_ppgdisp_bpf.process(ot_ch)), probe_state);
 }
 
 void INCUNEST_AFE4490::_ppgdisp_update(float x, ProbeState probe_state) {
@@ -2742,6 +2755,9 @@ float INCUNEST_AFE4490::_ppgdisp_amp_of_pi(float pi) const {
     return clampf(a, ppgdisp_norm_pi_floor, 1.0f);
 }
 
+// ── PPGDispTracker: the SLEW envelope of the NORM modes. Contract and design (targets, slew-limited
+// rise, exponential fall, warm-up, headroom, the alternatives rejected) are in the header's struct
+// comment and in rationale §21.5 / §21.8; below is only the arithmetic. ──────────────────────────
 void INCUNEST_AFE4490::PPGDispTracker::configure(float sample_rate_hz) {
     _clock.configure(sample_rate_hz, alg_window_block_s);
     long n    = lroundf(win_s / alg_window_block_s);
@@ -2759,6 +2775,8 @@ void INCUNEST_AFE4490::PPGDispTracker::reset() {
     _hi = 0.0f; _lo = 0.0f;
 }
 
+// One sample: block extrema → window targets → frame (rise slew-limited, fall exponential) → centre
+// and semi-amplitude with headroom. Returns false, and writes nothing, until the first window is full.
 bool INCUNEST_AFE4490::PPGDispTracker::update(float x, float& centre, float& semi) {
     if (x > _cur_max) _cur_max = x;
     if (x < _cur_min) _cur_min = x;

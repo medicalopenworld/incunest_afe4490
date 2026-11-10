@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.118 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.119 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.118"
+#define INCUNEST_AFE4490_VERSION "0.119"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -893,7 +893,17 @@ public:
     void setAmbDac(uint8_t uA);             // Ambient cancellation DAC current [0–10 µA]; AMBDAC[3:0] in TIA_AMB_GAIN D19:D16
 
     // Signal and filter configuration
+    // Which OT feeds ppg_disp (LED1 by default). Takes _state_mutex; resets the display filters (a
+    // different signal enters them). Callable before or after begin().
     void setPPGChannel(AFE4490Channel channel);
+    // The display chain's corners (§5.9): a Butterworth band-pass f_low–f_high (1st order per side)
+    // followed, since v0.119, by a 4th-order Butterworth low-pass at f_high (LowPass4, as HR3's), so
+    // the high side falls at 30 dB/octave and f_high is a −3 dB corner of each stage (−6 dB in all).
+    // The low side stays 1st order on purpose: a steep high-pass at 0.5 Hz rings for seconds on an
+    // OT drift. Consumer rule: a consumer that samples ppg_disp at rate R without its own anti-alias
+    // filter should keep f_high ≤ 0.4·R (≥ 12 dB at its Nyquist, ≥ 40 dB at 2.5·f_high) or
+    // ≤ 0.3·R for ≥ 20 dB at its Nyquist. Takes _state_mutex; resets both filters; callable before
+    // or after begin(). No range check (the biquad design clamps nothing): keep f_high < fs/2.
     void setPPGDispFilter(float f_low_hz = 0.5f, float f_high_hz = 20.0f);
     // v0.116 (§5.9): display mode of ppg_disp and the parameters of its envelope tracker (NORM modes).
     // Both take _state_mutex like setPPGChannel(); callable before or after begin(). Either one
@@ -1555,8 +1565,10 @@ private:
     // ── Signal processing configuration ──
     AFE4490Channel    _ppgdisp_channel;
 
-    // ── PPG display filter (Butterworth bandpass, configurable via setPPGDispFilter()) ──
-    BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz
+    // ── PPG display filters (setPPGDispFilter(), §5.9): band-pass, then a 4th-order low-pass at the
+    //    same f_high (v0.119). Both reset while the probe is not applied (v0.118). ──
+    BiquadFilter      _ppgdisp_bpf;          // default: 0.5–20 Hz, 1st order per side
+    LowPass4          _ppgdisp_lpf;          // 4th-order Butterworth at f_high (20 Hz): the high side
     AFE4490PPGDispMode _ppgdisp_mode;        // NO_NORM / NORM / NORM_PI (v0.116, §5.9)
     PPGDispTracker    _ppgdisp_tracker;      // SLEW envelope of the NORM modes
     float             _ppgdisp_pi_last;      // PI the cached A was computed from (NaN = none)
@@ -1726,7 +1738,7 @@ private:
     uint32_t _pi_buf_count;
     void _pi_update_sample(float ot_ir, ProbeState probe_state);
     // ppg_disp (§5.9): x = −BPF(ot_ch) in; writes _current_data.ppg_disp per _ppgdisp_mode (v0.116)
-    void  _ppgdisp_process(float ot_ch, ProbeState probe_state);   // band-pass (reset while not applied), negate, mode
+    void  _ppgdisp_process(float ot_ch, ProbeState probe_state);   // band-pass + LP4 (reset while not applied), negate, mode
     void  _ppgdisp_update(float x, ProbeState probe_state);
     float _ppgdisp_amp_of_pi(float pi) const;
     void _pi_window_reset();          // empties the window (block sum, buffers, totals)

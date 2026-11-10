@@ -41,21 +41,25 @@ struct Feeder {
 void setUp() {}
 void tearDown() {}
 
-// ── 1. NO_NORM (default) is −BPF(x), sample by sample, exactly, with the band-pass reset while the
-//       probe is not applied (v0.118): 0 there, the same filter from the first applied sample on ────
+// ── 1. NO_NORM (default) is −LP4(BPF(x)) (v0.119), sample by sample, exactly, with both filters
+//       reset while the probe is not applied (v0.118): 0 there, the same chain from the first applied
+//       sample on ─────────────────────────────────────────────────────────────────────────────────
 void test_ot_ac_is_minus_bandpass_bit_exact() {
     INCUNEST_AFE4490 afe;
     INCUNEST_AFE4490::TestBiquadFilter ref;
+    INCUNEST_AFE4490::TestLowPass4     ref_lp;
     ref.init_bp(0.5f, 20.0f, FS);
     ref.reset();
+    ref_lp.init(20.0f, FS);
+    ref_lp.reset();
     TEST_ASSERT_EQUAL(AFE4490PPGDispMode::NO_NORM, afe.getConfig().ppgdisp_mode);
     for (int n = 0; n < 3000; n++) {
         const bool applied = (n < 1000) || (n >= 2000);
         const float x = 1.4e-5f + 1e-6f * sinf(2.0f * (float)M_PI * 2.0f * (float)n / FS) + (n == 700 ? 5e-6f : 0.0f);
         afe.test_feed_ppgdisp(x, applied ? ProbeState::PROBE_APPLIED : ProbeState::PROBE_DISCONNECTED);
-        if (!applied) ref.reset();
-        const float expect = -ref.process(x);
-        TEST_ASSERT_TRUE_MESSAGE(afe.test_ppg_disp() == expect, "NO_NORM must be bit-identical to -BPF(x) with the reset of the probe gate");
+        if (!applied) { ref.reset(); ref_lp.reset(); }
+        const float expect = -ref_lp.process(ref.process(x));
+        TEST_ASSERT_TRUE_MESSAGE(afe.test_ppg_disp() == expect, "NO_NORM must be bit-identical to -LP4(BPF(x)) with the reset of the probe gate");
         if (!applied) TEST_ASSERT_TRUE_MESSAGE(afe.test_ppg_disp() == 0.0f, "NO_NORM is exactly 0 while the probe is not applied");
     }
 }
@@ -276,6 +280,25 @@ void test_application_step_never_enters_the_frame() {
     }
 }
 
+// ── 11. The high side is 4th order (v0.119): with the default corners (0.5–20 Hz) a tone at 25 Hz
+//        (the Nyquist of a 50 Hz consumer) is attenuated ≥ 12 dB, one at 50 Hz (mains, folded onto
+//        the baseline by that consumer) ≥ 40 dB, and the band (2.5 Hz) passes within 1 dB. The
+//        v0.118 chain (band-pass alone) gave −4 and −9 dB. Steady-state peak after 3 s, NO_NORM. ──
+static float chain_gain_at(float f_hz) {
+    INCUNEST_AFE4490 afe;
+    Feeder f(afe);
+    f.f_hz = f_hz;
+    f.run(1e-6f, 3.0f, 1.0f);
+    const float peak = (f.out_max > -f.out_min) ? f.out_max : -f.out_min;
+    return peak / 1e-6f;
+}
+
+void test_high_side_is_fourth_order() {
+    TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(2.5f) > 0.89f, "2.5 Hz must pass within 1 dB");
+    TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(25.0f) < 0.251f, "25 Hz must be attenuated >= 12 dB (default f_high 20 Hz)");
+    TEST_ASSERT_TRUE_MESSAGE(chain_gain_at(50.0f) < 0.010f, "50 Hz must be attenuated >= 40 dB (default f_high 20 Hz)");
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_ot_ac_is_minus_bandpass_bit_exact);
@@ -288,5 +311,6 @@ int main(int, char**) {
     RUN_TEST(test_tracker_setter_ranges_config_and_codec);
     RUN_TEST(test_norm_pi_thresholds_are_decoupled_from_sqi);
     RUN_TEST(test_application_step_never_enters_the_frame);
+    RUN_TEST(test_high_side_is_fourth_order);
     return UNITY_END();
 }
