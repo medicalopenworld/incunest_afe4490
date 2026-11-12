@@ -2352,6 +2352,52 @@ its baseline:
 filter; the firmware keeps `setPPGDispFilter(0.5, 20)` and is rebuilt with the new pin. No
 measurement changes.
 
+## 22. The number in an HR name is the domain; `HR4` freed, the derivative detector becomes `HR1_DRV` (2026-11-12)
+
+**The problem (Alex).** HR1, HR2 and HR3 were numbered in the order they were written, and the
+roadmap (spec §5.5) gave the next number, `HR4`, to a derivative-based peak detector. Two things
+changed the reading. PulseNest's prior-art index (`PulseNest/docs/algorithm_prior_art_index.md` §1)
+shows that the three are analyses of the pulsatile structure in three domains — beats in time,
+periodicity in the time lag, harmonic structure in the spectrum — and that each feeds more than the
+rate: `hr3_sqi > 0` is already the SpO2 artefact gate (§17), and the makers build PI, pulse
+validation and probe-off rules on the same analyses. And a fourth domain, the cepstrum, appeared as
+a candidate family (Datex-Ohmeda US 7,139,599, expired; not evaluated), for which Alex wanted the
+number 4.
+
+**Options.**
+1. *Leave the roadmap as it is* (`HR4` = derivative detector; a cepstral method would be `HR5`).
+   The number then means nothing, and a time-domain beat detector sits in a family of its own
+   although §5.3 already treats derivative detection as one strategy for HR1's detector.
+2. **The number names the domain, the suffix names the method (chosen).** 1 time (beat detection),
+   2 time lag (periodicity), 3 frequency (spectrum), 4 cepstrum. It is the pattern `HR2_ACF` /
+   `HR2_MPM` / `HR2_YIN` already follows. The derivative detector becomes `HR1_DRV`. Cost: two
+   lines of the spec — `HR4` was never implemented and existed in no field, frame, CSV column or
+   line of code (searched in both repositories on 2026-11-12).
+3. *Rename the families away from `HR`* (a neutral prefix, or `PR`, as ISO 80601-2-61 and the
+   makers call a PPG-derived rate). It would break the data contract (`AFE4490Data`, the `$M`
+   frames, the CSV columns, the lab, IncuNest's firmware) for a label, and the HR/PR decision stays
+   parked (2026-11-02). Not done.
+
+**Details.**
+- `HR1_DRV` is entered as *catalogued, not planned*. The roadmap said "Planned", but §5.4
+  (2026-09-06) measured that no change of HR1's detector improves what the device publishes behind
+  the `hr1_sqi` gate; the row had not been updated since.
+- 4 is *reserved*, not planned: no cepstral method has been evaluated.
+- A family's first implemented method keeps its bare field name (`hr1`, `hr2`, `hr3`); the suffix
+  tells the methods of one family apart, so today's HR1 gets none while it is the only detector
+  implemented.
+- The sentence of §5.5 that named the input and the future fields was stale (`led1_aled1`,
+  `hr4_valid`: the algorithms read `ot_led1` since v0.38, and validity is NaN plus an SQI of 0) and
+  was rewritten.
+
+**Not decided.** Whether the products of an analysis other than a rate and its quality (a comb
+purity from the spectrum, a pulse gate read by SpO2) keep the `hrN_` prefix or are named after what
+they measure. Proposed in the session, not agreed; it matters when the first such product enters
+the library.
+
+**Scope.** Text only: spec §5.5, this section, and PulseNest's `docs/nomenclature.md` and prior-art
+index. No code, no field and no version: it ships with the next release.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

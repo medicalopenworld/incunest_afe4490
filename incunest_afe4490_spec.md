@@ -1509,6 +1509,11 @@ A clean PPG signal → SQI approaches 1. A weak or noisy signal → intermediate
 
 ### 5.5 HR algorithms roadmap
 
+**Naming rule (2026-11-12, rationale §22).** The number is the domain in which the pulse is
+searched and the suffix is the method: `HR1` time (beat detection), `HR2` time lag (periodicity),
+`HR3` frequency (spectrum), `HR4` cepstrum (reserved: no cepstral method is planned or evaluated).
+A family's first implemented method keeps the bare field name (`hr1`, `hr2`, `hr3`).
+
 | Algorithm | Method | Status |
 |---|---|---|
 | HR1 | Threshold crossing (rising edge, 0.6 × running_max) | Implemented |
@@ -1516,7 +1521,7 @@ A clean PPG signal → SQI approaches 1. A weak or noisy signal → intermediate
 | HR3 | FFT + HPS on decimated signal (50 Hz, 10.24 s window) | Implemented |
 | HR2_MPM | McLeod Pitch Method — NSDF + clarity, same buffer as HR2_ACF | Planned |
 | HR2_YIN | CMND minimum, same buffer as HR2_ACF | Planned |
-| HR4 | True peak detection via derivative (max of derivative = steepest ascending slope) | Planned |
+| HR1_DRV | True peak detection via derivative (max of derivative = steepest ascending slope). Named `HR4` until 2026-11-12 | Catalogued, not planned: one of the detector strategies of rationale §5.3; §5.4 measured no gain from changing HR1's detector |
 
 **Acronyms.** `ACF` = *autocorrelation function* (maximises normalised correlation). `NSDF` =
 *normalised square difference function*, the basis of the `MPM` = *McLeod Pitch Method*, which
@@ -1525,7 +1530,8 @@ reports its own *clarity* metric. `CMND` = *cumulative mean normalized differenc
 the duality between correlation and difference. All three estimate the same period: one maximises a
 correlation, the other two minimise a normalised difference, over the same decimated buffer.
 
-HR1–HR4 all operate on `led1_aled1` (IR ambient-corrected) and run in parallel. `AFE4490Data` will expose `hr4`/`hr4_valid` when implemented.
+HR1, HR2_ACF and HR3 all take `ot_led1` (the IR optical transmittance, §5.2–§5.4) and run in parallel. A method
+added later gets its own rate and SQI fields in `AFE4490Data` when it is implemented.
 
 > All HR algorithms developed from scratch. Protocentral code is not used as a base.
 
