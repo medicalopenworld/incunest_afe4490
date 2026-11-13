@@ -1538,9 +1538,11 @@ A clean PPG signal → SQI approaches 1. A weak or noisy signal → intermediate
 **Naming rule (2026-11-12 and 2026-11-13, rationale §22).** `HR` stands for *heartbeat resolver*:
 an analyser of the pulsatile structure of the PPG. It names the algorithm, not a magnitude; the
 magnitudes have their own names (pulse rate, PI, SpO2, SQI). Each `HRn` is one resolver. The number
-is the domain in which it searches the pulse and the suffix is the method: `HR1` time (beat
-detection), `HR2` time lag (periodicity), `HR3` frequency (spectrum), `HR4` cepstrum (reserved: no
-cepstral method is planned or evaluated).
+is the domain of the analysis, that is, what its methods start from, and the suffix is the method:
+`HR1` the waveform in time (beat detection), `HR2` the signal against itself delayed (time lag,
+periodicity), `HR3` the spectrum (frequency) and what is computed from it, the cepstrum included.
+`HR4` is an oscillator locked to the signal, as a phase-locked loop: a candidate, with no method
+planned or evaluated. The number 4 was reserved for the cepstrum until 2026-11-13 (rationale §22.2).
 
 - **Published per family:** `hrN`, a pulse rate in bpm, and `hrN_sqi`. They are the family's
   outputs and are not renamed. Each family has one method today, so the pair is that method's. A

@@ -2382,7 +2382,8 @@ number 4.
 - `HR1_DRV` is entered as *catalogued, not planned*. The roadmap said "Planned", but §5.4
   (2026-09-06) measured that no change of HR1's detector improves what the device publishes behind
   the `hr1_sqi` gate; the row had not been updated since.
-- 4 is *reserved*, not planned: no cepstral method has been evaluated.
+- 4 is *reserved*, not planned: no cepstral method has been evaluated. *Reversed on 2026-11-13:
+  the cepstrum is a method of family 3 and the number 4 names another candidate (§22.2).*
 - A family's first implemented method keeps its bare field name (`hr1`, `hr2`, `hr3`); the suffix
   tells the methods of one family apart, so today's HR1 gets none while it is the only detector
   implemented.
@@ -2408,6 +2409,7 @@ structure of the PPG. It names the algorithm, not a magnitude; the magnitudes ke
 (pulse rate, PI, SpO2, SQI). Alex's formulation: a resolver has four kinds of analysis; at first
 it gave only the pulse rate, then the SQI tied to its method, later perhaps other estimates. Each
 `HRn` is one resolver, one per domain; three are implemented and the fourth (cepstrum) is reserved.
+*(The fourth changed later that day: §22.2.)*
 
 Readings discarded in the conversation: *Heartbeat Recurrence* (the first recommendation),
 *Hemodynamic Rhythm* and *Heartbeat Retrieval* (the handoff records no reason for these three);
@@ -2469,6 +2471,83 @@ schemes.
 
 **Scope.** Text only (spec §5.5, this subsection, PulseNest's `docs/nomenclature.md`). No code, no
 field and no version: it ships with the next release, cited in the spec's §14 row with §22.
+
+### 22.2 The cepstrum joins family 3; the number 4 goes to an oscillator locked to the signal (2026-11-13)
+
+**What changed (Alex, the same day as §22.1).** The cepstrum stops being a family of its own and
+becomes a method of family 3, working label `HR3_CEP`. The number 4, free again, names a candidate
+family: an oscillator locked to the signal (a phase-locked loop and its relatives), working label
+`HR4_PLL`. Neither is planned or evaluated; no code and no field.
+
+**Why the cepstrum belongs with the spectrum (Alex's two reasons, and a third).**
+- It starts from the same FFT as the other methods of HR3: the power cepstrum is the Fourier
+  transform of the logarithm of the power spectrum, and a Fourier pair with the autocorrelation of
+  the log spectrum, which is where the spectral autocorrelation (`HR3_SAC`) starts.
+- The methods may help each other, octave errors first. The cepstrum peaks at T0, 2·T0, 3·T0 and
+  tends to read half the rate; the spectral autocorrelation peaks at f0, 2·f0 and tends to read
+  double; only f0 is common to both. Argued, not measured: no cepstral method has been run on our
+  captures. Two limits of the argument: the two methods are not independent witnesses, since both
+  read the same spectrum, and `HR2_ACF` already leans towards half the rate, so the check may
+  exist without a new method.
+- It fits §22.1: a family publishes one rate and one SQI formed from its methods. With the
+  cepstrum inside HR3, combining it with `HR3_SAC` is a matter of one family; as family 4 it would
+  have needed a mechanism between families, which does not exist.
+
+**What it does to the rule.** §22 defined the number as "the domain in which the pulse is
+searched". The cepstral peak is read on a time axis (quefrency), so by that wording it would sit
+nearer HR2 than HR3. The number is therefore read as *what the methods of a family start from*:
+HR1 the waveform, beat by beat; HR2 the signal against itself delayed; HR3 the spectrum and
+anything computed from it; HR4 the state of a model oscillator that follows the signal. The first
+three families are the same under both wordings. The new wording is the session's, written into
+spec §5.5 with this change.
+
+**Why an oscillator locked to the signal, and not the other candidates.** A web search of
+2026-11-13 (`PulseNest/docs/algorithm_prior_art_index.md` §2.4 and §2.5) found three further
+domains that give a pulse rate: the time-frequency plane (wavelet ridge, synchrosqueezing), an
+oscillator locked to the signal (phase-locked loop, adaptive notch or comb filter, Kalman
+tracker) and phase space (attractor reconstruction). Alex kept only the second as a candidate. It
+works sample by sample, with no window, and its state is the answer: the oscillator's frequency is
+the rate and the quality of the lock is a by-product. It is not the "tracking across windows"
+layer, which smooths what a windowed method outputs. Alex took up neither of the other two. No
+reason is on record for the time-frequency plane (for context: the source used for the taxonomy
+files it under the frequency domain, and PulseNest's index lists US 8,255,029, one of the
+wavelet-ridge patents of CardioDigital / Nellcor, as in force). Of phase space, the judgement of the analysis session that
+discussed it with him: at most a quality index of the pulse shape, not a rate estimator, and
+nothing for the library.
+
+**What to keep in mind about HR4 (none of it measured).**
+1. *It is not an independent estimator.* A locked oscillator needs a starting frequency, from HR2
+   or HR3, and inherits an octave error of that seed: it complements, it does not break ties. A
+   maker says the same of its own adaptive comb filter: "a robust pulse rate tracker, but not a
+   good pulse rate finder" (Nellcor US 7,865,224, where an FFT every 10 s finds or corrects the
+   comb's frequency; read by an analysis session of 2026-11-12, first third of the text, not
+   re-read here). What it could add: a continuous phase, a faster response, and the amplitude of
+   the fundamental in red and IR by synchronous demodulation, for R and PI.
+2. *Nothing is measured on our captures or on neonates.* The hard case is a rate that changes fast
+   with a low PI: a narrow loop loses the lock and a wide loop follows the noise. If the signal
+   disappears the oscillator runs on alone, so a lock detector is part of the method, not an extra.
+3. *Patents listed in force* (Google Patents on 2026-11-13, read through summaries; claims not
+   read): Murata US 9,717,462 (a loop filter that changes mode on an estimate of the noise;
+   anticipated expiry 2034) and Verily US 9,826,940 (a bank of loops of which the best-correlated
+   are kept; 2036). The plain phase-locked loop is old art, but no citation for that is on record.
+   The claims are to be read before anything of this family is designed for the library; an
+   offline experiment does not depend on them.
+4. *The number has had three meanings.* `HR4` was the derivative peak detector until 2026-11-12
+   (now `HR1_DRV`, §22), the reserved cepstrum from then until 2026-11-13 (now a method of HR3),
+   and this candidate since. The spec tagged v0.119 and earlier says the first; the spec tagged
+   v0.120 says the second.
+
+**Not written, on purpose.** The handoff that carried the decision also proposed the labels
+`HR4_ANF` (adaptive notch) and `HR4_KF` (Kalman) and the fields `hr4` and `hr4_sqi`, the latter
+fed by the lock indicator. The scheme of §22.1 already implies those names; none is recorded
+until a method is evaluated. The method labels (`HR3_CEP` and `HR4_PLL`, as `HR1_THR`, `HR3_HPS`
+and `HR3_SAC`) are working labels of PulseNest's analyses and stay out of the library's
+identifiers while it does not need them (Alex, 2026-11-13).
+
+**Scope.** Text only (spec §5.5, this subsection and one note each in §22 and §22.1; PulseNest's
+`docs/nomenclature.md` and prior-art index). No code, no field and no version. Three text-only
+commits wait to be cited in the spec's §14 row of the next release: those of §22 and §22.1, which
+shipped inside v0.120 without being listed there, and this one.
 
 ## 23. PI-METHOD-2 — the median of 1 s sub-windows over a 7 s window (2026-11-11 → 2026-11-13)
 
