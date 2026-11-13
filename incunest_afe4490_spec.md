@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.119
+# incunest_afe4490 — Specification v0.120
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -295,7 +295,8 @@ struct AFE4490Config {
     // PI (Perfusion Index) algorithm parameters — decoupled from SpO2 (v0.101, rationale §11)
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
-    float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, independent of spo2_window_s)
+    float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, independent of spo2_window_s; 7 s since v0.120)
+    float             pi_subwindow_s;             // PI-METHOD-2 sub-window of the median [s] (v0.120; compile-time 1 s, read-only)
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
@@ -1012,8 +1013,8 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   modulation a 5 Hz ceiling read PI 25 % lower at 220 BPM than at 60 BPM; 15 Hz removes the HR
   dependence and admits no measurable noise (rationale §11). R keeps 5 Hz: there the same filter
   sits on both channels and cancels.
-- **AC and DC from the same sliding window** of `pi_window_s` seconds (default **6 s**;
-  `setPIWindowS()`, clamped to 2–12 s since v0.102, independent of `spo2_window_s`), not EMAs:
+- **AC and DC from the same sliding window** of `pi_window_s` seconds (default **7 s** since
+  v0.120, 6 s before; `setPIWindowS()`, clamped to 2–12 s since v0.102, independent of `spo2_window_s`), not EMAs:
   two circular buffers of block sums at the `alg_window_block_s` = 100 ms cadence (v0.103) — the
   squared band-passed samples (AC²) and the raw OT (DC), both accumulated at the full AFE rate,
   so a sum of block sums is the full-rate sum — each with a fixed-cost running sum, rebuilt at every
@@ -1031,17 +1032,41 @@ v0.101 PI is computed by its own function, `_pi_update_sample()`, with its own s
   this under-reads a per-beat Max−Min by 0–12 %; the library's PI was RMS-based (÷2.8–3.2) until
   v0.101.
 
+- **The AC² of the window is the median of its 1 s sub-windows, not its total (PI-METHOD-2,
+  v0.120; rationale §23).** Every run of `pi_subwindow_s` = 1 s (`_pi_sub_n` = 10 blocks; a
+  compile-time constant, reported read-only in `AFE4490Config::pi_subwindow_s`) of consecutive
+  blocks inside the window is a sub-window, one per block: 61 of them in the 7 s window, formed
+  from the block sums at fixed cost and ranked with a selection (`std::nth_element`) on every
+  completed block. A motion artefact only *adds* energy, to the sub-windows it touches and nothing
+  else, so the median is untouched by any burst shorter than `(pi_window_s − 3·pi_subwindow_s)/2`
+  = **2 s**, whatever its amplitude, and for a burst that fills the majority of the window the
+  median is a burst sub-window (above the window total: the method protects against a minority
+  of bad seconds, not a majority — test 10). The step of one block keeps the 100 ms cadence and
+  makes that immunity independent of where the burst falls. An even number of sub-windows (a
+  window that is not a whole number of seconds) takes the mean of the two middle values.
+  PI-METHOD-1 (v0.101–v0.119) took the RMS of the whole window and rose for a whole window after
+  every artefact, by construction. The whole-window number is still formed, as `_pi_box`, for
+  `spo2_pi_max` only (below), and is published nowhere. Measured and simulated costs: 1–1.5 %
+  low at rest on neonates at 120–180 BPM (the median of a skewed per-second distribution); up to
+  +10 % below 50 BPM, where a 1 s sub-window holds part of a beat. What was not adopted, and
+  why, is in rationale §23 (2 s sub-windows, 11–12 s windows, HR3-gated sub-windows, a
+  box/median quality ratio).
+
 ```
-PI = 2√2 · sqrt(Σ AC² / N) / (Σ DC / N) × 100  [%]      N = samples in the window = pi_window_s · fs (3000 at 500 Hz by default)
-   = AC_pp / DC × 100
+AC²_med = median_k ( Σ_{sub-window k} AC² / n_sub )      n_sub = pi_subwindow_s · fs (500 at 500 Hz); k = 1 … (pi_window_s − pi_subwindow_s)/0.1 s + 1 (61)
+PI      = 2√2 · sqrt(AC²_med) / (Σ DC / N) × 100  [%]      N = samples in the window = pi_window_s · fs (3500 at 500 Hz by default)
+        = AC_pp / DC × 100
+PI_box  = 2√2 · sqrt(Σ AC² / N) / (Σ DC / N) × 100          PI-METHOD-1's number; internal, read by spo2_pi_max only
 ```
 
 PI is `NaN` while its own window is still filling or while `probe_state != PROBE_APPLIED`
 (reset every sample while not applied, same contract as every other algorithm). With the default
-lengths both windows fill together; a PI window longer than the SpO2 window makes SpO2's SQI gate
-on PI bind for the difference — `_spo2_update()` still reads `AFE4490Data::pi` for its SQI (below) and
-explicitly guards against a not-yet-valid (`NaN`) PI rather than relying on `fmaxf`/`fminf`'s
-NaN pass-through.
+lengths PI's window (7 s) outlasts SpO2's (6 s) by one second, during which SpO2 is withheld with
+`HOLD_PI` (invisible in production behind the pulse gate's 10.24 s; test 1b of `test_spo2`): a PI
+window longer than the SpO2 window makes SpO2's PI bound bind for the difference —
+`_spo2_update()` still reads `AFE4490Data::pi` for its SQI (below), reads `_pi_box` for
+`spo2_pi_max`, and explicitly guards against a not-yet-valid (`NaN`) PI rather than relying on
+`fmaxf`/`fminf`'s NaN pass-through.
 
 `spo2_sqi` is a continuous [0–1] quality metric based on PI:
 
@@ -1049,7 +1074,7 @@ NaN pass-through.
 sqi = clamp((PI − 0.5) / (2.0 − 0.5), 0, 1)          PI > spo2_pi_max (20 %) → SpO2 invalid, SQI = 0
 ```
 
-PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2SqiPiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_method2_reg_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_method2_reg_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
+PI < 0.5 % → SQI = 0 (absent or very weak signal, no finger contact). PI ≥ 2.0 % → SQI = 1 (full quality). Thresholds from Nellcor/Masimo clinical reference — **in peak-to-peak units, which the PI is since v0.101**; until then the library's PI was RMS-based, so these gates fired ~3× too early (HOSPNAV SUBJ08: a normal neonate at PI 1.8 Masimo-units scored SQI 0.08 — rationale §11). Above `spo2_pi_max` (20 %, the top of every manufacturer's displayed range; `setSpO2SqiPiThresholds(lo, hi, max)`) the "PI" is a DC transient (the probe coming off before `probe_state` notices, an RF step), not perfusion: SpO2 is withheld instead of being reported with SQI = 1, which is what the output-only clamp of the ramp used to do. Since v0.120 this bound reads the whole-window PI (`_pi_box`, PI-METHOD-1's number), not the published median: the limit guards against sustained non-pulse energy, which the median is built to ignore (sustained events measured box/median of only 1.1–1.35; rationale §23). SQI is also forced to 0, with SpO2 = NaN, when a − b·R falls below `spo2_min` (70 %) or above `spo2_max` + `spo2_clamp_margin` (100 + 10 %; between 100 and 110 it is published as 100, as Nellcor and Masimo do — the upper reject is a sanity bound, not a signal gate; 3 % until v0.106, rationale §15) and, under R-METHOD-2 (v0.100), when the regression's correlation r is below `spo2_r_method2_reg_corr_min` (0.8): a fit that does not describe the data gives no SpO2. r itself is `AFE4490Data::spo2_r_method2_reg_corr`. On the HOSPNAV corpus r never fell below 0.83 with a pulse (window medians: p1 0.944, min 0.928); the threshold is provisional until r has been measured on pulse-less input (rationale §9).
 
 **Pulse gate (v0.110, rationale §17).** With `spo2_pulse_gate_enable` (default true; `setSpO2PulseGateEnable()`,
 `$SET spo2_pulse_gate_enable`) SpO2 is also withheld while `AFE4490Data::hr3` is NaN, i.e. while HR3's
@@ -1089,7 +1114,8 @@ crest factor — are of this method). Captures without the key: lib ≤ 0.100 �
 | Id | Definition | Library versions |
 |---|---|---|
 | `PI-METHOD-0` | √(`EmaChannel` var) / `EmaChannel` mean of OT_IR — the EMA shared with SpO2 (τ mean 2 s, τ var 6 s); RMS units. | ≤ v0.100 |
-| `PI-METHOD-1` | 2√2 · RMS(one-biquad band-pass `pi_bp_f_low_hz`–`pi_bp_f_high_hz`, 0.5–15 Hz, of OT_IR) / mean of raw OT_IR, both over the same `pi_window_s` sliding window (6 s; 2–12 s since v0.102; 100 ms block sums since v0.103 — implementation, same number); peak-to-peak units. | v0.101 → **current** |
+| `PI-METHOD-1` | 2√2 · RMS(one-biquad band-pass `pi_bp_f_low_hz`–`pi_bp_f_high_hz`, 0.5–15 Hz, of OT_IR) / mean of raw OT_IR, both over the same `pi_window_s` sliding window (6 s; 2–12 s since v0.102; 100 ms block sums since v0.103 — implementation, same number); peak-to-peak units. Rose for a whole window after every motion artefact. | v0.101 – v0.119 |
+| `PI-METHOD-2` | As PI-METHOD-1, except the AC² under the RMS: the **median** of the mean AC² of the window's overlapping `pi_subwindow_s` = 1 s sub-windows (one per 100 ms block; 61 in the 7 s window) instead of the window total; `pi_window_s` default 7 s. Untouched by bursts up to (W − 3L)/2 = 2 s; 1–1.5 % low at rest (neonates), up to +10 % below 50 BPM. The window total survives as `_pi_box` for `spo2_pi_max`. Rationale §23. | v0.120 → **current** |
 
 #### R methods and R curves (v0.98)
 
@@ -2223,8 +2249,8 @@ turn noise from an in-air or disconnected probe into a live-looking trace.
 **Start-up after an application (v0.118):** 0.2 s until `PROBE_APPLIED` is confirmed
 (`rsqm_probe_state_min_s`) + one window (`ppgdisp_norm_win_s`, 1 s) of warm-up → the trace is full
 size from its first sample in `NORM`. In `NORM_PI` it is at A = 0.5 until PI publishes
-(`pi_window_s`, 6 s after the application) and at A(PI) from then on: an unknown perfusion is shown
-at the minimum, not hidden (below), so the trace *grows* at 6 s rather than shrinking.
+(`pi_window_s`, 7 s after the application since v0.120, 6 s before) and at A(PI) from then on: an unknown perfusion is shown
+at the minimum, not hidden (below), so the trace *grows* at 7 s rather than shrinking.
 **`NORM` is a "normalized" display in the sense of ISO 80601-2-61:2026 201.3.241**, the kind its
 201.12.4.102 NOTE 3 says can mask an unreliable signal by itself: it is a laboratory mode, for
 comparison, not the product mode (rationale §21.6).
@@ -3196,7 +3222,8 @@ See §5.1, *Perfusion Index (PI)* and rationale §11.
 |---|---|---|---|---|
 | Band-pass lower cutoff | `pi_bp_f_low_hz` | 0.5 Hz | Same 30 BPM floor as `hr2_f_low_hz`/`spo2_bp_f_low_hz`, through PI's own private `BiquadFilter` instance ("paths share nothing", §5.3.1) | AC waveform extraction — replaces the old EMA subtraction |
 | Band-pass upper cutoff | `pi_bp_f_high_hz` | 15.0 Hz | HR3's ceiling (3rd harmonic of 260 BPM = 13 Hz): a magnitude needs the harmonics — 5 Hz read −25 % at 220 vs 60 BPM on the MS100; noise above 10 Hz unmeasurable in the lowest-PI decile of a neonate (rationale §11) | HR-independence of PI |
-| Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; blocks of `alg_window_block_s` = 100 ms, buffers `alg_window_buf_len_max` = 120) | 6 s | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements) | PI settling time / noise |
+| Sliding-window length | `pi_window_s` (`setPIWindowS()`, 2–12 s; blocks of `alg_window_block_s` = 100 ms, buffers `alg_window_buf_len_max` = 120) | 7 s (v0.120; 6 s before) | Shared by AC and DC; settles exactly instead of asymptotically; runtime since v0.102 and independent of `spo2_window_s` (two measurands, two requirements). 7 s = 6 s + 1 s so that the median of 1 s sub-windows tolerates 2 s of burst, (W − 3L)/2, at one more second of latency; 9 s would tolerate 3 s, 11–12 s (Philips' 10 s default is the only published PI window) 4–5 s — chosen by Alex 2026-11-13, rationale §23 | PI settling time / noise / burst immunity |
+| Sub-window of the median | `pi_subwindow_s` (compile-time, `_pi_sub_n` = 10 blocks; read-only in `AFE4490Config`) | 1 s | PI-METHOD-2 (v0.120). 1 s holds 2–3 neonatal beats; simulated median bias +6–10 % at 40–45 BPM, 0 at ≥ 60 BPM. 2 s would remove that bias at the cost of 1.5 s of immunity per second of sub-window (12 s window for the same 2 s); the step of one block (100 ms) keeps the cadence and makes the immunity alignment-independent. Rationale §23 | burst immunity vs low-rate bias |
 | RMS → peak-to-peak | `pi_rms_to_pp_ratio` | 2√2 | Exact for a sinusoid; band-passed PPG measured 2.79/2.92 (neonates), 3.0–3.2 (MS100) → under-reads a per-beat Max−Min by 0–12 %. Per-beat peaks (Masimo/Nellcor exact) need a beat detector: PILAB option, not library | PI in the industry's units |
 | PI upper bound | `spo2_pi_max` | 20 % | Top of the DISPLAYED range of Masimo 0.02–20 (LAB-9204A Rad-57 manual; whitepaper lab3410f defines PI only as pulsatile/non-pulsatile), Mindray 0.05–20 (BeneVision N-Series operator's manual), Nellcor 0.03–20 (PM-1000N service manual, Table 2-1 note 6); links in PulseNest `docs/ppg_neonatal_manufacturer_references.md`. None discloses its estimator; ISO 80601-2-61:2026 201.3.245 defines %mod only as ≈ AC/DC × 100. A display convention, not a physiological limit (open: PulseNest BACKLOG 2026-10-22); above it the value is a DC transient | PI > max → SpO2 invalid, SQI = 0 (`setSpO2SqiPiThresholds(lo, hi, max)`) |
 | Pulse gate | `spo2_pulse_gate_enable` | true | §5.1 *Pulse gate*; rationale §17 (measured 2026-10-20) | SpO2 withheld (reason 7) while `AFE4490Data::hr3` is NaN (`setSpO2PulseGateEnable()`) |
@@ -3557,6 +3584,18 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.120  | 2026-11-13    | **PI-METHOD-2: the median of 1 s sub-windows, 7 s window (§5.1; Alex 2026-11-13).**     |
+|         |               | PI's AC² is the median of the mean AC² of the window's overlapping 1 s sub-windows (one |
+|         |               | per 100 ms block, 61 of them) instead of the window total; `pi_window_s` 6 → 7 s. A     |
+|         |               | burst up to (W − 3L)/2 = 2 s no longer moves PI (PI-METHOD-1 rose for a whole window  |
+|         |               | after every artefact, by construction: PulseNest `docs/pi_artifact_robustness_20261111.md`, |
+|         |               | 69 neonatal bursts; prior art `docs/pi_motion_prior_art_20261111.md`: the industry's PI |
+|         |               | is per accepted beat). Costs: 1–1.5 % low at rest, up to +10 % below 50 BPM, first PI  |
+|         |               | 7 s after the application; SpO2 waits that second too (`HOLD_PI`, behind the pulse     |
+|         |               | gate). `spo2_pi_max` keeps reading the whole-window PI (`_pi_box`, internal). New        |
+|         |               | read-only `AFE4490Config::pi_subwindow_s` (1 s). **Breaking (data contract):** the PI   |
+|         |               | column of a capture changes meaning; `pi_method_id` says which. No API change. Tests    |
+|         |               | 9–11 of `test_pi`; test 1b of `test_spo2` pins the extra second. Rationale §23.          |
 | v0.119  | 2026-11-10    | **`ppg_disp` steep high side (§5.9; brief of the IncuNest session, Alex 2026-11-10).**   |
 |         |               | Two low-pass biquads at `f_high` follow the band-pass, with the Q pair of a 5th-order   |
 |         |               | Butterworth (the band-pass supplies its real pole): `f_high` stays the −3 dB corner of  |

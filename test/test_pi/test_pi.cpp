@@ -8,10 +8,13 @@
 // mirrors test_hr2.cpp's style, minus the "_for_test" synchronous wrapper.
 //
 // PI is reported in PEAK-TO-PEAK units (2√2·RMS of the 0.5–15 Hz band-passed OT, over the mean of
-// the same 6 s window): for a sine of amplitude A on a DC of D, PI = 2A/D × 100 exactly (up to
+// the same 7 s window): for a sine of amplitude A on a DC of D, PI = 2A/D × 100 exactly (up to
 // the band-pass's in-band gain). probe_state (RSQM's classification) is consumed, never computed.
+// PI-METHOD-2 (v0.120): the RMS is that of the MEDIAN-energy 1 s sub-window of the window (one
+// sub-window per 100 ms block, 61 of them); on a stationary sine every sub-window holds the same
+// energy, so tests 1–7 read the same numbers as PI-METHOD-1 did. Tests 9–11 are the method's own.
 
-static constexpr int PI_BUF_LEN   = 60;    // 6 s of 100 ms blocks (alg_window_block_s, v0.103) — pi_window_s default
+static constexpr int PI_BUF_LEN   = 70;    // 7 s of 100 ms blocks (alg_window_block_s, v0.103) — pi_window_s default (v0.120)
 static constexpr int PI_BLOCK_RAW = 50;    // raw samples per block @ 500 Hz AFE rate
 static constexpr int PI_BUF_RAW   = PI_BUF_LEN * PI_BLOCK_RAW;  // 3000 raw samples
 
@@ -32,7 +35,7 @@ static void feed_pi_sine(INCUNEST_AFE4490& afe, float a_ir, float freq_hz, float
 void setUp() {}
 void tearDown() {}
 
-// ── Test 1: not valid until the 6 s window is full ───────────────────────────
+// ── Test 1: not valid until the 7 s window is full ───────────────────────────
 void test_pi_not_valid_until_window_full() {
     INCUNEST_AFE4490 afe;
     feed_pi_sine(afe, A_IR, 2.0f, 500.0f, PI_BUF_RAW / 2);
@@ -89,7 +92,7 @@ void test_pi_block_rate_invariant_to_sample_rate() {
 // ── Test 6: PROBE_DISCONNECTED/NOT_APPLIED forces invalid + resets state ─────
 // Mirrors test_hr2_not_applied_resets: PI never classifies presence itself, only consumes
 // probe_state. Disconnecting must force pi=NaN, reset the sliding windows, and require a full
-// fresh 6 s window once PROBE_APPLIED resumes (never an instant resume from stale state).
+// fresh 7 s window once PROBE_APPLIED resumes (never an instant resume from stale state).
 void test_pi_not_applied_resets() {
     INCUNEST_AFE4490 afe;
     feed_pi_sine(afe, A_IR, 2.0f, 500.0f, PI_BUF_RAW + 1000);
@@ -129,7 +132,7 @@ void test_pi_window_setter() {
     feed_pi_sine(afe, A_IR, 2.0f, 500.0f, 2 * PI_BLOCK_RAW);
     TEST_ASSERT_FLOAT_WITHIN(0.30f, 5.0f, afe.test_pi());
     // Changing the length mid-stream empties the window.
-    afe.setPIWindowS(6.0f);
+    afe.setPIWindowS(7.0f);
     TEST_ASSERT_EQUAL_UINT32(0, afe.test_pi_buf_count());
     feed_pi_sine(afe, A_IR, 2.0f, 500.0f, 1000);
     TEST_ASSERT_TRUE(isnan(afe.test_pi()));
@@ -138,10 +141,68 @@ void test_pi_window_setter() {
 // ── Test 8: the PI definition is named (v0.106) — getConfig() carries PI_METHOD_ID ──
 void test_pi_method_is_named() {
     INCUNEST_AFE4490 afe;
-    TEST_ASSERT_EQUAL_STRING("PI-METHOD-1", PI_METHOD_ID);
+    TEST_ASSERT_EQUAL_STRING("PI-METHOD-2", PI_METHOD_ID);
     TEST_ASSERT_EQUAL_STRING(PI_METHOD_ID, afe.getConfig().pi_method_id);
     afe.setPIWindowS(3.0f);                                   // a parameter change is not a new method
     TEST_ASSERT_EQUAL_STRING(PI_METHOD_ID, afe.getConfig().pi_method_id);
+}
+
+// Helper for the artefact tests: a 2 Hz sine of amplitude A (PI 5 %) carrying, for `burst_raw`
+// samples, an added 3 Hz component of amplitude `burst_gain`·A — a motion burst that only ADDS
+// band energy, as a real one does.
+static void feed_pi_burst(INCUNEST_AFE4490& afe, float burst_gain, int burst_raw) {
+    for (int i = 0; i < burst_raw; i++) {
+        float x = OT_DC + A_IR * SCALE * (sinf(2.0f * (float)M_PI * 2.0f * i / 500.0f)
+                                        + burst_gain * sinf(2.0f * (float)M_PI * 3.0f * i / 500.0f));
+        afe.test_feed_pi(x, ProbeState::PROBE_APPLIED);
+    }
+}
+
+// ── Test 9: PI-METHOD-2 ignores a burst shorter than (W − 3·L)/2 = 2 s; the box PI does not ──
+// A 1 s burst of 4× the beat touches at most 2 s of sub-windows (plus the band-pass's tail):
+// fewer than the 31 of 61 a median needs. Checked 1 s after the burst, when it sits whole inside
+// the window: PI-METHOD-2 within 5 % of the clean 5 %, while the window-energy PI (what
+// PI-METHOD-1 published and spo2_pi_max still reads, test_pi_box()) reads more than 1.5× that.
+void test_pi_method2_ignores_short_burst() {
+    INCUNEST_AFE4490 afe;
+    feed_pi_sine(afe, A_IR, 2.0f, 500.0f, PI_BUF_RAW + 1000);
+    const float clean = afe.test_pi();
+    TEST_ASSERT_FLOAT_WITHIN(0.30f, 5.0f, clean);
+    TEST_ASSERT_FLOAT_WITHIN(0.05f * clean, clean, afe.test_pi_box());   // stationary: box = median
+    feed_pi_burst(afe, 4.0f, 500);
+    feed_pi_sine(afe, A_IR, 2.0f, 500.0f, 500);
+    TEST_ASSERT_FLOAT_WITHIN(0.05f * clean, clean, afe.test_pi());
+    TEST_ASSERT_GREATER_THAN_FLOAT(1.5f * clean, afe.test_pi_box());
+    // Once the burst has left the window the two agree again.
+    feed_pi_sine(afe, A_IR, 2.0f, 500.0f, PI_BUF_RAW);
+    TEST_ASSERT_FLOAT_WITHIN(0.05f * clean, clean, afe.test_pi());
+    TEST_ASSERT_FLOAT_WITHIN(0.05f * clean, clean, afe.test_pi_box());
+}
+
+// ── Test 10: the limit of the method — a 4 s burst does move PI-METHOD-2 ──
+// Longer than the window's immunity: the burst fills the majority of the sub-windows, and then
+// the median is a burst sub-window, ABOVE the window-energy PI (a mean of 4 s of burst and 3 s of
+// beat). The median protects against a minority of bad seconds, not a majority. Pinned so that
+// the limit stays documented, not so that it is desired.
+void test_pi_method2_follows_long_burst() {
+    INCUNEST_AFE4490 afe;
+    feed_pi_sine(afe, A_IR, 2.0f, 500.0f, PI_BUF_RAW + 1000);
+    const float clean = afe.test_pi();
+    feed_pi_burst(afe, 4.0f, 2000);
+    TEST_ASSERT_GREATER_THAN_FLOAT(1.3f * clean, afe.test_pi());
+    TEST_ASSERT_GREATER_THAN_FLOAT(afe.test_pi_box(), afe.test_pi());
+}
+
+// ── Test 11: an even number of sub-windows (a window that is not a whole number of seconds) ──
+// 2.1 s → 21 blocks → 12 sub-windows: the median is the mean of the two middle values. On a
+// stationary sine the number is the same 5 %; the branch is exercised, not just compiled.
+void test_pi_method2_even_subwindow_count() {
+    INCUNEST_AFE4490 afe;
+    afe.setPIWindowS(2.1f);
+    TEST_ASSERT_EQUAL_INT(21, afe.test_pi_buf_n());
+    feed_pi_sine(afe, A_IR, 2.0f, 500.0f, 21 * PI_BLOCK_RAW + 1000);
+    TEST_ASSERT_FLOAT_WITHIN(0.30f, 5.0f, afe.test_pi());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, afe.getConfig().pi_subwindow_s);
 }
 
 int main() {
@@ -154,5 +215,8 @@ int main() {
     RUN_TEST(test_pi_not_applied_resets);
     RUN_TEST(test_pi_window_setter);
     RUN_TEST(test_pi_method_is_named);
+    RUN_TEST(test_pi_method2_ignores_short_burst);
+    RUN_TEST(test_pi_method2_follows_long_burst);
+    RUN_TEST(test_pi_method2_even_subwindow_count);
     return UNITY_END();
 }

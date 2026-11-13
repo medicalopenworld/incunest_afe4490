@@ -2470,6 +2470,138 @@ schemes.
 **Scope.** Text only (spec §5.5, this subsection, PulseNest's `docs/nomenclature.md`). No code, no
 field and no version: it ships with the next release, cited in the spec's §14 row with §22.
 
+## 23. PI-METHOD-2 — the median of 1 s sub-windows over a 7 s window (2026-11-11 → 2026-11-13)
+
+**The problem (Alex, 2026-11-11, seen live on a neonate).** Every motion artefact raised the PI for
+5–6 s. PI-METHOD-1 (§11, §14) is the RMS of the band-passed OT over a 6 s sliding window: the
+artefact's energy enters the total and stays there for a whole window, by construction. The
+operator sees a perfusion that "improves" with every kick.
+
+**Prior art, read before designing** (PulseNest `docs/pi_motion_prior_art_20261111.md`, a
+separate session, 2026-11-11; manuals, patents and neonatal studies of Masimo, Nellcor, Philips,
+Nihon Kohden, Mindray, GE, Nonin, Edan, Contec and the reference chips):
+
+- The industry's PI is per *accepted* beat, and rejected beats do not enter it: Masimo computes
+  it pulse by pulse and, for the trend, deletes unstable periods before a 30 s trimmed mean
+  (US 11,234,655 dependent claims); Nellcor's amplitude bar and motion metric are per qualified
+  pulse; Nonin excludes "display holds". Our window RMS integrates artefact energy by design.
+- Artefact only *raises* PI, so the robust statistic is one-sided: Masimo displays
+  min(baseline from clean pulses, current) under motion (US 8,983,564 family, in force to
+  2027–2028: "two PI techniques, one per pulse and one over several pulses, output the lowest";
+  a median of equal sub-windows of one technique is a different construction — a note, not
+  legal advice); its trend trims the five highest of 25.
+- Nobody shows an inflated PI silently: Philips replaces Perf by "-?-" under NoisySignal, Nihon
+  Kohden and GE show dashes, Masimo holds the lower value and keeps confidence (Signal IQ) apart.
+- Published PI windows are longer than ours: Philips averages Perf with the SpO2 window, 10 s by
+  default also for neonates (5–20 s); Masimo *Long*/*Short* without numbers, 30 s trend; GE's
+  1996 patent 2 s updated every 1 s. Nobody publishes 6 s. No study reports neonatal artefact
+  durations; our 69 bursts are the only such numbers.
+- Nothing like a box/median ratio is published as an output; its ingredients (current amplitude
+  against a long-term clean average) are Nellcor's motion metric, inside the quality logic.
+
+**Measured first (PulseNest `docs/pi_artifact_robustness_20261111.md`,
+`experiments/pi_artifact_robustness_20261111.py`; 17 HOSPNAV sessions, replica of PI-METHOD-1
+within 0.1 %, 173 min applied, 69 isolated bursts of ≥ 3 s).** A median of N non-overlapping
+1 s chunks, N = 5 … 12, against today's PI:
+
+| Variant | tolerates | /PI at rest | 6 s wander, median | burst peak, median | time above +20 %, median |
+|---|---|---|---|---|---|
+| PI-METHOD-1 | – | 1 | 8–50 % | ×1.5–2.0 | 5.8–7.0 s |
+| median of 5 | 2 s | 0.92–0.99 | 9–53 % | ×1.7–2.3 (worse) | 2.7–5.2 s |
+| median of 7 | 3 s | 0.91–0.99 | 7–46 % | ×1.5–1.75 | 1.6–4.8 s |
+| median of 9 | 4 s | 0.91–0.99 | 6–38 % | ×1.5–1.7 | 0.9–4.0 s |
+| median of 11–12 | 5 s | 0.92–0.99 | 5–32 % | ×1.2–1.6 | 0.3–2.2 s |
+
+(each cell spans the four subjects). The bias at rest does not depend on N (1–1.5 % in three
+subjects, 6–9 % in the one that moved); no N removes the rise, because part of these events is
+longer than 5 s or is a real change of amplitude after the movement. `spo2_pi_max` must keep
+reading the whole window's energy: sustained non-pulse events read a box/median ratio of only
+1.1–1.35, i.e. the median is built to ignore what the limit exists for. The box/median ratio Q
+predicts the SpO2 error (> 4 points in 2.4 % of the windows with Q < 1.2, 18.6 % with Q > 1.5)
+and would add to the pulse gate; it is blind to artefacts that fill the whole window.
+
+**Alex's intention (2026-11-11): 7 s with a median of seven, one second more for one second of
+immunity.** Then (2026-11-13) the observation that at 30 BPM a 1 s chunk holds half a beat: the
+RMS needs 2 s. And that a small step between sub-windows (100 ms) would average that error
+away.
+
+**Simulated (2026-11-13, PulseNest `experiments/pi_subwindow_median_bias_20261113.py`):** a
+synthetic pulse (systolic gaussian plus dicrotic bump, mean removed), the window start swept over
+one beat, median-of-sub-windows PI over the whole-window PI — mean over phases (= bias) and
+range (= wander as the window slides):
+
+| L | step | W | N | 30 BPM | 40 BPM | 45 BPM | 60 | 90 BPM | 150 BPM |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 s | 1 s | 7 s | 7 | 0.96 (0.56–1.25) | 1.09 (0.91–1.17) | 1.06 (0.93–1.12) | 1.00 | 1.00 (0.89–1.10) | 1.00 (0.93–1.06) |
+| 1 s | 0.1 s | 7 s | 61 | 1.00 (0.85–1.12) | 1.10 (1.06–1.15) | 1.06 (1.01–1.09) | 1.00 | 1.00 (0.95–1.05) | 1.00 (0.95–1.04) |
+| 2 s | 1 s | 8 s | 7 | 1.00 | 0.96 (0.91–1.05) | 1.00 (0.91–1.08) | 1.00 | 1.00 | 1.00 |
+| 2 s | 0.1 s | 8 s | 61 | 1.00 | 0.96 (0.92–0.98) | 1.00 (0.94–1.05) | 1.00 | 1.00 | 1.00 |
+
+Three facts came out of it:
+
+1. *The fine step removes the wander, not the bias.* The range halves or better (±10 → ±5 % at
+   90 BPM); the mean at 40–45 BPM stays +6–10 % with L = 1 s. The median of the distribution over
+   phases is not its mean, and the mean is the true RMS: averaging converges to the wrong number.
+   A sinusoid gives the exact RMS over any half period; the bias is the harmonics' (crest factor
+   2.8–3.2), with the systolic second heavier than the diastolic one.
+2. *L = 2 s removes the bias* (≤ 4 % at 40 BPM, 0 elsewhere) and halves the wander again.
+3. *Immunity is a closed formula.* With sub-windows of length L, step s and N of them, the window
+   is W = L + (N − 1)·s and a burst contaminates every sub-window it touches, so the median is
+   untouched up to D_max ≈ (W − 3·L)/2 + s (best alignment; exactly (W − 3·L)/2 with a fine step).
+   Each second of L costs 1.5 s of immunity; each second of W buys 0.5 s; a smaller step buys
+   nothing but uniformity (the extra values overlap and are contaminated together) and the output
+   cadence.
+
+**The options, closed** (all with a step of one block, 100 ms — the only step that keeps the PI
+updating every 100 ms as it does today; a 1 s step would move the sub-window boundaries once a
+second and make PI step; the cost of a median of 61 every 100 ms is microseconds on the ESP32-S3):
+
+| L | W | N | tolerates | first PI | bias at 40–45 BPM | note |
+|---|---|---|---|---|---|---|
+| 1 s | 7 s | 61 | 2 s | 7 s | +6–10 % | **chosen** |
+| 1 s | 9 s | 81 | 3 s | 9 s | +6–10 % | |
+| 2 s | 8 s | 61 | 1 s | 8 s | ≤ 4 % | |
+| 2 s | 12 s | 101 | 3 s | 12 s | ≤ 4 % | inside Philips' 5–20 s |
+
+**Decision (Alex, 2026-11-13): L = 1 s, step 100 ms, W = 7 s.** Why this and not the others:
+
+- The 7 s keep Alex's intention and cost one second of latency on the first PI after an
+  application (and one second of `HOLD_PI` on SpO2 behind the pulse gate's 10 s, invisible).
+- The 1 s sub-window pays its bias only below 50 BPM — severe neonatal bradycardia — and the bias
+  (+6–10 %) is of the order of the error PI-METHOD-1 already carries (the 2√2 sinusoid assumption
+  under-reads a per-beat Max−Min by 0–12 %) and of PI-METHOD-1's own phase wander at those rates
+  (2–4 %). Immunity, the purpose of the change, would have cost 1.5 s per second of L.
+- Two seconds of immunity are what the corpus says a median of 7 × 1 s buys (peak ×1.5–1.75, time
+  above +20 % 1.6–4.8 s); the real events last ≥ 3 s, so 9 s would gain little on them and 11–12 s
+  (what the measurement favoured for the peak) was judged too slow for a perfusion display.
+- The fine step over the coarse one: the same tolerance *whatever the alignment* (2 s flat
+  instead of 2–3 s by luck), half the wander at rest, today's cadence, no extra state (the
+  sub-windows are read off the block buffer that already exists).
+
+**What stays and what is deferred.**
+
+- `spo2_pi_max` reads the whole-window PI (`_pi_box`, internal), as measured above; the SQI ramp
+  and `NORM_PI` read the published median PI.
+- *Not adopted now, re-analysable later:* 2 s sub-windows (if the bias below 50 BPM is ever
+  measured to matter on a real bradycardic neonate — the simulation is of one pulse shape);
+  a 10–12 s *display* window with the shorter one kept for the gates (Philips' range); dropping
+  the sub-windows HR3 rejects before the median (the prior art's stricter form, needs the
+  HR3 gate per sub-window); publishing Q = box/median into the quality logic (its own measurement
+  and decision); holding the last valid PI with a mark while the pulse gate is closed (Nihon
+  Kohden holds 30 s, then blanks).
+- A burst that fills the *majority* of the window makes the median a burst sub-window, above the
+  whole-window PI (test 10 of `test_pi`): the method protects against a minority of bad seconds.
+  Nothing is lost against PI-METHOD-1 there (both are wrong), but it says why no gate should
+  compare median against box expecting median ≤ box.
+- The identity rule of §14 holds: `PI_METHOD_ID` = `PI-METHOD-2`; `pi_window_s` stays a
+  parameter (7 s default), `pi_subwindow_s` is compile-time and read-only in the configuration.
+
+**Validation.** Unity tests 9–11 of `test_pi` (a 1 s burst of 4× leaves PI within 5 % while the
+box reads > 1.5×; a 4 s burst moves it; an even sub-window count); test 1b of `test_spo2` pins
+the extra second. The replica of the method against the HOSPNAV corpus is PulseNest's
+`experiments/pi_artifact_robustness_20261111.py`, whose "median of 7 × 1 s" row (non-overlapping,
+DC at 6 s) is the nearest measured neighbour of what ships.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

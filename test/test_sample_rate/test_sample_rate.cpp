@@ -209,13 +209,13 @@ void test_time_parameters_hold_across_catalogue() {
 
         // --- Sample counts derived from the AFE rate: samples / fs must equal the seconds asked.
         // SpO2 and PI windows (v0.102): length in blocks over the block rate really achieved
-        // (100 ms blocks, v0.103) must equal the window in seconds — default 6 s, and a non-default 4 s
+        // (100 ms blocks, v0.103) must equal the window in seconds — default 6 s (SpO2) / 7 s (PI), and a non-default 4 s
         // through the setter (exercised, per the second rule above).
         snprintf(msg, sizeof(msg), "%u Hz: SpO2 window drifted from 6 s", hz);
         TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.05f, 6.0f,
             (float)afe.test_spo2_buf_n() / afe.test_spo2_block_rate_hz(), msg);
-        snprintf(msg, sizeof(msg), "%u Hz: PI window drifted from 6 s", hz);
-        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.05f, 6.0f,
+        snprintf(msg, sizeof(msg), "%u Hz: PI window drifted from 7 s", hz);
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.05f, 7.0f,                       // 7 s since v0.120
             (float)afe.test_pi_buf_n() / afe.test_pi_block_rate_hz(), msg);
         afe.setSpO2WindowS(4.0f);
         snprintf(msg, sizeof(msg), "%u Hz: SpO2 window setter (4 s) not honoured", hz);

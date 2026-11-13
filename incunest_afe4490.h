@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.119 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.120 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.119"
+#define INCUNEST_AFE4490_VERSION "0.120"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -168,8 +168,10 @@ constexpr size_t SPO2_R_ID_LEN = 48;   // buffer for an R method / R curve id, t
 // changes if and only if, for the same input, PI comes out as a different number (AC estimator,
 // DC estimator, units, band) — never for a parameter that already travels in the configuration
 // (pi_window_s, pi_bp_f_*). Registry: spec §5.1, "PI methods". There is one method; the id exists
-// so that a capture says which definition its PI column holds (PI-METHOD-0 was 3× smaller).
-constexpr char PI_METHOD_ID[] = "PI-METHOD-1";   // 2√2·RMS(band-pass 0.5–15 Hz) / mean OT, one sliding window
+// so that a capture says which definition its PI column holds (PI-METHOD-0 was 3× smaller;
+// PI-METHOD-1, v0.101–v0.119, was the RMS of the whole window — it rose for a window after
+// every motion artefact).
+constexpr char PI_METHOD_ID[] = "PI-METHOD-2";   // 2√2·sqrt(median of the 1 s sub-window mean AC², band-pass 0.5–15 Hz) / mean OT, one 7 s sliding window
 
 // DiagCode bitmask flags — returned in AFE4490Data::diag_code (uint32_t, 32 bits)
 // Multiple bits may be set simultaneously.
@@ -800,7 +802,8 @@ struct AFE4490Config {
     char              pi_method_id[SPO2_R_ID_LEN];  // how this library computes PI (PI_METHOD_ID, v0.106)
     float             pi_bp_f_low_hz;             // band-pass lower cutoff [Hz]
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
-    float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, setPIWindowS)
+    float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, setPIWindowS; 7 s since v0.120)
+    float             pi_subwindow_s;             // PI-METHOD-2 sub-window of the median [s] (v0.120; compile-time, 1 s, read-only)
     // HR1 algorithm parameters
     float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
     float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
@@ -1726,8 +1729,8 @@ private:
     //     sample per 20 ms block — a true 50 Hz decimation of the 0.5–15 Hz band; at 100 ms that
     //     would alias, hence the block sum) — each with a fixed-cost running sum. Numerator and
     //     denominator share the window, so PI
-    //     settles EXACTLY at pi_window_s (default 6 s; runtime 2–12 s since v0.102, independent of
-    //     the SpO2 window) with no EMA, no seed and no lead/lag between the
+    //     settles EXACTLY at pi_window_s (default 7 s since v0.120, 6 s before; runtime 2–12 s
+    //     since v0.102, independent of the SpO2 window) with no EMA, no seed and no lead/lag between the
     //     two — Masimo's "λDC = average value of the signal" over the same span as the AC. (A 2 s
     //     EMA measured within ±0.25 % of this window mean on HOSPNAV; the choice is structural,
     //     not numerical — rationale §11.) No slow/async Task is needed (unlike HR2/HR3's
@@ -1735,6 +1738,11 @@ private:
     //   - PI reported in PEAK-TO-PEAK units, the industry's definition (Nellcor Max−Min, Masimo
     //     λmax−λmin; every published neonatal threshold): pp = 2√2·RMS of the band-passed signal,
     //     exact for a sinusoid; the band-passed PPG measured 2.8–3.2 (rationale §11).
+    //   - PI-METHOD-2 (v0.120, rationale §23): the AC² the RMS is taken from is the MEDIAN of the
+    //     window's overlapping 1 s sub-windows (_pi_sub_n blocks, one sub-window per block), not
+    //     the window total: a motion artefact raises the energy of the sub-windows it touches and
+    //     nothing else, so bursts up to (W − 3·L)/2 = 2 s leave PI untouched. The window total's
+    //     PI (PI-METHOD-1's number) is still formed, as _pi_box, for spo2_pi_max only.
     BiquadFilter _pi_bpf;
     WindowBlockClock  _pi_block_clock;           // alg_window_block_s clock of this window (v0.103)
     float    _pi_ac_buf[alg_window_buf_len_max];  // circular buffer of block sums of the band-passed samples, SQUARED
@@ -1746,6 +1754,8 @@ private:
     int      _pi_buf_n;               // live window length [blocks] = round(pi_window_s · rate)
     int      _pi_buf_idx;             // shared by both buffers (same cadence)
     uint32_t _pi_buf_count;
+    float    _pi_box;                 // PI of the whole window's energy (PI-METHOD-1's number), for spo2_pi_max; NaN with pi
+    static constexpr int _pi_sub_n = 10;   // sub-window length [blocks] = pi_subwindow_s (1 s) / alg_window_block_s (v0.120)
     void _pi_update_sample(float ot_ir, ProbeState probe_state);
     // ppg_disp (§5.9): x = −BPF(ot_ch) in; writes _current_data.ppg_disp per _ppgdisp_mode (v0.116)
     void  _ppgdisp_process(float ot_ch, ProbeState probe_state);   // band-pass + LP4 (reset while not applied), negate, mode
@@ -2057,10 +2067,11 @@ public:
 
     // ppg_disp display modes (v0.116, §5.9). test_feed_ppgdisp() runs the production path from the
     // OT of the display channel: band-pass, negation, mode. test_set_pi() plants the PI that
-    // NORM_PI reads (PI-METHOD-1 is not run here).
+    // NORM_PI reads and the box PI that spo2_pi_max reads (PI-METHOD-2 is not run here).
     void  test_feed_ppgdisp(float ot_ch, ProbeState probe_state) { _ppgdisp_process(ot_ch, probe_state); }
     float test_ppg_disp()          const { return _current_data.ppg_disp; }
-    void  test_set_pi(float pi)          { _current_data.pi = pi; }
+    void  test_set_pi(float pi)          { _current_data.pi = pi; _pi_box = pi; }
+    float test_pi_box()            const { return _pi_box; }   // PI-METHOD-1's number (v0.120)
     bool  test_ppgdisp_warmed()    const { return _ppgdisp_tracker.warmed(); }
     float test_ppgdisp_frame_hi()  const { return _ppgdisp_tracker.hi(); }
     float test_ppgdisp_frame_lo()  const { return _ppgdisp_tracker.lo(); }

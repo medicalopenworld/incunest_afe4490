@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.119 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.120 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -7,6 +7,7 @@
 #include "incunest_afe4490.h"
 #include <math.h>
 #include <string.h>
+#include <algorithm>   // std::nth_element — the median of PI-METHOD-2's sub-windows (v0.120)
 
 static const char* TAG = "incunest_afe4490";
 
@@ -116,7 +117,19 @@ namespace {
     // neonatal capture. R keeps 5 Hz because there the same filter sits on both channels and cancels.
     constexpr float    pi_bp_f_low_hz        = 0.5f;    // Hz — 30 BPM floor, same reasoning as spo2_bp_f_low_hz
     constexpr float    pi_bp_f_high_hz       = 15.0f;   // Hz — 3rd harmonic of hr_max_bpm (13 Hz) with margin, as HR3
-    constexpr float    pi_window_s           = 6.0f;    // s — sliding-window length (runtime since v0.102, setPIWindowS)
+    // PI-METHOD-2 (v0.120, rationale §23): the window is 7 s and the AC² of the window is the MEDIAN
+    // of its overlapping 1 s sub-windows (one per 100 ms block), not its total. A motion artefact
+    // raises the energy of every sub-window it touches and nothing else, so the median ignores a
+    // burst up to (W − 3·L)/2 = 2 s long whatever its amplitude (measured on 69 neonatal bursts,
+    // PulseNest docs/pi_artifact_robustness_20261111.md: peak ×1.5–1.75 instead of ×1.5–2.0, time
+    // above +20 % 1.6–4.8 s instead of 5.8–7.0 s). 1 s sub-windows hold 2–3 neonatal beats; below
+    // 50 BPM they hold part of a beat and the median reads up to +10 % (simulation, §23) — accepted:
+    // under the 0–12 % of the 2√2 assumption and only in severe bradycardia. 2 s sub-windows remove
+    // that bias but cost 1.5 s of immunity per second of sub-window (12 s window for the same 2 s).
+    // The step of one block keeps the 100 ms update cadence and makes the immunity independent
+    // of the burst's alignment with the sub-windows.
+    constexpr float    pi_window_s           = 7.0f;    // s — sliding-window length (runtime since v0.102, setPIWindowS; 6 s until v0.119)
+    constexpr float    pi_subwindow_s        = 1.0f;    // s — sub-window length of the median (PI-METHOD-2, v0.120; compile-time)
     // RMS → peak-to-peak, exact for a sinusoid. The band-passed PPG measured 2.79/2.92 on two
     // neonates and 3.0–3.2 on the MS100, so this under-reads a per-beat Max−Min by 0–12 %; the
     // alternative (per-beat peaks) needs a beat detector and is kept for PILAB (rationale §11).
@@ -441,7 +454,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_r_curve_a(spo2_r_curve_a_default), _spo2_r_curve_b(spo2_r_curve_b_default),
       _pi_bpf(), _pi_block_clock(),
       _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_ac_block_sum(0.0f), _pi_dc_block_sum(0.0f),
-      _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0),
+      _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0), _pi_box(NAN),
       _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
       _hr1_last_peak_idx(0), _hr1_sample_idx(0),
@@ -1270,6 +1283,7 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     cfg.spo2_ema_mean_tau_s     = _spo2_ema_mean_tau_s;
     cfg.spo2_window_s         = _spo2_window_s;
     cfg.pi_window_s           = _pi_window_s;
+    cfg.pi_subwindow_s        = pi_subwindow_s;
     cfg.spo2_min              = _spo2_min;
     cfg.spo2_max              = _spo2_max;
     cfg.spo2_sqi_pi_lo        = _spo2_sqi_pi_lo;
@@ -2660,7 +2674,12 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // feeds SpO2 without PI, now that the two are independent functions. PI above spo2_pi_max is
     // a DC transient, not perfusion: it used to map to SQI = 1 (output clamped, input not) and
     // publish a plausible-looking SpO2 while the probe was coming off.
-    const bool pi_ok = !isnan(_current_data.pi) && _current_data.pi <= _spo2_pi_max;
+    // The bound reads _pi_box, the PI of the whole window's energy (PI-METHOD-1's number), not the
+    // published PI-METHOD-2 (v0.120): the limit guards against sustained non-pulse energy, which
+    // the median is built to ignore (measured: sustained events read Q = box/median of only
+    // 1.1–1.35, rationale §23). The SQI ramp below keeps reading the published PI. Both are NaN
+    // together while the window fills.
+    const bool pi_ok = !isnan(_pi_box) && _pi_box <= _spo2_pi_max;
     const bool range_ok = spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin;
     // Pulse gate (v0.110): HR3's harmonic test is the artefact criterion the red-IR correlation
     // lacks (SUBJ10: r 0.96 with −16 points). _current_data.hr3 is NaN while HR3 has no valid
@@ -2825,6 +2844,7 @@ void INCUNEST_AFE4490::_pi_window_reset() {
     _pi_block_clock.reset();
     _pi_buf_idx = 0; _pi_buf_count = 0;
     _pi_ac_sum = 0.0f; _pi_dc_sum = 0.0f; _pi_ac_block_sum = 0.0f; _pi_dc_block_sum = 0.0f;
+    _pi_box = NAN;
     memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
     memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
 }
@@ -2837,7 +2857,7 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
         return;
     }
 
-    // ── PI-METHOD-1 (PI_METHOD_ID): the whole computation, in order ──────────────────────────
+    // ── PI-METHOD-2 (PI_METHOD_ID, v0.120): the whole computation, in order ───────────────────
     // Input: ot_ir, the reconstructed IR optical transmission (nominally invariant to the HGAC's
     // RF/ILED moves; the residual step at an RF change is the RF tolerance, rationale §12).
     //   1. AC waveform: _pi_bpf, one biquad band-pass pi_bp_f_low_hz–pi_bp_f_high_hz (0.5–15 Hz by
@@ -2846,27 +2866,47 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     //      from the signal, so it carries none of the bradycardia-tracking risk an AC-extraction
     //      EMA would (header, PI state block).
     //   3. Window: _pi_block_clock closes a block every alg_window_block_s (100 ms); both block
-    //      sums enter circular buffers of _pi_buf_n blocks (pi_window_s, 6 s by default, 2–12 s,
+    //      sums enter circular buffers of _pi_buf_n blocks (pi_window_s, 7 s by default, 2–12 s,
     //      setPIWindowS()) kept as fixed-cost running totals (below). Both sums are formed at the
     //      full AFE rate, so a sum of block sums is the full-rate sum over the window.
-    //   4. Output, on every completed block once the window is full:
-    //        PI = pi_rms_to_pp_ratio · sqrt(Σ AC² / N) / (Σ OT / N) · 100  [%],  N = blocks · len
-    //      i.e. the RMS of the band-passed OT over the window, scaled to peak-to-peak by 2√2
-    //      (exact for a sinusoid; the industry's units, ISO %mod), over the window mean of the raw OT.
+    //   4. Output, on every completed block once the window is full (PI-METHOD-2's delta to
+    //      PI-METHOD-1 is this step alone):
+    //        AC²_med = median over k of  Σ_{sub-window k} AC² / n_sub
+    //        PI = pi_rms_to_pp_ratio · sqrt(AC²_med) / (Σ OT / N) · 100  [%],  N = blocks · len
+    //      where the sub-windows are every run of _pi_sub_n consecutive blocks (pi_subwindow_s = 1 s)
+    //      inside the window, one per block: _pi_buf_n − _pi_sub_n + 1 of them (61 by default), so
+    //      the median moves every 100 ms and the immunity does not depend on where a burst falls.
+    //      sqrt(AC²_med) is the RMS of the band-passed OT over the median-energy second, scaled to
+    //      peak-to-peak by 2√2 (exact for a sinusoid; the industry's units, ISO %mod), over the
+    //      window mean of the raw OT. PI-METHOD-1 used Σ AC² / N of the whole window here; that
+    //      number is still formed, as _pi_box, for spo2_pi_max (_spo2_update), and published nowhere.
     //   NaN while the probe is not applied or the window is filling. PI has no validity gate of
-    //   its own; SpO2's SQI ramp and spo2_pi_max consume it.
+    //   its own; SpO2's SQI ramp consumes it, spo2_pi_max consumes _pi_box.
+    // Why (rationale §23; PulseNest docs/pi_artifact_robustness_20261111.md and
+    // docs/pi_motion_prior_art_20261111.md): PI-METHOD-1 rose for a whole window after every motion
+    // artefact, by construction (its energy enters the total). The industry's PI is per accepted
+    // beat and rejected beats do not enter it (Masimo, Nellcor, Nonin); the median of 1 s sub-windows
+    // is that idea without a beat detector. A burst only raises energy, so a median over an odd
+    // majority of clean sub-windows is untouched by bursts up to (W − 3·L)/2 = 2 s (W = 7, L = 1).
+    // Cost at rest: 1–1.5 % low on neonates at 120–180 BPM (measured), up to +10 % below 50 BPM
+    // (simulated: a 1 s sub-window then holds part of a beat). Not adopted, and why: 2 s sub-windows
+    // (no bias, 1.5 s of immunity lost per second of L), 11–12 s windows (immunity 3–5 s at 11–12 s
+    // of latency; Philips' 10 s default is the only published window), dropping HR3-rejected
+    // sub-windows before the median (a later step), publishing box/median as a quality input.
     // Identity rule: PI_METHOD_ID changes if and only if, for the same input, PI comes out as a
     // different number (spec §5.1, "PI methods"); the parameters named above travel in the
     // configuration and do not change it. The next definition that changes the number is
-    // PI-METHOD-2: document it as a delta to steps 1–4, not as a rewrite.
+    // PI-METHOD-3: document it as a delta to steps 1–4, not as a rewrite.
     // History of this number: v0.100 sqrt(EMA var) / EMA mean inside _spo2_update(), RMS units,
     // EMA subtraction as AC extraction; v0.101 this function (band-pass, 2√2, one window, decoupled
     // from SpO2); v0.102 pi_window_s independent of spo2_window_s; v0.103 block sums at 100 ms
     // (until v0.102 the AC took ONE band-passed sample per 20 ms block, a true 50 Hz decimation —
-    // at 100 ms that would alias the 0.5–15 Hz band, and the full-rate sum is the exact RMS anyway).
-    // Known limits of this method, measured (rationale §11, §14): the 2√2 sinusoid assumption
+    // at 100 ms that would alias the 0.5–15 Hz band, and the full-rate sum is the exact RMS anyway);
+    // v0.120 PI-METHOD-2, the median of step 4 and the 7 s window.
+    // Known limits of this method, measured (rationale §11, §14, §23): the 2√2 sinusoid assumption
     // against a measured crest factor of 2.8–3.2 (under-reads a per-beat Max−Min by 0–12 %), the
-    // biquad's ripple, and the excursion after an HGAC RF step.
+    // biquad's ripple, the excursion after an HGAC RF step, the low-rate bias above, and bursts
+    // longer than 2 s or a real amplitude change after a movement (×1.2–1.6 remain).
     _pi_dc_block_sum += ot_ir;
     const float filtered = _pi_bpf.process(ot_ir);
     _pi_ac_block_sum += filtered * filtered;
@@ -2900,11 +2940,35 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
     }
 
     // Peak-to-peak units (2√2·RMS, the industry's PI — see pi_rms_to_pp_ratio): AC_pp / DC × 100 [%].
-    // Both sums span _pi_buf_n blocks of _pi_block_clock.len full-rate samples.
+    // The DC sum spans _pi_buf_n blocks of _pi_block_clock.len full-rate samples.
     const float n_raw = (float)_pi_buf_n * (float)_pi_block_clock.len;
     const float dc    = _pi_dc_sum / n_raw;
-    const float ac_pp = pi_rms_to_pp_ratio * sqrtf(_pi_ac_sum / n_raw);
-    _current_data.pi = (dc > pi_div_eps) ? (ac_pp / dc) * 100.0f : NAN;
+    if (dc <= pi_div_eps) { _current_data.pi = NAN; _pi_box = NAN; return; }
+    // PI-METHOD-1's number, kept for spo2_pi_max: the whole window's energy.
+    _pi_box = pi_rms_to_pp_ratio * sqrtf(_pi_ac_sum / n_raw) / dc * 100.0f;
+
+    // PI-METHOD-2: the median of the overlapping sub-window energies. _pi_buf_idx now points at
+    // the OLDEST block (the next one to be overwritten), so walking the buffer from there in
+    // chronological order gives the sub-windows oldest first; a running sum of the last _pi_sub_n
+    // blocks forms each one at fixed cost (one add and one subtract per block, as the window total).
+    const int sub_n = _pi_sub_n < _pi_buf_n ? _pi_sub_n : _pi_buf_n;    // the window is never shorter (2 s ≥ 1 s)
+    const int n_sub = _pi_buf_n - sub_n + 1;
+    float subs[alg_window_buf_len_max];
+    float run = 0.0f;
+    for (int i = 0; i < _pi_buf_n; i++) {
+        int j = _pi_buf_idx + i; if (j >= _pi_buf_n) j -= _pi_buf_n;
+        run += _pi_ac_buf[j];
+        if (i >= sub_n) { int k = _pi_buf_idx + i - sub_n; if (k >= _pi_buf_n) k -= _pi_buf_n; run -= _pi_ac_buf[k]; }
+        if (i >= sub_n - 1) subs[i - sub_n + 1] = run;
+    }
+    // Median: the middle element for an odd count (the default 61), the mean of the two middle
+    // ones for an even count (a window length that is not a whole number of seconds).
+    float* mid = subs + n_sub / 2;
+    std::nth_element(subs, mid, subs + n_sub);
+    float med = *mid;
+    if ((n_sub & 1) == 0) med = 0.5f * (med + *std::max_element(subs, mid));
+    const float ac_pp = pi_rms_to_pp_ratio * sqrtf(med / ((float)sub_n * (float)_pi_block_clock.len));
+    _current_data.pi = (ac_pp / dc) * 100.0f;
 }
 
 // ── HR algorithm ──────────────────────────────────────────────────────────────

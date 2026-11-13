@@ -78,10 +78,15 @@ void test_spo2_valid_exactly_when_window_full() {
     TEST_ASSERT_EQUAL_UINT32(afe.test_spo2_buf_n() - 1, afe.test_spo2_buf_count());
     feed_spo2_sine(afe, 5000.0f, 2769.0f, 1.0f, 2 * DECIM_RAW);
     TEST_ASSERT_FALSE(isnan(afe.test_spo2_r()));
-    TEST_ASSERT_FALSE(isnan(afe.test_spo2()));
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, afe.test_spo2_sqi());
     // Two clean sines: the regression is exact from the first full window.
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 2769.0f / 5000.0f, afe.test_spo2_r());
+    // PI's window is 7 s (v0.120) against SpO2's 6 s: the PI bound binds for the difference, so
+    // SpO2 itself waits one more second (in production the pulse gate waits 10 s anyway).
+    TEST_ASSERT_TRUE(isnan(afe.test_spo2()));
+    TEST_ASSERT_EQUAL(SpO2HoldReason::HOLD_PI, afe.test_spo2_hold_reason());
+    feed_spo2_sine(afe, 5000.0f, 2769.0f, 1.0f, 10 * DECIM_RAW);
+    TEST_ASSERT_FALSE(isnan(afe.test_spo2()));
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, afe.test_spo2_sqi());
 }
 
 // ── Test 1c: window setter — clamped to [2, 12] s, length in seconds, empties the window ──
@@ -94,7 +99,7 @@ void test_spo2_window_setter_clamps_and_resets() {
     TEST_ASSERT_EQUAL_INT(120, afe.test_spo2_buf_n());
     afe.setSpO2WindowS(4.0f);
     TEST_ASSERT_EQUAL_INT(40, afe.test_spo2_buf_n());
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 6.0f, afe.getConfig().pi_window_s);   // independent of PI's
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 7.0f, afe.getConfig().pi_window_s);   // independent of PI's (7 s, v0.120)
     // 4 s window: valid after 2000 raw (+ one block), with the same R.
     feed_spo2_sine(afe, 5000.0f, 2769.0f, 1.0f, 2000 + 2 * DECIM_RAW);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 2769.0f / 5000.0f, afe.test_spo2_r());
