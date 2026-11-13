@@ -2393,10 +2393,82 @@ number 4.
 **Not decided.** Whether the products of an analysis other than a rate and its quality (a comb
 purity from the spectrum, a pulse gate read by SpO2) keep the `hrN_` prefix or are named after what
 they measure. Proposed in the session, not agreed; it matters when the first such product enters
-the library.
+the library. *Settled on 2026-11-13: they keep the prefix, qualified by the method (§22.1).*
 
 **Scope.** Text only: spec §5.5, this section, and PulseNest's `docs/nomenclature.md` and prior-art
 index. No code, no field and no version: it ships with the next release.
+
+### 22.1 What `HR` stands for, what `hrN_sqi` judges, and the names to come (2026-11-13)
+
+**What `HR` stands for.** The names were born as "heart rate", and Alex's objection of 2026-11-12
+was double: the prefix makes each algorithm look good only for a rate, and what a PPG gives is a
+pulse rate, not a heart rate. A rename was ruled out (option 3 above), so the two letters get a
+reading that fits what the thing is: **`HR` = *heartbeat resolver***, an analyser of the pulsatile
+structure of the PPG. It names the algorithm, not a magnitude; the magnitudes keep their names
+(pulse rate, PI, SpO2, SQI). Alex's formulation: a resolver has four kinds of analysis; at first
+it gave only the pulse rate, then the SQI tied to its method, later perhaps other estimates. Each
+`HRn` is one resolver, one per domain; three are implemented and the fourth (cepstrum) is reserved.
+
+Readings discarded in the conversation: *Heartbeat Recurrence* (the first recommendation),
+*Hemodynamic Rhythm* and *Heartbeat Retrieval* (the handoff records no reason for these three);
+*Heartbeat Researcher* (a researcher is a person); *Heartbeat Recovery* (collides with "heart rate
+recovery").
+
+**What `hrN_sqi` judges (Alex).** By its name an SQI is the quality of the *signal* analysed, not
+of the computation and not of the rate. Wording adopted: `hrN_sqi` is the quality of the signal as
+a periodic pulse, as seen in domain N; it judges the signal, not the rate computed from it. Two
+consequences, both already true of the code:
+- A rate can be published with `hrN_sqi > 0` and be wrong. Measured on 2026-11-12
+  (`PulseNest/docs/spectral_autocorrelation_20261112.md`, finding F): HR3 publishes one third of
+  the pulse rate in 6.4 / 4.5 / 19.2 / 5.8 % of its valid windows of SUBJ08 / 09 / 10 / 11, and
+  those windows pass the `hr3_sqi > 0` gate. No reference in them: the reading rests on the ratio
+  3.0, on three spectrograms and on 55–58 bpm not being a neonatal pulse rate.
+- The three resolvers assume a regular pulse: a clean signal from an arrhythmic heart gives a low
+  `hr1_sqi`, whose definition is the regularity of the intervals.
+
+**Names to come (agreed).** `hrN_<method>_<product>` names what one method of a family produces:
+`hr3_hps_pr`, `hr3_hps_sqi`, `hr3_sac_pr`, `hr3_sac_sqi`, `hr3_sac_purity`, `hr2_mpm_sqi`. This
+settles what §22 left open: a product that is not a rate keeps the `hrN_` prefix, qualified by its
+method. A method's rate takes the product `pr`, as in Alex's own example of that day
+(`_hr3_hps_pr`, `_hr3_sac_pr`); the examples of the handoff all carried a product and did not
+cover the rate.
+
+**What the bare names are (Alex, 2026-11-13).** `hrN` and `hrN_sqi` are what family N publishes,
+and they stay: the library keeps offering three pulse-rate estimators and the SQI of each. Today
+each family has one method, so the published pair is that method's
+(`_current_data.hr3 = (_hr3_result_sqi > 0) ? _hr3_result : NAN`). Alex's intent for a family with
+several methods: `hr3` formed from the results of its methods (`_hr3_hps_pr`, `_hr3_sac_pr`)
+according to their SQIs. Intended, not designed: neither the rule of combination nor what
+`hr3_sqi` then means is defined.
+
+**When today's names take the new form (agreed, 2026-11-13).** Alex's question: will
+`_hr3_result_sqi` ever become `_hr3_hps_sqi`, or will the two schemes be mixed for good? Three
+layers, and one rule:
+- The published fields, the `$M` frames and the CSV columns never change: under the reading above
+  they are the family's outputs, not an old name.
+- The private members (`_hr3_result`, `_hr3_result_sqi`, …; by a rough count 20–25 names and
+  150–200 occurrences per family) cost nothing outside the library.
+- Eleven public configuration keys carry a bare family prefix although they are parameters of one
+  method (`hr1_sqi_cv_max`, `hr2_min_corr`, `hr3_update_interval_s`, …): they are API, read by
+  PulseNest's lab and experiments.
+
+Rule: the members and the keys of a family are renamed in the commit that brings its second
+method, with the keys in that release's *Breaking* list. Not before: nothing is ambiguous while a
+family has one method, and a rename would be churn. Not never: from that commit on `_hr3_result`
+could be the method's or the family's. A family that never gets a second method is never renamed.
+The alternatives were the two ends Alex named — rename everything now, or never and live with two
+schemes.
+
+**Not decided.**
+- *The pulse gate.* SpO2 reads `hr3_sqi > 0` (§17). If `hr3` and `hr3_sqi` become a combination,
+  that test changes meaning without a line of SpO2 changing, and §17.1 measured how much the gate
+  depends on exactly what feeds it. The gate would have to be bound by name to the method it was
+  measured with, or measured again. Whether the estimators read a named decision instead of
+  `hr3_sqi > 0` was explained to Alex and is not decided.
+- *`hrN` → `hrN_pr`* for the published rates: not decided; tied to the parked HR/PR label.
+
+**Scope.** Text only (spec §5.5, this subsection, PulseNest's `docs/nomenclature.md`). No code, no
+field and no version: it ships with the next release, cited in the spec's §14 row with §22.
 
 ## Appendix — source rationale (to distill at consolidation)
 

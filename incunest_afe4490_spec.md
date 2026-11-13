@@ -1509,10 +1509,26 @@ A clean PPG signal → SQI approaches 1. A weak or noisy signal → intermediate
 
 ### 5.5 HR algorithms roadmap
 
-**Naming rule (2026-11-12, rationale §22).** The number is the domain in which the pulse is
-searched and the suffix is the method: `HR1` time (beat detection), `HR2` time lag (periodicity),
-`HR3` frequency (spectrum), `HR4` cepstrum (reserved: no cepstral method is planned or evaluated).
-A family's first implemented method keeps the bare field name (`hr1`, `hr2`, `hr3`).
+**Naming rule (2026-11-12 and 2026-11-13, rationale §22).** `HR` stands for *heartbeat resolver*:
+an analyser of the pulsatile structure of the PPG. It names the algorithm, not a magnitude; the
+magnitudes have their own names (pulse rate, PI, SpO2, SQI). Each `HRn` is one resolver. The number
+is the domain in which it searches the pulse and the suffix is the method: `HR1` time (beat
+detection), `HR2` time lag (periodicity), `HR3` frequency (spectrum), `HR4` cepstrum (reserved: no
+cepstral method is planned or evaluated).
+
+- **Published per family:** `hrN`, a pulse rate in bpm, and `hrN_sqi`. They are the family's
+  outputs and are not renamed. Each family has one method today, so the pair is that method's. A
+  family with several methods would still publish one rate and one SQI, formed from its methods'
+  results (intended, not designed: rationale §22.1).
+- **`hrN_sqi`** is the quality of the signal as a periodic pulse, as seen in domain N. It judges the
+  signal, not the rate computed from it: a rate published with `hrN_sqi > 0` can still be wrong
+  (HR3 on a sub-harmonic, rationale §22.1). All three resolvers assume a regular pulse: a clean
+  signal from an arrhythmic heart gives a low `hr1_sqi`.
+- **Per method:** `hrN_<method>_<product>` names what one method of a family produces
+  (`hr3_hps_pr`, `hr3_hps_sqi`, `hr3_sac_pr`, `hr3_sac_purity`, `hr2_mpm_sqi`). Nothing in the code
+  carries such a name yet. Today's private members and configuration keys of a family (`_hr3_result`,
+  `hr2_min_corr`, …) take these names in the commit that brings that family's second method, the
+  keys as a *Breaking* change of that release; not before. Rationale §22.1 says what is not decided.
 
 | Algorithm | Method | Status |
 |---|---|---|
@@ -1531,7 +1547,8 @@ the duality between correlation and difference. All three estimate the same peri
 correlation, the other two minimise a normalised difference, over the same decimated buffer.
 
 HR1, HR2_ACF and HR3 all take `ot_led1` (the IR optical transmittance, §5.2–§5.4) and run in parallel. A method
-added later gets its own rate and SQI fields in `AFE4490Data` when it is implemented.
+added later is named by the rule above; whether its rate and SQI become fields of `AFE4490Data` or only feed
+its family's `hrN` and `hrN_sqi` is decided when it is implemented.
 
 > All HR algorithms developed from scratch. Protocentral code is not used as a base.
 
