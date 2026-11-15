@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.120 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.121 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.120"
+#define INCUNEST_AFE4490_VERSION "0.121"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -1779,7 +1779,7 @@ private:
     // estimators are added or removed.
     //
     // WHAT IS HELD FIXED: the decimated RATE, not the decimation factor. Four constants are
-    // calibrated against it — hr2_buf_len (400 = 8 s), hr3_buf_len (512 = 10.24 s, 0.098 Hz
+    // calibrated against it — hr2_buf_len (300 = 6 s), hr3_buf_len (512 = 10.24 s, 0.098 Hz
     // per bin), the hrX_update_interval defaults (25 = 0.5 s) and hr2_acorr_lag_cap (137 =
     // 22 BPM) — so if the factor were fixed instead, changing the AFE rate would silently
     // move all four at once. Deriving the factor from the target keeps them true.
@@ -1816,7 +1816,7 @@ private:
     // Bandpass-filters led1_sub (0.5–5 Hz), decimates via _hr2_decim,
     // accumulates a circular buffer of hr2_buf_len samples, then periodically
     // computes normalised autocorrelation to find the fundamental RR period.
-    static constexpr int hr2_buf_len         = 400;  // 8 s at HR2's decimated rate (50 Hz)
+    static constexpr int hr2_buf_len         = 300;  // 6 s at HR2's decimated rate (50 Hz); 8 s before v0.121 (rationale §24)
 
     // Capacity of the lag-sweep scratch array — a storage bound, NOT the search policy.
     // The lag range actually swept is derived at runtime in _hr2_compute() from

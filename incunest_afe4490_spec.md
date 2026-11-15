@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.120
+# incunest_afe4490 — Specification v0.121
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -1297,7 +1297,7 @@ is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fres
 **Processing chain:**
 1. Biquad bandpass filter 0.5–5 Hz at the AFE rate (eliminates DC, high-frequency noise, and acts as anti-aliasing)
 2. Decimate via `_hr2_decim` → 50 Hz (see §5.3.1)
-3. Accumulate in circular buffer of 400 samples (8 s at 50 Hz)
+3. Accumulate in circular buffer of 300 samples (6 s at 50 Hz; 8 s before v0.121, rationale §24)
 4. Every 25 decimated samples (0.5 s), compute normalised autocorrelation over lags corresponding to 30–272 BPM
 
 **Peak selection:** first local maximum above `hr2_min_corr = 0.5`. Sub-sample resolution via parabolic interpolation.
@@ -1306,7 +1306,7 @@ is never even signalled. Once `PROBE_APPLIED` resumes, the buffer must fill fres
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `hr2_buf_len` | 400 | Buffer length (8 s at 50 Hz) |
+| `hr2_buf_len` | 300 | Buffer length (6 s at 50 Hz; 400 = 8 s before v0.121). Sets the start-up: the first HR2 comes one buffer after the probe is applied |
 | `hr2_acorr_lag_cap` | 137 | **Storage cap** of the lag scratch array, not the search policy. The swept range is derived at runtime from `hr_min_bpm`/`hr_max_bpm` — see below |
 | `_hr2_decim.factor` | 10 at 500 Hz | **Derived** from `hr2_decim_target_rate_hz`, not configured — see §5.3.1 |
 | `hr2_update_interval` | 25 | Recompute every 0.5 s |
@@ -1323,7 +1323,8 @@ max_lag = 60 / (hr_min_bpm - 3) * hr2_decim.rate_hz   capped at hr2_acorr_lag_ca
 ```
 
 At the operating point (`_hr2_decim.rate_hz` = 50 Hz, HR range [30, 260] BPM) this gives
-`min_lag = 11`, `max_lag = 111`. Neither cap is active: 111 is under both 137 and 199.
+`min_lag = 11`, `max_lag = 111`. Neither cap is active: 111 is under both 137 and 149. A 6 s
+buffer holds three periods of 30 BPM; a 4 s one (cap 99) could not reach it (rationale §24).
 
 The `hr2_buf_len/2 - 1` cap exists because the unbiased normaliser `N/(N−τ)` grows without
 bound as τ → N; beyond τ = N/2 the factor exceeds 2 and the estimate is too noisy to trust.
@@ -1387,7 +1388,7 @@ factor  = round(afe_sample_rate_hz / target_rate_hz)     // >= 1
 rate_hz = afe_sample_rate_hz / factor                    // rate ACTUALLY achieved
 ```
 
-Constants calibrated against a chain's rate — `hr2_buf_len` (400 = 8 s), `hr3_buf_len` (512 =
+Constants calibrated against a chain's rate — `hr2_buf_len` (300 = 6 s), `hr3_buf_len` (512 =
 10.24 s, 0.098 Hz per bin), the `hrX_update_interval` defaults (25 = 0.5 s) and
 `hr2_acorr_lag_cap` (137 = 22 BPM) — therefore keep meaning the same number of *seconds* whatever
 the AFE rate does. Holding the factor fixed instead, as before v0.83, moved all of them at once
@@ -1561,10 +1562,10 @@ planned or evaluated. The number 4 was reserved for the cepstrum until 2026-11-1
 | Algorithm | Method | Status |
 |---|---|---|
 | HR1 | Threshold crossing (rising edge, 0.6 × running_max) | Implemented |
-| HR2_ACF | Autocorrelation on decimated signal (50 Hz, 8 s window) | Implemented |
+| HR2_ACF | Autocorrelation on decimated signal (50 Hz, 6 s window since v0.121) | Implemented |
 | HR3 | FFT + HPS on decimated signal (50 Hz, 10.24 s window) | Implemented |
-| HR2_MPM | McLeod Pitch Method — NSDF + clarity, same buffer as HR2_ACF | Planned |
-| HR2_YIN | CMND minimum, same buffer as HR2_ACF | Planned |
+| HR2_MPM | McLeod Pitch Method — NSDF + clarity, same buffer as HR2_ACF | Measured 2026-11-15, not adopted: at best it ties HR2_ACF (rationale §24) |
+| HR2_YIN | CMND minimum, same buffer as HR2_ACF | Measured 2026-11-15, not adopted; its 1 − d' is the family's best quality index, a candidate for the phase that combines methods (rationale §24) |
 | HR1_DRV | True peak detection via derivative (max of derivative = steepest ascending slope). Named `HR4` until 2026-11-12 | Catalogued, not planned: one of the detector strategies of rationale §5.3; §5.4 measured no gain from changing HR1's detector |
 
 **Acronyms.** `ACF` = *autocorrelation function* (maximises normalised correlation). `NSDF` =
@@ -3283,7 +3284,7 @@ See §5.3 for algorithm description.
 | BPF lower cutoff | `hr2_f_low_hz` | 0.5 Hz | Removes DC drift and very low-frequency baseline wander |
 | BPF upper cutoff | `hr2_f_high_hz` | 5.0 Hz | Anti-aliasing before decimation; limits harmonic content |
 | Decimation factor | `_hr2_decim.factor` | 10 at 500 Hz | **Derived** from `hr2_decim_target_rate_hz`, not configured — see §5.3.1 |
-| Buffer length | `hr2_buf_len` | 400 samples (8 s) | Analysis window; longer → more stable at low HR, longer convergence time |
+| Buffer length | `hr2_buf_len` | 300 samples (6 s) | Analysis window; longer → more stable at low HR, longer convergence time. 8 s before v0.121: 6 s starts 2 s sooner for no measurable loss (rationale §24) |
 | Update interval | `hr2_update_interval` | 25 decimated samples (0.5 s) | HR2 output refresh rate |
 | Lag scratch-array cap | `hr2_acorr_lag_cap` | 137 samples | Storage bound only. Swept range comes from `hr_min_bpm`/`hr_max_bpm` at runtime; the cap binds only above ~845 Hz sample rate |
 | Minimum lag | `hr2_min_lag_s` | 0.185 s | Corresponds to ~324 BPM; prevents false peaks at very short lags |
@@ -3586,6 +3587,20 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.121  | 2026-11-15    | **HR2's buffer 8 → 6 s (`hr2_buf_len` 400 → 300; §5.3; Alex 2026-11-15).**    |
+|         |               | The first HR2 comes 2 s sooner after the probe is applied (median 8 → 6 s,  |
+|         |               | 90th percentile 15.6 → 10.6 s on the three ECG neonates), for 0.2 points of |
+|         |               | a score of 100 and 0.4 points more wrong values (4.4 → 4.8 % of what HR2   |
+|         |               | publishes); 30 BPM and the plateaus at or under 60 BPM unchanged on the     |
+|         |               | MS100; 800 bytes less RAM and a shorter lag sweep. Chosen by a rule fixed  |
+|         |               | before measuring, out of sample (PulseNest `docs/hr2_methods_20261115.md`, |
+|         |               | parts 2 and 3); `hr2_min_corr` 0.5 and the 0.5–5 Hz band stay. HR2_MPM and |
+|         |               | HR2_YIN measured, not adopted (§5.5). **Breaking (data contract):** HR2 is |
+|         |               | computed over 6 s, so a capture's hr2 column and its start-up change; no API |
+|         |               | change. Test 1b of `test_hr2` pins the 6 s. Rationale §24. Text-only commits |
+|         |               | since v0.119 cited here: 1e83696 (the number in an HR name is the domain,   |
+|         |               | rationale §22), f706ef6 (HR = heartbeat resolver, §22.1), adbc4cb (the      |
+|         |               | cepstrum in family 3, `HR4_PLL`, §22.2).                                    |
 | v0.120  | 2026-11-13    | **PI-METHOD-2: the median of 1 s sub-windows, 7 s window (§5.1; Alex 2026-11-13).**     |
 |         |               | PI's AC² is the median of the mean AC² of the window's overlapping 1 s sub-windows (one |
 |         |               | per 100 ms block, 61 of them) instead of the window total; `pi_window_s` 6 → 7 s. A     |

@@ -2681,6 +2681,85 @@ the extra second. The replica of the method against the HOSPNAV corpus is PulseN
 `experiments/pi_artifact_robustness_20261111.py`, whose "median of 7 × 1 s" row (non-overlapping,
 DC at 6 s) is the nearest measured neighbour of what ships.
 
+## 24. HR2's buffer 8 → 6 s; MPM and YIN measured and not adopted (2026-11-15)
+
+**Where the evidence is.** PulseNest `docs/hr2_methods_20261115.md` (three parts, one day),
+scripts `experiments/hr2_methods_20261115.py` and `experiments/hr2_tuning_20261115.py`, bench
+`pulsenest/hr_bench.py`. The bench replays the library's HR2 chain on the raw columns of 19
+stored sessions. The reference is the ward monitor's ECG heart rate for three neonates (SUBJ08,
+SUBJ09, SUBJ11), another pulse oximeter for a fourth (SUBJ10), and the MS100 simulator's plateaus.
+
+**The question.** MPM (McLeod's NSDF with a clarity metric) and YIN (the cumulative mean
+normalised difference) were planned on 2026-09-02 as alternatives to HR2_ACF. Pitch detection
+designed both against the octave error of the autocorrelation. All three read the same buffer and
+can be computed from one sweep.
+
+**Part 1: the papers' values.** MPM with k = 0.9 and YIN with a threshold of 0.10 jump to
+multiples of the period.
+- Wrong in 17.5 % and 17.7 % of what they publish, against 4.4 % for HR2_ACF.
+- On neonatal PPG the lag function's peak at the beat is often lower than the peaks two or more
+  beats later, through beat-to-beat variability and respiratory modulation. Pickers built for
+  speech, where the first peak is the tallest, fail there.
+- The NSDF read with HR2_ACF's picker gives HR2_ACF's result. The picker decides, not the
+  function.
+
+**Part 2: parameters chosen for PPG, out of sample** (Alex: the first part was unfair to methods
+this close to HR2_ACF).
+- Score fixed before measuring: ok % − 1.75 × wrong %, where 1.75 = the weights of honesty (35)
+  and availability (20) agreed for comparing methods.
+- Parameters chosen on two ECG subjects and scored on the third, three times. SUBJ10 and the
+  MS100 never choose.
+- The bench's YIN first summed its difference over N − τ samples, which shrinks with the lag. It
+  was corrected to the paper's fixed integration window. That changed little: 29.5 → 31.7 % right.
+
+| Method (held-out windows pooled) | Published | Wrong of published | Score | Weighted total (0 best) |
+|---|---|---|---|---|
+| HR2_ACF, library values | 85.4 % | 4.4 % | **75.1** | **22.2** |
+| HR2_MPM, k 0.5 | 72.6 % | 3.7 % | 65.1 | 22.3 |
+| HR2_YIN, threshold 0.6 | 79.4 % | 4.9 % | 68.8 | 24.3 |
+
+- Both choose the edge of their grids. With the grids widened (post hoc), MPM goes to k = 0.3 and
+  YIN to 0.75–0.85, still below HR2_ACF. On this signal every method's best rule is HR2_ACF's: the
+  first peak or dip that clears a bar.
+- The weighted total puts each criterion on a fixed scale. On it, tuned MPM ties HR2_ACF: it is
+  slightly more honest and reads 30 BPM, but publishes 13 points less.
+- **Not adopted.** A tie does not pay for a change. MPM and YIN are not ported.
+- **What YIN does better** is its quality index. Out of sample, with the bar that keeps 1 % wrong
+  chosen on the training subjects, YIN's 1 − d' keeps 70.6 % of the windows, against 50.2 % for
+  HR2_ACF's peak height (AUC 0.96 against 0.85). Recorded as a candidate quality index for the
+  phase that combines methods; nothing changed now.
+
+**Part 3: HR2_ACF's own parameters**, by the same procedure. The rule for proposing a change was
+fixed before measuring: the score rises by ≥ 2 points with no held-out subject losing more than 1
+and the low MS100 plateaus not worse, or start-up falls by ≥ 1 s for ≤ 1 point.
+- `hr2_min_corr` 0.5 → 0.4: +1.3 points, and SUBJ10 loses 2.8. **Fails**; 0.5 stays.
+- `hr2_f_high_hz` 5 → 4 or 3 Hz: worse at every buffer length, 1–9 points. The second harmonic
+  helps the autocorrelation find the period. **5 Hz stays.**
+- `hr2_buf_len` 8 → 4 s: −1.2 points and the 30 BPM plateau halved, because a 4 s buffer caps the
+  lag at 99 and cannot hold the period of 30 BPM. **Fails.**
+- **`hr2_buf_len` 8 → 6 s: passes the start-up branch.**
+
+| `hr2_buf_len` | Score | Wrong of published | Start-up, median / p90 | MS100 30 BPM | SUBJ10 |
+|---|---|---|---|---|---|
+| 400 (8 s) | 75.1 | 4.4 % | 8.0 / 15.6 s | 50.3 % | 0.0 |
+| **300 (6 s)** | 74.9 | 4.8 % | **6.0 / 10.6 s** | 50.3 % | −2.1 |
+
+**Decision (Alex, 2026-11-15): 6 s.** The costs, stated so they are not rediscovered:
+- SUBJ08 loses 1.0 point and SUBJ10 2.1. SUBJ10's reference is another pulse oximeter and every
+  method of the family does badly there (HR2_ACF publishes 15 % of its windows, 36 % of those
+  wrong), so it is a warning, not a measurement of the ECG kind.
+- A 6 s buffer holds three periods of 30 BPM, four at 8 s. The MS100 shows no change, but the
+  MS100 capture at 35–55 BPM is still pending. If it shows a loss at low rates, this is where to
+  look first.
+- The 2 s also matter against family 3: HR3_SAC starts in about 10 s. HR2 is now the first rate
+  after the application, together with HR1.
+- Not measured on a board: CPU per compute falls with the shorter sweep (N × lags, 300 instead of
+  400), and RAM falls by 800 bytes (`_hr2_buf` and `_hr2_snapshot`).
+
+**Limits.** Three ECG neonates, so three folds; the folds agree, which is not proof. The 1.75 of
+the score follows from the agreed weights; another penalty would move the choices of part 2 more
+than the ordering of part 3.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

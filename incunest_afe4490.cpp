@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.120 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.121 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -2005,7 +2005,7 @@ void INCUNEST_AFE4490::_apply_control_regs() {
 void INCUNEST_AFE4490::_recalc_rate_params() {
     float sample_rate_hz              = (float)_afe_sample_rate_hz;
     // One decimation chain per filtered path. Each derives its factor from its own target
-    // rate, so the constants calibrated against a chain's rate (hr2_buf_len = 8 s,
+    // rate, so the constants calibrated against a chain's rate (hr2_buf_len = 6 s,
     // hr3_buf_len = 10.24 s, the update intervals, hr2_acorr_lag_cap) keep meaning the same
     // number of SECONDS whatever the AFE rate. Consumers read chain.rate_hz — the rate really
     // achieved — never the nominal target.

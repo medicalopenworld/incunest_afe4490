@@ -15,9 +15,9 @@
 // hr2/hr2_sqi become NaN/0.
 
 // HR2 constants (mirror of incunest_afe4490.cpp namespace)
-static constexpr int HR2_BUF_LEN      = 400;   // decimated samples
+static constexpr int HR2_BUF_LEN      = 300;   // decimated samples (6 s; 400 before v0.121)
 static constexpr int HR2_DECIM_FACTOR = 10;
-static constexpr int HR2_BUF_RAW      = HR2_BUF_LEN * HR2_DECIM_FACTOR;  // 4000 raw samples
+static constexpr int HR2_BUF_RAW      = HR2_BUF_LEN * HR2_DECIM_FACTOR;  // 3000 raw samples
 
 static constexpr float OT_DC = 1.4e-5f;
 static constexpr float SCALE = 1.4e-10f;
@@ -54,6 +54,16 @@ void test_hr2_not_valid_until_buffer_full() {
     // Note: unlike SpO2/HR1 (which run their full invalid-path logic every sample), HR2's
     // fast path simply returns early while the buffer is filling — no commit to
     // _current_data happens yet, so hr2 stays at its construction default (0.0f), not NaN.
+}
+
+// ── Test 1b: the first value comes one 6 s buffer after the start (v0.121) ──
+// 6 s plus one update interval (0.5 s = 250 raw samples) gives a value; with the 8 s buffer of
+// v0.120 the same 6.5 s would still be filling (rationale §24).
+void test_hr2_valid_after_six_seconds() {
+    INCUNEST_AFE4490 afe;
+    feed_hr2_sine(afe, 1.0f, 500.0f, HR2_BUF_RAW + 250);
+    TEST_ASSERT_GREATER_THAN_FLOAT(0.95f, afe.test_hr2_sqi());
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 60.0f, afe.test_hr2());
 }
 
 // ── Test 2: 60 BPM (1 Hz sine) ───────────────────────────────────────────────
@@ -110,7 +120,7 @@ void test_hr2_27bpm_guard_band_is_invalid() {
 // ── Test 3c: the decimated rate is invariant to the AFE sample rate ──────────
 // Pins the v0.83 inversion: _decim_factor is DERIVED from decim_target_rate_hz (50 Hz), so
 // raising the AFE rate changes the factor and leaves the decimated rate — and with it the
-// meaning of hr2_buf_len (8 s), the update interval (0.5 s) and hr2_acorr_lag_cap (22 BPM).
+// meaning of hr2_buf_len (6 s), the update interval (0.5 s) and hr2_acorr_lag_cap (22 BPM).
 //
 // The range floor at 1000 Hz is the case that DISCRIMINATES. With the old fixed factor of 10
 // the decimated rate would have doubled to 100 Hz, so 30 BPM would need lag = 60/30*100 = 200,
@@ -221,6 +231,7 @@ void test_hr2_not_applied_resets() {
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_hr2_not_valid_until_buffer_full);
+    RUN_TEST(test_hr2_valid_after_six_seconds);
     RUN_TEST(test_hr2_60bpm);
     RUN_TEST(test_hr2_120bpm);
     RUN_TEST(test_hr2_30bpm_lower_bound);
