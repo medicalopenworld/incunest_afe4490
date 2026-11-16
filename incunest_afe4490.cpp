@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.122 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.123 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -17,6 +17,16 @@ namespace {
     // Arduino's constrain macro, as a function. The Arduino build is gnu++11, so std::clamp
     // (C++17) is not available; unlike the macro, each argument is evaluated once.
     inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // The published sample before any data (v0.123): every clinical output quantity is NaN from
+    // the first instant, not the 0 of a value-initialised struct (data contract rule 1, spec
+    // §2.1.1). No queued sample ever carried that 0 (the algorithms write NaN on every sample
+    // while the probe is not applied), but _current_data did until the first one.
+    inline AFE4490Data blank_data() {
+        AFE4490Data d{};
+        d.spo2 = NAN; d.pi = NAN; d.hr1 = NAN; d.hr2 = NAN; d.hr3 = NAN;
+        return d;
+    }
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
     // EMA mean τ (DC baseline): 2.0 s, f_c ≈ 0.08 Hz.
@@ -501,7 +511,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
     memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
     memset(_pi_dc_buf, 0, sizeof(_pi_dc_buf));
-    _current_data = AFE4490Data{};
+    _current_data = blank_data();
     _ppgdisp_bpf.f_low = 0.5f;  _ppgdisp_bpf.f_high = 20.0f;  _ppgdisp_lpf.f_high = 20.0f;   // one f_high (v0.119)
     _ppgdisp_tracker.rise_per_s = ppgdisp_norm_rise_per_s; _ppgdisp_tracker.win_s = ppgdisp_norm_win_s;
     _ppgdisp_tracker.tau_s      = ppgdisp_norm_tau_s;      _ppgdisp_tracker.headroom = ppgdisp_norm_headroom;
@@ -1451,7 +1461,7 @@ void INCUNEST_AFE4490::_reset_algorithms() {
     _switched_rc_settling_countdown = 0;
     _hgac_ema_fast_led1.reset(); _hgac_ema_slow_led1.reset(); _hgac_ema_ambient_led1.reset();
     _hgac_ema_fast_led2.reset(); _hgac_ema_slow_led2.reset(); _hgac_ema_ambient_led2.reset();
-    _current_data = AFE4490Data{};
+    _current_data = blank_data();
     // Precompute Hann window — needed for HR3 FFT (lives here, not in begin(), so host builds compute it too)
     for (int i = 0; i < hr3_buf_len; i++)
         _hr3_hann[i] = 0.5f * (1.0f - cosf(2.0f * kPi * (float)i / (float)(hr3_buf_len - 1)));
@@ -3065,13 +3075,26 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
         return;
     }
 
+    // Expiry (v0.123, data contract rule 4, spec §2.1.1): the mean of the stored intervals stops
+    // being a result once the interval in progress is already longer than the longest one of the
+    // valid range (60 / hr_min_bpm: 2 s at 30 BPM) — beats are no longer detected, or the pulse
+    // is below the range. Until v0.122 the last HR1 stayed published for as long as no crossing
+    // came. Derived from the range, so no new parameter; never true inside the range, where the
+    // next crossing arrives first. The stored intervals are kept: the rule itself is unchanged
+    // and the following beats publish as before (rationale §25).
+    const float since_cross = (float)(n - _hr1_cross_idx) - _hr1_cross_frac;   // decimated samples
+    if (since_cross > 60.0f / _hr_min_bpm * _hr1_decim.rate_hz) {
+        _current_data.hr1     = NAN;
+        _current_data.hr1_sqi = 0.0f;
+        return;
+    }
+
     float sum = 0.0f;
     for (int i = 0; i < 5; i++) sum += _hr1_rr_s[i];
     const float avg_rr_s = sum / 5.0f;
     const float hr1 = 60.0f / avg_rr_s;
 
     if (hr1 >= _hr_min_bpm && hr1 <= _hr_max_bpm) {
-        _current_data.hr1 = hr1;
         // SQI: coefficient of variation (CV = std / mean) of the 5 RR intervals.
         // Perfectly regular rhythm → CV = 0 → SQI = 1.
         // CV ≥ hr1_sqi_cv_max (15%) → SQI = 0 (arrhythmia or motion artefact).
@@ -3081,8 +3104,13 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
             var += diff * diff;
         }
         const float cv  = (avg_rr_s > 0.0f) ? sqrtf(var / 5.0f) / avg_rr_s : 1.0f;
-        const float sqi = 1.0f - cv / _hr1_sqi_cv_max;
-        _current_data.hr1_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
+        const float sqi = fmaxf(0.0f, fminf(1.0f, 1.0f - cv / _hr1_sqi_cv_max));
+        // v0.123: no value when the CV gate fails, as HR2 and HR3 (hrN = sqi > 0 ? result : NaN).
+        // Until v0.122 the mean of 5 irregular intervals was published with hr1_sqi = 0, which
+        // the bench this rule mirrors never counted as published (PulseNest hr1_bench.py RuleR0)
+        // and which the data contract (rule 1, spec §2.1.1) would hand to a consumer as a value.
+        _current_data.hr1     = (sqi > 0.0f) ? hr1 : NAN;
+        _current_data.hr1_sqi = sqi;
     } else {
         _current_data.hr1     = NAN;
         _current_data.hr1_sqi = 0.0f;

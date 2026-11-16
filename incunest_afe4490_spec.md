@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.122
+# incunest_afe4490 — Specification v0.123
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -177,11 +177,13 @@ struct AFE4490Data {
                         // replaced. Display only, no algorithm consumes it (there is no separate
                         // `ppg` field — removed pre-v0.69, HR1 reads ot_led1 directly, see §1.3).
     float   spo2;       // SpO2 in %
-    float   spo2_sqi;   // SpO2 Signal Quality Index [0–1]: PI-based; 0=no finger, 1=PI ≥ 2%
-    float   spo2_r;     // R ratio: (AC_red/DC_red)/(AC_ir/DC_ir) — for calibration
+    float   spo2_sqi;   // SpO2 Signal Quality Index [0–1]: ramp of the PI; 0 = PI ≤ 0.5 %, 1 = PI ≥ 2 %
+    float   spo2_r;     // R used for SpO2: R-METHOD-1 ratio or R-METHOD-2 regression slope
+    float   spo2_r_method2_reg_corr; // R-METHOD-2 only: correlation r of the regression [−1…1]; NaN otherwise
+    SpO2HoldReason spo2_hold_reason; // why spo2 is NaN (v0.110): HOLD_NONE when published
     float   pi;         // Perfusion Index: (AC_ir / DC_ir) × 100 [%]
     float   hr1;        // HR1 (peak detection) in bpm
-    float   hr1_sqi;    // HR1 Signal Quality Index [0–1]: RR interval regularity; 0=arrhythmia/invalid, 1=perfectly regular
+    float   hr1_sqi;    // HR1 Signal Quality Index [0–1]: RR interval regularity; 0=irregular (arrhythmia or artefact) and hr1 is then NaN (v0.123), 1=perfectly regular
     float   hr2;        // HR2 (autocorrelation) in bpm
     float   hr2_sqi;    // HR2 Signal Quality Index [0–1]: normalised autocorrelation at dominant lag; 0=no periodicity, 1=perfect
     float   hr3;        // HR3 (FFT + HPS) in bpm
@@ -192,6 +194,55 @@ struct AFE4490Data {
     ProbeState probe_state;  // enum ProbeState (0-4); isProbeAbsent() answers "no patient"
 };
 ```
+
+#### 2.1.1 Data contract of the clinical output quantities
+
+The five clinical output quantities are `spo2`, `pi`, `hr1`, `hr2` and `hr3`. Four rules hold for
+all of them (rationale §25). They do not cover the six raw ADC signals (integers, a new set every
+PRP, always a number; during the switched-RC settling the last valid set is repeated and flagged in
+`diag_code`, §5.8.4) nor `ppg_disp` (§5.9).
+
+1. **A quantity is either a finite number or NaN. NaN means "no value".** Nothing else does: never
+   0, not at start-up either, and no other field needs checking (not the SQI, not `probe_state`).
+   `isfinite(x)` is the whole test. With the probe not applied every quantity is NaN, and so it
+   is before the first sample (v0.123; the published sample started value-initialised, at 0).
+2. **A published quantity is always inside its declared range:** `hr_min_bpm`..`hr_max_bpm` and
+   `spo2_min`..`spo2_max` (`getConfig()`); `pi` ≥ 0, with no upper bound.
+3. **A quantity x may come with a quality score `x_sqi` in [0, 1]. The score has a meaning only
+   while x is finite.** Today every quantity has one except `pi`; a PI method that yields a
+   quality score would add `pi_sqi` under this same rule. Then 1 is the cleanest signal and 0 the poorest signal the
+   library still publishes x from. While x is NaN, ignore `x_sqi` (it reads 0). An SQI is a
+   diagnostic output, never a validity flag: a consumer that sets a threshold on it owns that
+   threshold.
+
+   | `spo2` | `spo2_sqi` | Reading |
+   |---|---|---|
+   | NaN | 0 | no SpO2; the SQI is not read |
+   | 97 | 0 | a valid SpO2 from the weakest signal the library publishes from (PI ≤ 0.5 %) |
+   | 97 | 1 | a valid SpO2 from a strong signal (PI ≥ 2 %) |
+
+   `hr1`, `hr2` and `hr3` write NaN when their own quality test fails (`hr1` since v0.123), so
+   none of them carries a value with an SQI of 0; `spo2` can, as in the second row.
+
+4. **The library never keeps an older result in place of one that failed.** Each algorithm
+   recomputes its quantity at its own cadence, over the last seconds of signal (its window), and
+   every recomputation writes a new result or NaN. Between two recomputations the samples carry the
+   latest result.
+
+   | Quantity | Recomputed every | Over the last |
+   |---|---|---|
+   | `spo2` | 100 ms (`alg_window_block_s`) | `spo2_window_s` (6 s) |
+   | `pi` | 100 ms | `pi_window_s` (7 s) |
+   | `hr2` | `hr2_update_interval_s` (0.5 s) | 6 s |
+   | `hr3` | `hr3_update_interval_s` (0.5 s) | 10.24 s |
+   | `hr1` | every beat | 5 beat-to-beat intervals |
+
+   `hr1` has no window in seconds, so it expires instead (v0.123, §5.2): it is NaN once the
+   interval in progress is longer than the longest one of the range, 60 / `hr_min_bpm` (2 s).
+   Until v0.122 it stayed published for as long as no beat was detected.
+
+Why a value is missing is reported for `spo2` only (`spo2_hold_reason`), as a diagnostic. Holding a
+number on a screen, and what to show while there is none, is outside this contract.
 
 ### 2.2 Initialization
 ```cpp
@@ -1267,6 +1318,25 @@ SQI = clamp(1 − CV / 0.15, 0, 1)
 ```
 
 CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythmia, artefact, or loss of signal). The 15 % threshold is the standard clinical criterion for rhythm regularity. If fewer than 5 intervals have been detected, or if HR1 is outside [30, 260] BPM, SQI is forced to 0. The refractory period of 185 ms naturally supports detection up to ~324 BPM, providing a guard band above the 260 BPM limit at no cost.
+
+**Expiry (v0.123; data contract rule 4, §2.1.1; rationale §25).** With 5 intervals stored, HR1 is
+NaN and its SQI 0 while the interval in progress (the time since the last threshold crossing) is
+longer than the longest interval of the valid range, 60 / `hr_min_bpm` (2 s at 30 BPM): beats are
+no longer being detected, or the pulse is below the range. It is derived from the range, so there
+is no parameter, and it never fires inside the range, where the next crossing arrives first. The
+stored intervals are kept and the rule is unchanged: when beats return, the interval that spans the
+gap enters the buffer as any other. Until v0.122 the last HR1 stayed published for as long as no
+crossing came. On the 19 stored sessions (25 158 outputs, one every 0.5 s): 368 of the 24 386
+published outputs become NaN (1.5 %), 21 of them with `hr1_sqi` > 0 (0.13 % of 15 666); none
+appears and none changes value.
+
+**No value when the CV gate fails (v0.123; Alex 2026-11-17; rationale §25).** HR1 is NaN whenever
+`hr1_sqi` is 0, as HR2 and HR3 (`hrN = sqi > 0 ? result : NaN`). Until v0.122 the mean of five
+irregular intervals was published with `hr1_sqi` = 0. That output was never part of what the rule
+was measured as publishing: the bench it mirrors (PulseNest `pulsenest/hr1_bench.py`, `RuleR0`)
+counts an output as published only with `hr1_sqi` > 0, and so do the figures of rationale §5.5. On
+the 19 stored sessions it was 8 720 of the 24 386 published outputs (36 %; 93 % in the moving
+subject). With the expiry, HR1 is published in 15 645 outputs, and no value changes.
 
 > **Implementation note:** the beat instant is the threshold crossing on the rising edge, interpolated between two decimated samples; it still depends on the slope and the amplitude of the upstroke — if either changes (low perfusion, motion), the instant shifts relative to the true peak and adds jitter to the RR. The detectors measured against it in PulseNest (`HR1_TERMA`, `HR1_SSF`, `HR1_MSPTD`, rationale §5.5) mark other fiducials; none is adopted yet.
 
@@ -3624,6 +3694,28 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.123  | 2026-11-17    | **The data contract of the clinical output quantities, written down (§2.1.1;   |
+|         |               | Alex 2026-11-17).** Four rules for `spo2`, `pi`, `hr1`, `hr2`, `hr3`: a     |
+|         |               | quantity is finite or NaN and NaN is the only "no value"; a published one  |
+|         |               | is inside its declared range; an SQI has a meaning only while its quantity |
+|         |               | is finite and is never a validity flag; the library never keeps an older   |
+|         |               | result in place of one that failed. Written next to `AFE4490Data` and in   |
+|         |               | §2.1.1; §2.1 brought up to date (`spo2_sqi`, `spo2_r_method2_reg_corr`,     |
+|         |               | `spo2_hold_reason`). Two changes make the code meet them: the published    |
+|         |               | sample starts with the five quantities at NaN (0 until the first sample   |
+|         |               | before), and **HR1 expires** (§5.2): NaN once the interval in progress is  |
+|         |               | longer than 60 / `hr_min_bpm` (2 s), stored intervals kept, no new         |
+|         |               | parameter. **HR1 is NaN when its CV gate fails** (`hr1_sqi` = 0), as HR2   |
+|         |               | and HR3: the mean of five irregular intervals was published with SQI 0,    |
+|         |               | which the bench the rule mirrors never counted as published. On the 19     |
+|         |               | stored sessions (25 158 outputs): of 24 386 published HR1, 8 720 had SQI 0 |
+|         |               | (36 %) and 368 expire (21 of them with SQI > 0); 15 645 stay published,    |
+|         |               | none appears, none changes value. **Breaking (API):** nothing.             |
+|         |               | **Breaking (data contract):** HR1 is NaN when `hr1_sqi` is 0 and after 2 s |
+|         |               | with no beat detected; the quantities are NaN, not 0, before the first     |
+|         |               | sample. Tests: new suite `test_data_contract` (4 cases), `test_hr1` 13–16  |
+|         |               | (expiry, 31 bpm does not expire, resumes, irregular intervals); 12 suites. |
+|         |               | Rationale §25.                                                              |
 | v0.122  | 2026-11-16    | **HR1 reads the common front end of the HR1 methods (§5.2; Alex 2026-11-16):** |
 |         |               | LowPass4 15 Hz at the AFE rate → decimated to 100 Hz (`_hr1_decim`) →      |
 |         |               | 2nd-order Butterworth high-pass 0.5 Hz (new `BiquadFilter::init_hp`); the |

@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.122 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.123 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.122"
+#define INCUNEST_AFE4490_VERSION "0.123"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -211,6 +211,27 @@ constexpr uint32_t RSQM_DIAG_SWITCHED_RC_SETTLING  = 0x00008000UL;  // bit 15 �
 // the whole window this bit is set, same mechanism as the diagnostic holdoff (§5.6.3).
 
 // ── Public data struct ────────────────────────────────────────────────────────
+// Data contract of the clinical output quantities: spo2, pi, hr1, hr2, hr3 (spec §2.1.1,
+// rationale §25). Not covered here: the six raw ADC signals (integers, a new set every PRP,
+// always a number) and ppg_disp.
+// 1. A quantity is either a finite number or NaN. NaN means "no value". Nothing else does:
+//    never 0, not at start-up either, and no other field needs checking (not the SQI, not
+//    probe_state). isfinite(x) is the whole test.
+// 2. A published quantity is always inside its declared range: hr_min_bpm..hr_max_bpm and
+//    spo2_min..spo2_max (getConfig()); pi >= 0, no upper bound.
+// 3. A quantity x may come with a quality score x_sqi in [0, 1] (today all but pi; a PI
+//    method that yields one would add pi_sqi under this same rule). The score has a meaning
+//    only while x is finite: 1 = the cleanest signal, 0 = the poorest signal the library
+//    still publishes x from. While x is NaN, ignore x_sqi. Example: spo2 = 97 with
+//    spo2_sqi = 0 is a valid SpO2 from a weak signal (PI <= 0.5 %). An SQI is a diagnostic
+//    output, never a validity flag. (hr1, hr2 and hr3 write NaN when their own quality test
+//    fails, so they never carry a value with an SQI of 0; spo2 can.)
+// 4. Each algorithm recomputes its quantity at its own cadence, over the last seconds of
+//    signal (its window). Every recomputation writes a new result or NaN: the library never
+//    keeps an older result in place of one that failed. Between two recomputations the
+//    samples carry the latest result.
+//    hr1, the mean of the last 5 beat-to-beat intervals, expires: it is NaN once the interval
+//    in progress is longer than the longest one of the range, 60 / hr_min_bpm (v0.123).
 struct AFE4490Data {
     // Field order mirrors the $M1/$P1 serial frame: raw signals first, then processed outputs
     // Raw ADC outputs (6 signals from AFE4490)
@@ -245,7 +266,7 @@ struct AFE4490Data {
     SpO2HoldReason spo2_hold_reason; // why spo2 is NaN (v0.110): NONE when published; see the enum
     float   pi;          // Perfusion Index: (AC_ir / DC_ir) * 100 [%]
     float   hr1;         // HR1 (peak detection) in bpm
-    float   hr1_sqi;     // HR1 Signal Quality Index [0–1]: 1 − CV/0.15; 0=arrhythmia/artefact/invalid, 1=perfectly regular
+    float   hr1_sqi;     // HR1 Signal Quality Index [0–1]: 1 − CV/0.15; 0=irregular (arrhythmia or artefact) and hr1 is then NaN (v0.123), 1=perfectly regular
     float   hr2;         // HR2 (autocorrelation) in bpm
     float   hr2_sqi;     // HR2 Signal Quality Index [0–1]: normalised autocorrelation at dominant lag; 0=no periodicity, 1=perfect
     float   hr3;         // HR3 (FFT + HPS) in bpm

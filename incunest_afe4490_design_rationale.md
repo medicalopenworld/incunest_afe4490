@@ -2841,6 +2841,113 @@ and the low MS100 plateaus not worse, or start-up falls by ≥ 1 s for ≤ 1 poi
 the score follows from the agreed weights; another penalty would move the choices of part 2 more
 than the ordering of part 3.
 
+## 25. The data contract of the clinical output quantities: four rules, and what was left out (2026-11-16 → 2026-11-17)
+
+**The problem.** IncuNest decided whether there was an SpO2 with `spo2_sqi > 0`. `spo2_sqi` is a
+ramp of the PI between 0.5 and 2 % (§10), so a valid SpO2 at PI ≤ 0.5 % carries `spo2_sqi == 0`:
+the screen showed "--" on a poorly perfused baby while the HR and the waveform stayed on, and the
+telemetry had never sent a PI at or below 0.5 %, the range that warns of poor perfusion. Found in
+the review of IncuNest's pull request 33 (2026-11-16). PulseNest's serial frame makes the same
+assumption. *Measured:* read in the three code bases, not on a patient.
+
+**The cause.** The rule a consumer needs was true in the code and written nowhere in one place:
+no value is NaN. What a consumer found instead was a field comment per SQI, two of them saying
+"0 = invalid" or "0 = no finger" (header and spec §2.1, the latter two fields behind the header).
+`sqi > 0` does equal "there is a value" for HR2 and HR3 (`hrN = sqi > 0 ? result : NaN`), so the
+shortcut worked where it was first tried and was copied to SpO2 and HR1, where it does not: an
+SQI of 0 means two things there, no value or a value from the poorest signal (noted on
+2026-10-27 as a gap, for the pending joint review of the SQIs).
+
+**The decision (Alex, 2026-11-17).** Four rules, the same for `spo2`, `pi`, `hr1`, `hr2`, `hr3`,
+written next to `AFE4490Data` and in spec §2.1.1: (1) finite or NaN, and NaN is the only way to
+say "no value"; (2) a published quantity is always inside its declared range; (3) a quantity may come with an SQI, which has a
+meaning only while its quantity is finite and is a diagnostic output, never a validity flag;
+(4) the library never keeps an older result in place of one that failed. The aim was a contract a
+newcomer can hold in the head and that behaves the same for every quantity. A first draft had
+eight rules; the four that went were either duplicates or not the library's to promise.
+
+**Alternatives rejected.**
+
+- *Make `sqi > 0` the validity test everywhere* (withhold the quantity whenever its SQI is 0).
+  It would drop the SpO2 at PI ≤ 0.5 %, the patient who most needs the number: `spo2_sqi`
+  grades the strength of the signal, not whether the value stands. For the three HRs the two
+  do coincide, at the source: each writes NaN when its own quality test fails (HR1 since
+  v0.123, below). A consumer still tests `isfinite()`, never the SQI.
+- *Publish the SQI as NaN while there is no value*, which removes the double meaning of 0 at
+  the source. Not adopted now: it changes the wire for every consumer and for the bench tools,
+  and rule 3 gets the same result with no code change. Kept as an option for the joint review
+  of the SQIs.
+- *Validity helpers* (`afeHasSpO2(data)` and the like). With rule 1, `isfinite()` is the helper.
+- *A reason code per quantity.* `spo2_hold_reason` is read by development tools only (PulseNest's
+  frame, the lab program, the offline runner, the tests); no product reads it. A product needs
+  at most three cases (probe not applied, acquiring, signal inadequate), which belong to the
+  display quantities below. The detailed reason stays a diagnostic of SpO2.
+- *`spo2_r_method2_reg_corr` as a better `spo2_sqi`.* Already measured and rejected in §9 and
+  §17: r stays at 0.96 while SpO2 reads 16 points low, and it has no range to grade with.
+
+**What was left out, and why.**
+
+- *Holding a value on a screen.* The first draft said "the library does not hold, the consumer
+  does". Nothing was found that the consumer knows and the library does not: what conditions a
+  hold is each algorithm's cadence and latency, the measurements against a reference (holding
+  the last SpO2 for 5 or 10 s hurt in SUBJ10, §17) and the external limits (valid-data update
+  ≤ 10 s, WHO/UNICEF 2019 Table A1.11; the 30 s of ISO 80601-2-61 201.12.4.101). IncuNest holds
+  nothing today: one bad second shows "--". The proposal on the table is a layer of **display
+  quantities** (`spo2_disp`, `hr_disp`, `pi_disp`, after `ppg_disp`) with a contract of its
+  own, absorbing the HR2 + HR3 fusion that lives in IncuNest (the combining phase of §22.1)
+  and the handling of unreliable values. **Not designed and not decided.**
+- *How a consumer reads.* `getData()` is a queue of every sample: an interface for streams
+  (the waveform at 50 Hz, raw signals at the AFE rate). The numbers are state, read at 1 Hz or
+  slower, and each consumer builds its own "latest sample" (IncuNest with an unlocked global,
+  which is where its torn reads come from). A state read (the latest sample, whole, with its
+  age) would solve that and the detection of a stalled AFE for every consumer. **Proposed, not
+  decided.**
+- *Sample coherence.* All the fields of a sample belong to the same instant; keeping them
+  together after `getData()` is the consumer's job, not a rule of this contract.
+
+**What v0.123 changes in the code so that it meets the rules.**
+
+- *Rule 1 at start-up.* The published sample started value-initialised, the five quantities at
+  0. In the firmware no queued sample carried that 0: the probe starts as disconnected and every
+  algorithm writes NaN on each sample while it is not applied. It did show wherever an algorithm
+  ran applied from its first sample (the host hooks: HR2 and HR3 read 0 until their first
+  result). The sample now starts with the five quantities at NaN. *Measured:* the new suite
+  `test_data_contract` fails on v0.122 in exactly those two places.
+- *Rule 4, HR1 (Alex, 2026-11-17).* HR1 is the mean of the last 5 intervals and did not look at
+  the time since the last beat, so it stayed published for as long as no crossing came. It now
+  expires once the interval in progress is longer than the longest one of the range,
+  60 / `hr_min_bpm` (2 s). Chosen because it adds no parameter and cannot fire inside the range:
+  the next crossing arrives first. The stored intervals are kept and the rule is untouched, so
+  the port of §5.5 still mirrors the bench except for the expired outputs. *Measured* (the 19
+  stored sessions replayed through `test_hr1` built from v0.122 and from this version, 25 158
+  outputs, one every 0.5 s): 368 of the 24 386 published outputs become NaN (1.5 %), 198 of
+  them in the moving subject (SUBJ10); 21 of the 368 had `hr1_sqi` > 0 (0.13 % of 15 666);
+  none appears, none changes value. Not compared against the ECG: the outputs removed are a
+  value older than 2 s with no beat behind it, whatever its error.
+- *Alternative not taken:* 3 s after the last accepted beat, the timeout fixed for the bench's
+  rule R1 on 2026-11-16. It would need a constant of its own and tolerates one missed beat down
+  to 40 bpm; not measured here.
+- *Rule 1, HR1 with SQI 0 (found while measuring the expiry; Alex, 2026-11-17).* HR1 was
+  published whenever the mean of its 5 intervals fell inside the range, whatever their
+  regularity: 8 720 of the 24 386 published outputs of the 19 sessions (36 %; 93 % in SUBJ10)
+  carried `hr1_sqi` = 0. The bench's rule R0 counts an output as published only with
+  `hr1_sqi` > 0, which is what the figures of §5.5 describe (66.4 % published, 0.3 % wrong), and
+  HR2 and HR3 already write NaN when their SQI is 0. Under rule 1 a consumer would read those
+  outputs as values; no consumer did, because IncuNest and PulseNest both test `hr1_sqi > 0`,
+  the habit this contract removes. HR1 is now NaN when its CV gate fails. *Measured* (same
+  replay): 15 645 outputs stay published, all with `hr1_sqi` > 0 (the 15 666 of v0.122 less the
+  21 that expire); none appears, none changes value. It also removes the wrong rate that
+  followed a gap: four intervals of 0.5 s and the 2.5 s that spans the gap read 67 bpm for five
+  beats, with SQI 0. Cost, unchanged for today's consumers: no HR1 on a truly irregular rhythm
+  (CV ≥ 15 %); HR2 and HR3 do not depend on beat-to-beat regularity.
+
+**Open.**
+
+- `pi` has no SQI. Rule 3 says "may come with" on purpose (Alex, 2026-11-17): a PI method that
+  yields a quality score, a spectral comb for instance, would add `pi_sqi` under the same rule.
+  Nothing designed.
+- No pulse-beat output exists (a pulse tone needs one). Noted, nothing planned.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

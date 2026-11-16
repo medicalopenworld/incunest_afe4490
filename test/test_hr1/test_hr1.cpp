@@ -227,6 +227,81 @@ void test_hr1_replay_capture() {
     free(ot); free(ps);
 }
 
+// ── Test 13 (v0.123): HR1 expires when beats stop being detected ──────────────
+// Data contract rule 4 (spec §2.1.1). 120 BPM for 10 s, then a flat signal with the probe still
+// applied: no crossing comes, and until v0.122 the last HR1 stayed published for good. It must be
+// NaN once the interval in progress exceeds the longest one of the range (60 / 30 BPM = 2 s),
+// stay NaN while nothing beats, and still be published 1 s after the last beat.
+void test_hr1_expires_without_beats() {
+    INCUNEST_AFE4490 afe;
+    feed_hr1_sine(afe, 2.0f, 500.0f, 5000);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 120.0f, afe.test_hr1());
+    const float flat = 1.4e-5f;
+    for (int i = 0; i < 500; i++) afe.test_feed_hr1(flat, ProbeState::PROBE_APPLIED);    // 1 s
+    TEST_ASSERT_FALSE_MESSAGE(isnan(afe.test_hr1()), "expired inside the range (1 s without a beat)");
+    for (int i = 0; i < 1250; i++) afe.test_feed_hr1(flat, ProbeState::PROBE_APPLIED);   // 3.5 s in all
+    TEST_ASSERT_TRUE_MESSAGE(isnan(afe.test_hr1()), "still published 3.5 s after the last beat");
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, afe.test_hr1_sqi());
+    for (int i = 0; i < 5000; i++) {                                                     // 10 s more
+        afe.test_feed_hr1(flat, ProbeState::PROBE_APPLIED);
+        TEST_ASSERT_TRUE_MESSAGE(isnan(afe.test_hr1()), "published again with no beat");
+    }
+}
+
+// ── Test 14 (v0.123): the expiry never fires inside the range ─────────────────
+// 31 BPM, an interval of 1.94 s, just under the 2 s limit: once published, HR1 is never NaN.
+void test_hr1_slow_pulse_does_not_expire() {
+    INCUNEST_AFE4490 afe;
+    bool published = false;
+    for (int i = 0; i < 20000; i++) {            // 40 s
+        float x = 1.4e-5f + 50000.0f * 1.4e-10f * sinf(2.0f * (float)M_PI * (31.0f / 60.0f) * i / 500.0f);
+        afe.test_feed_hr1(x, ProbeState::PROBE_APPLIED);
+        if (!isnan(afe.test_hr1())) published = true;
+        else TEST_ASSERT_FALSE_MESSAGE(published, "HR1 dropped out at 31 BPM");
+    }
+    TEST_ASSERT_TRUE(published);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 31.0f, afe.test_hr1());
+}
+
+// ── Test 15 (v0.123): HR1 comes back after an expiry ──────────────────────────
+// The expiry keeps the detector and the stored intervals, so a pulse that returns is published
+// again by the unchanged rule.
+void test_hr1_resumes_after_expiry() {
+    INCUNEST_AFE4490 afe;
+    feed_hr1_sine(afe, 2.0f, 500.0f, 5000);
+    for (int i = 0; i < 2500; i++) afe.test_feed_hr1(1.4e-5f, ProbeState::PROBE_APPLIED);   // 5 s flat
+    TEST_ASSERT_TRUE(isnan(afe.test_hr1()));
+    feed_hr1_sine(afe, 2.0f, 500.0f, 5000);
+    TEST_ASSERT_GREATER_THAN_FLOAT(0.95f, afe.test_hr1_sqi());
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 120.0f, afe.test_hr1());
+}
+
+// ── Test 16 (v0.123): no HR1 from irregular intervals ─────────────────────────
+// Beats 0.4 s and 0.7 s apart in turn: the mean of 5 intervals stays inside the range (about
+// 110-120 BPM) but their CV is about 0.28, above hr1_sqi_cv_max (0.15). hr1_sqi is 0 and, since
+// v0.123, hr1 is NaN: until v0.122 that mean was published with hr1_sqi = 0.
+void test_hr1_irregular_intervals_give_no_value() {
+    INCUNEST_AFE4490 afe;
+    const float fs = 500.0f;
+    float t_beat = 0.0f;         // start of the beat in progress [s]
+    float period = 0.4f;         // its length [s]
+    int   checked = 0;
+    for (int i = 0; i < 15000; i++) {            // 30 s
+        const float t = i / fs;
+        if (t - t_beat >= period) { t_beat += period; period = (period < 0.5f) ? 0.7f : 0.4f; }
+        // one dip of 0.2 s at the start of each beat (OT falls at systole), flat for the rest
+        const float ph  = (t - t_beat) / 0.2f;
+        const float dip = (ph < 1.0f) ? sinf((float)M_PI * ph) : 0.0f;
+        afe.test_feed_hr1(1.4e-5f * (1.0f - 0.01f * dip), ProbeState::PROBE_APPLIED);
+        if (i >= 5000) {                         // after 10 s: 5 intervals are long since stored
+            TEST_ASSERT_TRUE_MESSAGE(isnan(afe.test_hr1()), "HR1 published from irregular intervals");
+            TEST_ASSERT_EQUAL_FLOAT(0.0f, afe.test_hr1_sqi());
+            checked++;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(10000, checked);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_hr1_not_valid_too_soon);
@@ -241,5 +316,9 @@ int main() {
     RUN_TEST(test_hr1_240bpm);
     RUN_TEST(test_hr1_filter_setter);
     RUN_TEST(test_hr1_replay_capture);
+    RUN_TEST(test_hr1_expires_without_beats);
+    RUN_TEST(test_hr1_slow_pulse_does_not_expire);
+    RUN_TEST(test_hr1_resumes_after_expiry);
+    RUN_TEST(test_hr1_irregular_intervals_give_no_value);
     return UNITY_END();
 }

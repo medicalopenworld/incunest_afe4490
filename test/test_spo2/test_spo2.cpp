@@ -14,8 +14,8 @@
 // rationale §11) is computed independently by _pi_update_sample(), not by _spo2_update() — the
 // helper below feeds it in lockstep (same IR samples, same probe_state) because SpO2's SQI still
 // reads AFE4490Data::pi (unchanged). A test that calls test_feed_spo2() alone, bypassing PI,
-// gets pi==0.0f forever (never updated) rather than a real value — see test_pi/test_pi.cpp for
-// PI's own tests.
+// leaves pi at NaN (never updated; 0.0f until v0.122) rather than a real value — see
+// test_pi/test_pi.cpp for PI's own tests.
 //
 // (SPO2_A/SPO2_B calibration coefficients and WARMUP_SAMPLES were removed 2026-08-19: both were
 // dead code — hardcoded duplicates of incunest_afe4490.cpp's constants, defined but never
