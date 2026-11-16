@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.121
+# incunest_afe4490 — Specification v0.122
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -297,9 +297,11 @@ struct AFE4490Config {
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
     float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, independent of spo2_window_s; 7 s since v0.120)
     float             pi_subwindow_s;             // PI-METHOD-2 sub-window of the median [s] (v0.120; compile-time 1 s, read-only)
-    // HR1 algorithm parameters
-    float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
-    float             hr1_ma_cutoff_hz;          // peak detection LP MA cutoff [Hz]
+    // HR1 algorithm parameters (v0.122: the common front end of §5.2)
+    float             hr1_f_low_hz;              // high-pass corner [Hz] (0.5)
+    float             hr1_f_high_hz;             // low-pass corner [Hz] (15)
+    float             hr1_max_decay_tau_s;       // running-max decay time constant [s]
+    float             hr1_threshold_fraction;    // detection threshold, as a fraction of the running max
     float             hr1_sqi_cv_max;            // CV above this → SQI=0 [dimensionless]
     // HR2 algorithm parameters
     float             hr2_min_corr;              // min normalised autocorrelation for SQI=1
@@ -361,8 +363,9 @@ void setSpO2RMethod2RegCorrMin(float r);                              // R-METHO
 bool setSpO2RCurve(const char* id, const char* r_method_id, float a, float b);  // R curve + the R method it was fitted with (v0.98; replaces setSpO2Coefficients)
 
 // HR1
-void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant [s] — recalc
-void setHR1MaCutoffHz(float hz);                           // peak detection LP MA cutoff [Hz] — recalc
+void setHR1Filter(float f_low_hz = 0.5f, float f_high_hz = 15.0f);   // v0.122: band of the common front end; validated, resets HR1's filters
+void setHR1MaxDecayTauS(float tau_s);                      // running-max decay time constant [s] — recalc
+void setHR1ThresholdFraction(float frac);                  // detection threshold, in (0, 1]
 void setHR1SqiCvMax(float cv);                             // SQI CV threshold [dimensionless]
 
 // HR2
@@ -1194,41 +1197,66 @@ On the wire (PulseNest fw ≥ 0.16), `$CFG` carries `spo2_r_method_id`, `spo2_r_
 
 ### 5.2 HR1 — Peak detection
 
-**EXPERIMENT (branch `experiment/ot-domain-inputs`, since v0.38): input changed to OT.**
-`_hr1_update()` now takes `as.ot_led1` (float) instead of `led1_sub` (int32_t raw
-ambient-corrected counts) — same rationale as SpO2 (§5.1): gain-invariant by construction.
-Unlike SpO2, HR1 is peak-**timing** based, not an amplitude ratio — `_hr1_running_max` and
-the `0.6×running_max` threshold are self-relative, so a uniform gain scale does not change
-peak timing and no threshold recalibration was needed (pure domain/type change).
+**v0.122: the common front end of the HR1 methods** (rationale §5.5). HR1 reads the front end that
+PulseNest's family-1 study gave every HR1 method (`pulsenest/hr1_bench.py`, `FrontEnd`): a 4th-order
+Butterworth low-pass at the AFE rate, decimation to 100 Hz, a 2nd-order Butterworth high-pass. The
+detector and the publication rule are unchanged. It replaces the DC estimate (IIR, τ 1.6 s, started
+from zero) and the 5 Hz moving average of v0.121 and before. On three ECG neonates against the ward
+monitor (PulseNest `docs/hr1_methods_20261116.md`, F3), the same detector and rule behind the new front
+end published HR1 66.4 % of the time instead of 47.2 %, at the same honesty (0.3 % wrong of what it
+publishes), started 2.5 s after the probe was applied instead of 12 s (median, SUBJ08, 84
+applications), and kept every MS100 plateau from 30 to 240 bpm. The library reproduces the bench's
+chain on the 19 stored sessions: same validity in 99.97 % of 25 158 outputs, HR1 within 0.1 bpm in
+99.77 % (`experiments/hr1_port_check_20261116.py`).
 
-**v0.42: `_hr1_update(float ir, ProbeState probe_state)`** — mirrors the SpO2 v0.41 design
-(§5.1): presence detection stays RSQM's exclusive job, `probe_state` is consumed but never
-computed here. While `probe_state != PROBE_APPLIED`, all internal state (DC filter, running
-max, threshold-crossing flag, peak/interval indices, RR interval buffer, moving-average
-buffer) resets **every sample** (idempotent, no stored "previous probe_state" needed), and
-`hr1`/`hr1_sqi` are forced to `NaN`/`0`. Once `PROBE_APPLIED` resumes, HR1 naturally needs 5
-fresh RR intervals before reporting again, same as any cold start.
+**Input:** `as.ot_led1`, OT (since v0.38): gain-invariant by construction. HR1 is peak-**timing**
+based and its threshold is self-relative to a running maximum, so a uniform gain scale does not move
+the beats.
+
+**`_hr1_update(float ir, ProbeState probe_state)`** (v0.42) mirrors the SpO2 v0.41 design (§5.1):
+presence detection stays RSQM's exclusive job, `probe_state` is consumed but never computed here.
+While `probe_state != PROBE_APPLIED`, all internal state — both filters, the decimation phase, the
+running max, the crossing flag and instant, the RR buffer — resets **every sample** (idempotent, no
+stored "previous probe_state" needed), and `hr1`/`hr1_sqi` are forced to `NaN`/`0`. Once
+`PROBE_APPLIED` resumes, HR1 needs 6 fresh crossings (5 RR) before reporting again.
 
 **Processing chain:**
-1. **DC removal:** IIR low-pass filter (τ = 1.6 s) estimates DC; subtracted from raw signal. Signal is negated for conventional PPG polarity (peaks up).
-2. **Low-pass filter:** moving average with cutoff ~5 Hz (`len = fs / (2 × 5)`; at 500 Hz → 50 samples). Capped at 64 samples max.
-3. **Running maximum:** amplitude reference, decayed exponentially with time constant
-   `hr1_max_decay_tau_s` (**1.5 s** since v0.93; per-sample factor `exp(-1/(tau × fs))`, derived
-   from the rate so it means the same at every PRF). It is the RECOVERY parameter of the detector:
-   after a step drop in amplitude to a fraction *g* of the previous peak, detection resumes only
-   after `tau × ln(hr1_threshold_fraction / g)` — 1.0 s at tau = 1.5 s for a halved beat, against
-   13.9 s at the former 20 s. Too long blinds the detector after any amplitude change; too short
-   lets the threshold collapse between beats and the dicrotic notch is counted. See §10.4 for the
+1. **Low-pass at the AFE rate:** `_hr1_lp`, a `LowPass4` (two biquads, Q 0.5412 then 1.3066), −3 dB
+   at `hr1_f_high_hz` = 15 Hz — HR3's corner. It keeps the 2nd and 3rd harmonics up to 260 bpm (the
+   5 Hz moving average it replaces was −3 dB near 4.4 Hz, where a 260 bpm fundamental sits) and is
+   the anti-alias filter of the decimation (−42 dB at 50 Hz). Its own instance: the chains share
+   nothing (§5.3.1). The output is negated for conventional PPG polarity (peaks up).
+2. **Decimation:** `_hr1_decim`, target `hr1_decim_target_rate_hz` = 100 Hz, factor derived (§5.3.1):
+   exact at 500, 800, 1000 and 1600 Hz, 96.15 Hz at 1250 Hz. Everything below runs at the rate
+   really achieved, and every time is converted at that rate.
+3. **High-pass:** `_hr1_hp`, a 2nd-order Butterworth biquad (`BiquadFilter::init_hp`), −3 dB at
+   `hr1_f_low_hz` = 0.5 Hz — HR2's corner (0.35 Hz was rejected for HR2 for drift, rationale §8). It
+   removes the DC and the slow baseline. At 30 bpm it attenuates the fundamental by 3 dB and leads it
+   in phase, by the same amount on every beat, so the RR does not change. Both filters precharge on
+   their first sample after a reset (§5.3: `BiquadFilter::process`), so there is **no start-up
+   transient**: v0.121's DC estimate started from zero and held OT − DC far below the threshold for
+   about τ·ln(DC / AC) ≈ 1.6 s × ln(100) ≈ 7 s at 1 % modulation.
+4. **Running maximum:** amplitude reference, decayed exponentially with time constant
+   `hr1_max_decay_tau_s` (**1.5 s** since v0.93; per-sample factor `exp(-1/(tau × rate))`, derived
+   from HR1's decimated rate so it means the same at every PRF). It is the RECOVERY parameter of the
+   detector: after a step drop in amplitude to a fraction *g* of the previous peak, detection resumes
+   only after `tau × ln(hr1_threshold_fraction / g)` — 1.0 s at tau = 1.5 s for a halved beat, against
+   13.9 s at the former 20 s. Too long blinds the detector after any amplitude change; too short lets
+   the threshold collapse between beats and the dicrotic notch is counted. See §10.4 for the
    measurements behind 1.5 s.
-4. **Threshold crossing:** rising edge detected when signal crosses `0.6 × running_max`. A
-   **refractory period** — a blind window after each accepted beat, during which further
-   crossings are ignored, named after the cardiac refractory period — prevents double-detection,
-   i.e. counting the dicrotic notch as a second beat and reporting twice the true rate.
-   0.185 s allows up to ~324 BPM.
-5. **RR interval buffer:** last 5 consecutive intervals stored. HR1 computed as average:
+5. **Threshold crossing:** rising edge when the signal crosses `hr1_threshold_fraction` (0.6) ×
+   running max. The crossing instant is **interpolated linearly** between the decimated sample below
+   and the one above the threshold (`n − 1 + (threshold − prev) / (v − prev)`, kept as an index plus a
+   fraction), so the 10 ms sample does not quantise the RR. A **refractory period** —
+   `hr1_refractory_s` = 0.185 s, a blind window after each accepted beat during which further
+   crossings are ignored, named after the cardiac refractory period — prevents counting the dicrotic
+   notch as a second beat. A crossing inside the refractory is not a beat but **restarts the
+   interval**, so the next RR is measured from it (behaviour kept from v0.121 and reproduced by the
+   bench). 0.185 s allows up to ~324 BPM.
+6. **RR interval buffer:** the last 5 intervals, in seconds. HR1 computed as their average:
 
 ```
-HR1 (bpm) = fs × 60 / mean(last 5 RR intervals in samples)
+HR1 (bpm) = 60 / mean(last 5 RR intervals in seconds)
 ```
 
 `hr1_sqi` is a continuous [0–1] quality metric based on the coefficient of variation (CV) of the 5 most recent RR intervals:
@@ -1240,21 +1268,18 @@ SQI = clamp(1 − CV / 0.15, 0, 1)
 
 CV = 0 (perfectly regular rhythm) → SQI = 1. CV ≥ 15 % → SQI = 0 (arrhythmia, artefact, or loss of signal). The 15 % threshold is the standard clinical criterion for rhythm regularity. If fewer than 5 intervals have been detected, or if HR1 is outside [30, 260] BPM, SQI is forced to 0. The refractory period of 185 ms naturally supports detection up to ~324 BPM, providing a guard band above the 260 BPM limit at no cost.
 
-> **Implementation note:** peak location is currently approximated by the rising threshold crossing (first sample above `0.6 × running_max`). This introduces a timing error that depends on signal slope and amplitude — if either changes (low perfusion, motion), the detected instant shifts relative to the true peak, introducing jitter in the RR interval. Planned improvement: apply derivative to the filtered signal and detect the rising edge as the maximum of the derivative (steepest ascending slope), which gives a more stable and precise timing reference independent of signal amplitude.
-
-**Diagnostic field `hr1_ppg`:** after each detected peak, `hr1_ppg` is forced to 0 for 10 samples. This produces a visible marker in the serial stream / plotter that survives serial downsampling.
+> **Implementation note:** the beat instant is the threshold crossing on the rising edge, interpolated between two decimated samples; it still depends on the slope and the amplitude of the upstroke — if either changes (low perfusion, motion), the instant shifts relative to the true peak and adds jitter to the RR. The detectors measured against it in PulseNest (`HR1_TERMA`, `HR1_SSF`, `HR1_MSPTD`, rationale §5.5) mark other fiducials; none is adopted yet.
 
 **Key constants:**
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `hr1_dc_tau_s` | 1.6 s | IIR DC removal time constant |
-| `hr1_ma_cutoff_hz` | 5 Hz | Moving average low-pass cutoff |
-| `hr1_ma_max_len` | 64 samples | Max moving average length |
-| `hr1_max_decay_tau_s` | 1.5 s | Running-max decay time constant. **Measured, v0.93** (was 20 s, the inherited `0.9999` per-sample literal). Governs recovery after an amplitude change, not detection margin — see §5.2 step 3 and §10.4 |
-| `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit). A fixed value cannot protect bradycardia — see the rationale §5.3 |
+| `hr1_f_high_hz` | 15 Hz | Low-pass corner (4th-order Butterworth, AFE rate); `setHR1Filter()` (v0.122) |
+| `hr1_f_low_hz` | 0.5 Hz | High-pass corner (2nd-order Butterworth, HR1's decimated rate); `setHR1Filter()` (v0.122) |
+| `hr1_decim_target_rate_hz` | 100 Hz | HR1's decimated rate; the factor is derived (§5.3.1) |
+| `hr1_max_decay_tau_s` | 1.5 s | Running-max decay time constant. **Measured, v0.93** (was 20 s, the inherited `0.9999` per-sample literal). Governs recovery after an amplitude change, not detection margin — see §5.2 step 4 and §10.4 |
+| `hr1_refractory_s` | 0.185 s | Refractory period: blind window after a beat, so the dicrotic notch is not counted twice (~324 BPM practical limit); held in decimated samples (float). A fixed value cannot protect bradycardia — see the rationale §5.3 |
 | `hr1_threshold_fraction` | 0.6 | Detection threshold as a fraction of the decaying running max. **The single parameter that most determines whether a beat is counted.** Lower → more sensitive, risks counting the dicrotic notch; higher → misses weak beats. A bare literal until v0.88 |
-| `hr1_peak_marker_samples` | 10 samples | Duration of peak marker (hr1_ppg=0) |
 | `hr_min_bpm` | 30 BPM | Reported valid HR range minimum (v0.99; 40 from v0.25 to v0.98). Meets WHO-UNICEF 2019 §6.5, range to include 30–240 bpm — see the note below |
 | `hr_max_bpm` | 260 BPM | Reported valid HR range maximum. Engineering choice; covers WHO-UNICEF's 240 with room for neonatal SVT, typically 220–300 bpm (PALS: infant SVT > 220 bpm) |
 | `hr_search_min_bpm` | 27 BPM | Internal search lower bound (guard band: hr_min − 3) |
@@ -1358,14 +1383,20 @@ over 100 ms blocks (`alg_window_block_s`, a `WindowBlockClock` clock), and nothi
 them. Until v0.102 they used `Decimator`s at the same 50 Hz, which suggested a relation that
 never existed (rationale §12).
 
-HR1 runs on the full AFE rate, sample by sample. The window-based estimators run on a decimated
-copy of the signal — but there is **one decimation chain per filtered path**, not one shared
-decimation:
+HR1 ran on the full AFE rate, sample by sample, until v0.122; since then its detector runs on a
+decimated chain of its own (§5.2). The estimators run on decimated copies of the signal — but there
+is **one decimation chain per filtered path**, not one shared decimation:
 
 | Chain | Anti-alias filter | Nyquist needed | Consumers | Target rate |
 |---|---|---|---|---|
 | `_hr2_decim` | bandpass 0.5–5 Hz | > 5 Hz | HR2_ACF, and HR2_MPM / HR2_YIN when added (§5.5) — all three share this chain and its buffer | 50 Hz |
 | `_hr3_decim` | low-pass 15 Hz | > 15 Hz | HR3 | 50 Hz |
+| `_hr1_decim` (v0.122) | low-pass 15 Hz, 4th order (its own instance), then a 0.5 Hz high-pass after decimating | > 15 Hz, with margin for the interpolated crossing | HR1 | 100 Hz (96.15 Hz at 1250 Hz) |
+
+HR1's target is 100 Hz, not 50, because its detector times each beat: 10 ms per sample before the
+crossing is interpolated, the rate of the published benchmark of PPG beat detectors (Charlton et al.
+2022, §13.1). The `hz % 50` condition of §7.4 keeps the 50 Hz chains exact; the 100 Hz chain is exact
+at four of the five catalogue rates, and every HR1 time is converted at the rate really achieved.
 
 **On the names (v0.84b):** the chains are named after their consumer, which is accurate for all
 three lag estimators — `HR2_ACF`, `HR2_MPM` and `HR2_YIN` share HR2's chain and its buffer. Accepted
@@ -2619,6 +2650,8 @@ the supported rates are a **closed catalogue** (`AFE4490SampleRate`), not a rang
    the bias propagates into all EMAs and biquads.
 2. **PRF must be a multiple of 50**, so both chains' 50 Hz targets stay exact with an integer decimation factor
    (`decim = PRF/50`) and HR2/HR3 keep their window lengths, lag resolution and bin resolution.
+   HR1's 100 Hz chain (v0.122) is not covered by this condition: exact at 500, 800, 1000 and 1600 Hz,
+   96.15 Hz at 1250 Hz, harmless because HR1's times are converted at the rate achieved (§5.3.1).
 3. **Both sample windows must stay ≥ 50 µs** (datasheet §8.3.1.1). The binding one is the *ambient*
    window, giving a ceiling of **≈ 1660 Hz** (`q ≥ 602`).
 
@@ -2683,7 +2716,8 @@ Implementation notes:
   §5.8.4 exists for the setters that do **not** hold it.
 * Pinned by `test_rate_change_tears_down_old_state` and `test_same_rate_is_a_no_op`.
 
-**HR1's moving-average capacity (resolved in v0.86b).** `hr1_ma_max_len` was 64 samples long, enough only
+**HR1's moving-average capacity (resolved in v0.86b; the moving average itself removed in v0.122,
+§5.2 — kept here as history).** `hr1_ma_max_len` was 64 samples long, enough only
 up to 640 Hz, so `_hr1_ma_len = round(fs / (2·hr1_ma_cutoff_hz))` clamped at four of the five
 catalogue entries — effective cutoff 6.2 Hz at 800 Hz, 7.8 at 1000, 9.8 at 1250 and 12.5 at
 1600 Hz instead of the configured 5 Hz — **and clamped silently**. A too-wide filter lets the
@@ -3184,7 +3218,7 @@ Applied to the raw ADC output before any algorithm. Parameters are compile-time 
 
 | Parameter | Constant | Value | Used by | Effect |
 |---|---|---|---|---|
-| DC removal time constant | `spo2_ema_mean_tau_s` (SpO2), `hr1_dc_tau_s` (HR1) | 2.0 s (SpO2), 1.6 s (HR1) | SpO2, HR1 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability |
+| DC removal time constant | `spo2_ema_mean_tau_s` (SpO2) | 2.0 s | SpO2 | EMA low-pass estimates and removes the DC component; time constant determines tracking speed vs. baseline stability. HR1 removed its own (`hr1_dc_tau_s`, 1.6 s) in v0.122: a 0.5 Hz high-pass does it (§5.2) |
 | Input channel selection | `setPPGChannel()` default | LED1 | `ppg_disp` only (v0.69) | Selects ot_led1 vs ot_led2 for the display waveform; HR1/HR2/HR3/SpO2 always consume both OT channels directly, not gated by this selector |
 | Display mode | `ppgdisp_mode` (`setPPGDispMode()`) | `NO_NORM` | `ppg_disp` only (v0.116, §5.9) | `NO_NORM` A/A as before; `NORM` [−1, +1] by its slew-limited envelope tracker; `NORM_PI` = NORM × A, A ∈ [0.5, 1] from PI through `spo2_sqi_pi_lo/hi`, clamped at ±1 |
 | Display tracker rise | `ppgdisp_norm_rise_per_s` (`setPPGDispNormTracker()`) | 0.5 /s (PPGDISPLAB, 2026-11-07) | `ppg_disp` NORM modes | Max growth of the frame per second as a fraction of itself: a spike saturates the trace but cannot re-scale it (rationale §21.5) |
@@ -3240,9 +3274,9 @@ See §5.2 for algorithm description.
 
 | Parameter | Constant | Value | Effect |
 |---|---|---|---|
-| DC removal time constant | `hr1_dc_tau_s` | 1.6 s | Baseline tracking speed |
-| Low-pass MA cutoff | `hr1_ma_cutoff_hz` | 5 Hz | Noise smoothing before peak detection; affects peak sharpness |
-| Max MA length | `hr1_ma_max_len` | 64 samples | Prevents excessively long moving average at low heart rates |
+| Low-pass corner | `hr1_f_high_hz` | 15 Hz | 4th-order Butterworth at the AFE rate: keeps the 2nd and 3rd harmonics up to 260 bpm; anti-alias filter of the decimation (v0.122; was a 5 Hz moving average) |
+| Decimated rate | `hr1_decim_target_rate_hz` | 100 Hz | The detector's rate; factor derived (§5.3.1) |
+| High-pass corner | `hr1_f_low_hz` | 0.5 Hz | 2nd-order Butterworth at 100 Hz: removes the DC and the slow baseline, no start-up transient (v0.122; was a DC IIR of τ 1.6 s from zero) |
 | Running-max decay | `hr1_max_decay_tau_s` | 1.5 s | How long an old peak keeps the threshold up. **Recovery**, not detection margin: that is `hr1_threshold_fraction`'s job |
 | Peak threshold fraction | 0.6 | 0.6 × running_max | Trade-off: higher → misses low-amplitude peaks; lower → false detections on noise |
 | Refractory period | `hr1_refractory_s` | 0.185 s | Minimum interval between detected peaks; practical upper HR limit ~324 BPM |
@@ -3533,7 +3567,10 @@ Key references for each algorithm implemented in this library.
   The classical reference for cardiac peak detection with adaptive threshold and refractory period. HR1 is a simplified adaptation for PPG.
 
 - **Elgendi, M. et al. (2013).** "Systolic Peak Detection in Acceleration Photoplethysmograms Measured from Emergency Responders in Tropical Conditions." *PLoS ONE*, 8(10), e76585.
-  More specific to PPG peak detection in challenging conditions.
+  More specific to PPG peak detection in challenging conditions. Measured in PulseNest as `HR1_TERMA` (2026-11-16): with the paper's 667 ms beat average it loses a third of the beats above 170 bpm in neonates.
+
+- **Charlton, P.H. et al. (2022).** "Detecting beats in the photoplethysmogram: benchmarking open-source algorithms." *Physiological Measurement*, 43(8), 085007.
+  Fifteen open PPG beat detectors against ECG beats, 200 neonates of MIMIC-III among the data; its scoring and its neonatal data are the beat-level validation of the HR1 methods in PulseNest (`docs/hr1_methods_20261116.md`), and its 100 Hz the rate of HR1's chain since v0.122 (§5.2, §5.3.1).
 
 ### 13.2 HR2 — Normalised autocorrelation
 
@@ -3587,6 +3624,26 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.122  | 2026-11-16    | **HR1 reads the common front end of the HR1 methods (§5.2; Alex 2026-11-16):** |
+|         |               | LowPass4 15 Hz at the AFE rate → decimated to 100 Hz (`_hr1_decim`) →      |
+|         |               | 2nd-order Butterworth high-pass 0.5 Hz (new `BiquadFilter::init_hp`); the |
+|         |               | detector (0.6 × running max, refractory 0.185 s) and the rule (mean of 5  |
+|         |               | RR, CV gate) unchanged, the crossing now interpolated between decimated   |
+|         |               | samples. Replaces the DC IIR (τ 1.6 s, from zero) and the 5 Hz moving     |
+|         |               | average. On three ECG neonates (PulseNest `docs/hr1_methods_20261116.md`, |
+|         |               | F3): HR1 published 47.2 → 66.4 % of the time at the same honesty (0.3 %   |
+|         |               | wrong), start-up 12 → 2.5 s (median, 84 applications of the probe), every |
+|         |               | MS100 plateau 30–240 bpm kept; the library reproduces the bench on the 19 |
+|         |               | stored sessions (same validity 99.97 %, HR1 within 0.1 bpm 99.77 %).      |
+|         |               | **Breaking (API):** `setHR1DcTauS()` and `setHR1LpCutoffHz()` removed,   |
+|         |               | `setHR1Filter(f_low, f_high)` added; `AFE4490Config` loses `hr1_dc_tau_s` |
+|         |               | and `hr1_lp_cutoff_hz`, gains `hr1_f_low_hz` and `hr1_f_high_hz`.         |
+|         |               | **Breaking (data contract):** HR1 is available more often and sooner     |
+|         |               | after the probe is applied; its values change at the 0.1 bpm level (a    |
+|         |               | 10 ms sample, interpolated). Tests: `test_hr1` 9–12 (no start-up          |
+|         |               | transient, 240 bpm, setter validation, optional capture replay),          |
+|         |               | `test_biquad` high-pass, `test_sample_rate` HR1's 100 Hz chain across the |
+|         |               | catalogue. Rationale §5.5.                                                  |
 | v0.121  | 2026-11-15    | **HR2's buffer 8 → 6 s (`hr2_buf_len` 400 → 300; §5.3; Alex 2026-11-15).**    |
 |         |               | The first HR2 comes 2 s sooner after the probe is applied (median 8 → 6 s,  |
 |         |               | 90th percentile 15.6 → 10.6 s on the three ECG neonates), for 0.2 points of |

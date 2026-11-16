@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.121 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.122 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.121"
+#define INCUNEST_AFE4490_VERSION "0.122"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -804,9 +804,11 @@ struct AFE4490Config {
     float             pi_bp_f_high_hz;            // band-pass upper cutoff [Hz]
     float             pi_window_s;                // PI averaging window [s] (v0.102; 2–12 s, setPIWindowS; 7 s since v0.120)
     float             pi_subwindow_s;             // PI-METHOD-2 sub-window of the median [s] (v0.120; compile-time, 1 s, read-only)
-    // HR1 algorithm parameters
-    float             hr1_dc_tau_s;              // DC removal IIR time constant [s]
-    float             hr1_lp_cutoff_hz;          // peak-detection low-pass cutoff [Hz]
+    // HR1 algorithm parameters. Since v0.122 HR1 reads the common front end of the HR1 methods:
+    // 4th-order Butterworth low-pass at the AFE rate, decimated to 100 Hz, 2nd-order Butterworth
+    // high-pass (spec §5.2). Replaces hr1_dc_tau_s and hr1_lp_cutoff_hz (DC IIR + moving average).
+    float             hr1_f_low_hz;              // high-pass corner [Hz] (0.5)
+    float             hr1_f_high_hz;             // low-pass corner [Hz] (15)
     float             hr1_max_decay_tau_s;       // running-max decay time constant [s]
     float             hr1_threshold_fraction;    // detection threshold, as a fraction of the running max
     float             hr1_sqi_cv_max;            // CV above this → SQI=0 [dimensionless]
@@ -961,8 +963,10 @@ public:
     void setPIFilter(float f_low_hz = 0.5f, float f_high_hz = 15.0f);
 
     // HR1 algorithm setters
-    void setHR1DcTauS(float tau_s);                            // DC removal IIR time constant; triggers recalc
-    void setHR1LpCutoffHz(float hz);                           // peak-detection low-pass cutoff; triggers recalc
+    // HR1's band (v0.122, replaces setHR1DcTauS / setHR1LpCutoffHz): high-pass corner of the
+    // 100 Hz chain and low-pass corner at the AFE rate, default 0.5–15 Hz. Valid: 0 < f_low <
+    // f_high < 0.45 × HR1's decimated rate; else the call is ignored (logged). Resets HR1's filters.
+    void setHR1Filter(float f_low_hz = 0.5f, float f_high_hz = 15.0f);
     void setHR1MaxDecayTauS(float tau_s);                      // running-max decay time constant [s]; triggers recalc
     void setHR1ThresholdFraction(float frac);                  // detection threshold as a fraction of the running max, in (0, 1]
     void setHR1SqiCvMax(float cv);                             // SQI CV threshold [dimensionless]
@@ -1093,6 +1097,10 @@ private:
         // Design a 2nd-order low-pass of quality factor q (default 1/√2 = Butterworth).
         // Recalculates coefficients; does not reset state.
         void init_lp(float f_high_hz, float sample_rate_hz, float q = 0.70710678f);
+
+        // Design a 2nd-order high-pass of quality factor q (default 1/√2 = Butterworth), -3 dB at
+        // f_low_hz (v0.122, HR1). Precharge gives 0 for a constant input. Does not reset state.
+        void init_hp(float f_low_hz, float sample_rate_hz, float q = 0.70710678f);
 
         // Clear state and schedule precharge on next process() call.
         void reset() { _v1 = 0.0f; _v2 = 0.0f; _needs_precharge = true; }
@@ -1453,6 +1461,7 @@ private:
     // mirrored here from SpO2 v0.41): while != PROBE_APPLIED, internal state resets every
     // sample (idempotent, no stored "previous state") and hr/hr_sqi become NaN/0.
     void _hr1_update(float ir, ProbeState probe_state);
+    void _hr1_reset_state();          // filters, decimation phase, detector and RR buffer (v0.122)
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
     void _hr2_update_for_test(float ir, ProbeState probe_state);
     void _hr3_update_for_test(float ir, ProbeState probe_state);
@@ -1589,24 +1598,16 @@ private:
     float             _ppgdisp_norm_pi_lo;   // NORM_PI thresholds [%] (v0.117, own parameters)
     float             _ppgdisp_norm_pi_hi;
 
-    // ── HR1 moving average state (independent of PPG display filter) ──
-    // Capacity of the moving-average buffer. Sized for the WORST CASE OF THE CATALOGUE at the
-    // default cutoff: 1600 Hz / (2 × 5 Hz) = 160 samples (§7.4). Was 64 until v0.86b, which covered
-    // only up to 640 Hz — so four of the five catalogue rates ran clamped, with an effective
-    // cutoff of 6.2–12.5 Hz instead of 5 Hz, and silently.
-    //
-    // The cap cannot cover every configuration: setHR1LpCutoffHz() is public and unvalidated, so
-    // a 2 Hz cutoff at 1600 Hz would ask for 400 samples. That is what the logE in
-    // _recalc_rate_params() is for — a clamped filter is now diagnosable instead of mute.
-    //
-    // Cost of the capacity is RAM only: the average is incremental (subtract the outgoing sample,
-    // add the incoming one), so the CPU cost does not grow with N. Group delay does not grow either — (N−1)/2
-    // samples, and N scales with the rate, so the delay stays ≈ 1/(4·cutoff) ≈ 50 ms at any PRF.
-    static constexpr int hr1_ma_max_len = 160;
-    float    _hr1_ma_buf[hr1_ma_max_len];
-    uint32_t _hr1_ma_len;   // computed from sample_rate in _recalc_rate_params()
-    int      _hr1_ma_idx;
-    float    _hr1_ma_sum;
+    // ── HR1 front end (v0.122, spec §5.2; rationale §5.5) ──
+    // The common front end of the HR1 methods: _hr1_lp (4th-order Butterworth low-pass at the AFE
+    // rate, 15 Hz) → negate → _hr1_decim (100 Hz) → _hr1_hp (2nd-order Butterworth high-pass,
+    // 0.5 Hz). Replaces the DC IIR (τ 1.6 s, from zero) and the moving average (5 Hz) of v0.121 and
+    // before: the moving average cut near 4.4 Hz, where a 260 bpm fundamental sits, and the DC
+    // estimate starting from zero kept OT − DC far below zero for ~τ·ln(DC/AC) ≈ 7 s after the probe
+    // was applied. Its own low-pass, not HR3's: the chains share nothing (spec §5.3.1); a second
+    // LowPass4 costs two biquads per AFE sample, less than the moving average's division.
+    LowPass4         _hr1_lp;
+    BiquadFilter     _hr1_hp;
 
     // ── Rate-dependent algorithm parameters (derived from _afe_sample_rate_hz) ──
     //   _afe_sample_rate_hz    500 Hz — what the AFE delivers: HR1, SpO2, RSQM and HGAC use it
@@ -1625,11 +1626,12 @@ private:
     // guarantees up to the 3rd harmonic of 260 BPM, which its HPS multiplies).
     Decimator         _hr2_decim;   // BP 0.5-5 Hz  → HR2_ACF (+ future MPM/YIN)
     Decimator         _hr3_decim;   // LP 15 Hz     → HR3
-    // Blind window after an accepted beat, in samples: ignores further threshold crossings so
-    // the dicrotic notch is not counted as a second beat. Derived from hr1_refractory_s —
-    // see there for why 0.185 s and why a FIXED value cannot protect bradycardia.
-    uint32_t          _hr1_refractory_samples;
-    float             _hr1_dc_alpha;
+    Decimator         _hr1_decim;   // LP 15 Hz     → HR1 at 100 Hz (v0.122), then HP 0.5 Hz
+    // Blind window after an accepted beat, in HR1's DECIMATED samples (float: 18.5 at 100 Hz):
+    // ignores further threshold crossings so the dicrotic notch is not counted as a second beat.
+    // Derived from hr1_refractory_s — see there for why 0.185 s and why a FIXED value cannot
+    // protect bradycardia.
+    float             _hr1_refractory_samples;
 
     // ── SpO2 state ──
     // DC and AC² power for IR and RED channels, tracked via EmaChannel. EXPERIMENT (OT-domain
@@ -1763,13 +1765,19 @@ private:
     float _ppgdisp_amp_of_pi(float pi) const;
     void _pi_window_reset();          // empties the window (block sum, buffers, totals)
 
-    // ── HR1 state ──
-    float    _hr1_dc;
+    // ── HR1 state (detector on HR1's 100 Hz decimated samples since v0.122) ──
+    // A crossing time is an index of the decimated sample plus a fraction (linear interpolation
+    // between the sample below and the one above the threshold): kept as uint32 + float so the
+    // 10 ms sample does not quantise the RR, and the index does not lose float precision over days.
     float    _hr1_running_max;
     bool     _hr1_ppg_above_thresh;
-    uint32_t _hr1_last_peak_idx;
-    uint32_t _hr1_sample_idx;
-    int32_t  _hr1_intervals[5];
+    float    _hr1_prev;               // previous filtered sample (valid when _hr1_has_prev)
+    bool     _hr1_has_prev;
+    uint32_t _hr1_cross_idx;          // last threshold crossing: decimated sample index ...
+    float    _hr1_cross_frac;         // ... plus fraction (may be < 0, see _hr1_update)
+    bool     _hr1_has_cross;
+    uint32_t _hr1_sample_idx;         // decimated samples since the last reset
+    float    _hr1_rr_s[5];            // last 5 RR intervals [s], newest first
     uint8_t  _hr1_interval_count;
 
     // ── Decimated analysis rate — the invariant, not the factor ───────────────
@@ -1811,6 +1819,12 @@ private:
     // two estimators depend on. Decide it with the offline experiment, not by guessing.
     static constexpr float hr2_decim_target_rate_hz    = 50.0f;
     static constexpr float hr3_decim_target_rate_hz = 50.0f;
+    // HR1's chain (v0.122): 100 Hz, the rate of the published benchmark of PPG beat detectors
+    // (Charlton et al. 2022) and 10 ms per sample before the crossing is interpolated. The factor
+    // is derived like the other chains': exact at 500, 800, 1000 and 1600 Hz; at 1250 Hz
+    // lroundf(12.5) = 13 gives 96.15 Hz, harmless because every HR1 parameter is in seconds
+    // converted at the rate really achieved.
+    static constexpr float hr1_decim_target_rate_hz = 100.0f;
 
     // ── HR2 — autocorrelation-based HR algorithm ──────────────────────────────
     // Bandpass-filters led1_sub (0.5–5 Hz), decimates via _hr2_decim,
@@ -1876,8 +1890,6 @@ private:
     uint8_t  _spo2_r_method;
     float    _spo2_r_method2_reg_corr_min;
     bool     _spo2_pulse_gate_enable;
-    float    _hr1_dc_tau_s;
-    float    _hr1_lp_cutoff_hz;
     // Decay of the running max that sets HR1's detection threshold. Was a bare 0.9999f literal
     // inside _hr1_update() until v0.87 — a PER-SAMPLE factor, so tau was 10 000 samples: 20 s at
     // 500 Hz but 6.25 s at 1600 Hz. That silently relaxed the threshold 3.2x faster at the top of
@@ -1886,7 +1898,7 @@ private:
     // Fraction of the running max at which a rising edge counts as a beat. The single parameter
     // that most determines whether a beat is counted; a bare literal until v0.88.
     float    _hr1_threshold_fraction;
-    float    _hr1_max_decay_alpha;           // derived: exp(-1/(tau × fs))
+    float    _hr1_max_decay_alpha;           // derived: exp(-1/(tau × HR1's decimated rate))
     float    _hr1_sqi_cv_max;
     float    _hr2_min_corr;
     // Configured in SECONDS (the source of truth) and converted to decimated samples in
@@ -2033,15 +2045,17 @@ public:
     // at the previous rate in play.
     uint32_t test_settling_countdown() const { return _switched_rc_settling_countdown; }
     uint32_t test_hr2_buf_count() const      { return _hr2_buf_count; }
-    uint32_t test_hr1_ma_len() const         { return _hr1_ma_len; }
+    // HR1's decimation chain (v0.122): 100 Hz target, factor derived from the AFE rate.
+    float    test_hr1_decim_rate_hz() const  { return _hr1_decim.rate_hz; }
+    uint16_t test_hr1_decim_factor() const   { return _hr1_decim.factor; }
+    uint32_t test_hr1_decim_phase() const    { return _hr1_decim.phase; }
     // Every time-valued derived parameter, so a test can assert its value in SECONDS is held
     // across the whole PRF catalogue (see test_time_parameters_hold_across_catalogue).
     int      test_spo2_buf_n() const               { return _spo2_buf_n; }
     uint32_t test_spo2_buf_count() const           { return _spo2_buf_count; }
     float    test_spo2_block_rate_hz() const       { return _spo2_block_clock.rate_hz; }
-    uint32_t test_hr1_refractory_samples() const   { return _hr1_refractory_samples; }
+    float    test_hr1_refractory_samples() const   { return _hr1_refractory_samples; }   // decimated samples
     uint32_t test_rsqm_probe_min_samples() const   { return _rsqm_probe_state_min_samples; }
-    float    test_hr1_dc_alpha() const             { return _hr1_dc_alpha; }
     float    test_hr1_max_decay_alpha() const      { return _hr1_max_decay_alpha; }
     uint32_t test_hr2_update_interval() const      { return _hr2_update_interval; }
     uint32_t test_hr3_update_interval() const      { return _hr3_update_interval; }

@@ -136,6 +136,37 @@ void test_lp4_dc_gain_and_precharge() {
     TEST_ASSERT_FLOAT_WITHIN(1.0e-8f, 1.0e-4f, last);
 }
 
+// ── 2nd-order Butterworth high-pass (v0.122, HR1's chain at 100 Hz, corner 0.5 Hz) ──────────
+static float hp_amplitude(float freq_hz, float fs = 100.0f, int n = 8000) {
+    INCUNEST_AFE4490::TestBiquadFilter f;
+    f.init_hp(0.5f, fs);
+    f.reset();
+    return sine_amplitude_after_filter(f, freq_hz, fs, n);
+}
+
+// Butterworth: -3 dB at the corner.
+void test_hp_minus_3db_at_corner() {
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.7071f, hp_amplitude(0.5f));
+}
+
+// 1 Hz (60 BPM) loses 0.26 dB (0.970), 2.5 Hz (150 BPM) nothing measurable.
+void test_hp_passes_pulse_band() {
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.9701f, hp_amplitude(1.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, hp_amplitude(2.5f));
+}
+
+// b0 + b1 + b2 = 0: the precharge after reset() gives 0 for a constant input, at once and after.
+void test_hp_precharge_gives_zero_for_dc() {
+    INCUNEST_AFE4490::TestBiquadFilter f;
+    f.init_hp(0.5f, 100.0f);
+    f.reset();
+    float first = f.process(1.4e-5f);
+    float last  = first;
+    for (int i = 0; i < 500; i++) last = f.process(1.4e-5f);
+    TEST_ASSERT_FLOAT_WITHIN(1.0e-12f, 0.0f, first);
+    TEST_ASSERT_FLOAT_WITHIN(1.0e-12f, 0.0f, last);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_biquad_passband_passes);
@@ -147,5 +178,8 @@ int main() {
     RUN_TEST(test_lp4_minus_3db_at_cutoff);
     RUN_TEST(test_lp4_attenuates_decimated_nyquist);
     RUN_TEST(test_lp4_dc_gain_and_precharge);
+    RUN_TEST(test_hp_minus_3db_at_corner);
+    RUN_TEST(test_hp_passes_pulse_band);
+    RUN_TEST(test_hp_precharge_gives_zero_for_dc);
     return UNITY_END();
 }

@@ -441,6 +441,87 @@ intervals out of four. That is the real deficiency, it belongs to the gate's own
 (`hr1_sqi_cv_max` = 0.15, one of the parameters with no documented provenance), and neither a
 different filter nor a different detector addresses it.
 
+### 5.5 One front end for every HR1 method (2026-11-16)
+
+**Decision (Alex, 2026-11-16), for the family-1 study and HR1LAB:** every HR1 method — today's
+detector (`HR1_THR`) and the candidates `HR1_TERMA`, `HR1_SSF` (qppg) and `HR1_MSPTD` — reads the
+same biquad front end, and the moving average of §5.1 is dropped from the comparison:
+
+```
+OT_LED1 (AFE rate) → LowPass4 15 Hz (HR3's, Q 0.5412 / 1.3066) → negate → decimate to 100 Hz
+                   → 2nd-order Butterworth high-pass 0.5 Hz (Q 0.7071) → detector
+```
+
+Implemented in PulseNest's offline bench (`pulsenest/hr1_bench.py`, `FrontEnd`). The bench first
+reproduces the board's HR1 with the moving average (same validity in 97.9–100 % of 0.5 s rows over
+the 19 stored sessions, HR1 within 1 % in 99.1–100 %, `experiments/hr1_board_mirror_20261116.py`),
+so the comparison starts from the device as it is.
+
+**Ported in v0.122 (Alex, 2026-11-16, "Sí, pórtalo", after the family-1 report).** The front end
+alone, with today's detector and rule: on three ECG neonates against the ward monitor (PulseNest
+`docs/hr1_methods_20261116.md`, F3) HR1 published 47.2 → 66.4 % of the time at the same honesty
+(0.3 % wrong of what it publishes), its start-up went from 12 to 2.5 s (median over 84 applications
+of the probe on SUBJ08), and the MS100 plateaus stayed right from 30 to 240 bpm; weighted total 26.1 →
+14.5 on the fixed scales of 2026-11-15. The start-up was the DC estimate starting from zero: OT minus
+an estimate still rising stays far below zero, so no beat crosses the threshold for about τ·ln(DC/AC)
+≈ 7 s at 1 % modulation; the precharged biquads have no such transient. The library reproduces the
+bench on the 19 stored sessions (same validity in 99.97 % of 25 158 outputs, HR1 within 0.1 bpm in
+99.77 %, `experiments/hr1_port_check_20261116.py`; the outliers are threshold crossings that float32
+and float64 decide differently). Choices made in the port, beyond the bench:
+- **HR1's own `LowPass4`, not HR3's.** Sharing it would save two biquads per AFE sample (both read
+  OT_LED1) but would couple the two chains (`setHR3Filter` would move HR1) against the rule that the
+  chains share nothing (spec §5.3.1); the cost of a second instance is below the moving average's.
+- **The crossing interpolated between decimated samples**, as the bench measured; the crossing index
+  kept as uint32 plus a float fraction so that the RR does not lose precision after days.
+- **The refractory quirk kept** (a crossing inside the refractory restarts the interval): the change
+  is the front end only, as measured; fixing it is a separate decision.
+- **The API follows HR2 and HR3:** `setHR1Filter(f_low, f_high)` replaces `setHR1DcTauS()` and
+  `setHR1LpCutoffHz()`, and validates the band (0 < f_low < f_high < 0.45 × the decimated rate).
+
+Not ported, and why: the detectors `HR1_SSF` and `HR1_MSPTD` publish more (82–86 % on our neonates)
+but with the papers' values SSF fails at 30 and 240 bpm on the MS100 and starts 8.5 s late, and MSPTD
+decides up to 11 s late; the rule `R1` publishes more but is wrong 3–13 % under artefact. Both wait
+for part 2 of the study (parameters chosen on the MIMIC PERform training neonates).
+
+**Why one front end and not one per method.** The four detectors then differ only in the
+detector, so a difference in the scores belongs to the detector (the reverse of §5.4's lesson: there
+a gate hid differences; here different filters would create them), and their beats share one delay,
+so they can be compared and voted beat by beat in the combination phase. The published filters
+could not be kept anyway: they are zero-phase (ERMA's 0.5–8 Hz band-pass and its moving averages run
+forward and backward in Charlton's code, MIT licence, read 2026-11-16), and a monitor must be causal.
+Charlton et al. 2022 (Physiol Meas 43 085007) did the same: one common 0.67–8 Hz band-pass at 100 Hz
+for all fifteen detectors, with each detector's own steps on top.
+
+**Why not keep the moving average.** Its −3 dB point is near 4.4 Hz (50 samples at 500 Hz). At
+260 bpm the fundamental is 4.3 Hz and the 2nd harmonic is lost, so a fast neonatal beat arrives
+almost sinusoidal and the detectors that read the slope or the shape (SSF, TERMA) lose what they are
+built on. §5.4 found no ACCURACY reason to replace it behind today's gate; the reasons here are
+structural (one input for the comparison, harmonics up to 260 bpm, no rate-dependent length:
+the class of defect `hr1_ma_max_len` fixed in v0.86b) and the measurement decides the rest.
+
+**The characteristics.** Fundamental kept from 30 to 260 bpm (0.5 Hz is HR2's corner, measured
+in rationale §8; 0.35 Hz was rejected there for drift; at 30 bpm the corner leads the peak, but by
+the same amount on every beat, so the RR does not change). Low-pass at 15 Hz keeps the 2nd and 3rd
+harmonics up to 260 bpm and is the anti-alias filter for 100 Hz (−42 dB at 50 Hz); on the board it
+can be HR3's own LowPass4, one filter feeding two decimators (50 and 100 Hz). Two biquads in cascade,
+not one band-pass biquad: a single 0.5–15 Hz section falls 6 dB per octave each side and hardly
+attenuates at 50 Hz. 100 Hz: Charlton's rate, 10 ms per sample before parabolic interpolation; the
+factor is derived as in §5.3.1 of the spec, so at 1250 Hz the rate is 104.2 Hz.
+
+**Rejected or deferred.** A filter per method (no attribution, no common delay). Keeping the moving
+average (harmonics). An 8 Hz low-pass as in Charlton and ERMA: cleaner against noise but loses the
+2nd harmonic above ~240 bpm; measured in part 2 of the study, 15 Hz until then. Respiration
+(0.5–1 Hz in neonates) is inside the cardiac band and is not the filter's job.
+
+**Findings while implementing (papers' values, synthetic pulses, `test_pulsenest/hr1_bench_test.py`).**
+qppg's 0.34 s eye-closing locks out beats above about 176 bpm (at 240 bpm it lost 74 of 192): a
+neonatal limit of the published value, and one plausible part of the "missed beats in neonates" that
+Charlton 2022 reports. TERMA's 667 ms beat average is longer than a beat at 160 bpm (375 ms) and,
+at 30 bpm, counted the dicrotic wave of every beat. MSPTD picks as its scale the one with the most
+local maxima; on an exactly periodic pulse that can land on 1.5 periods instead of half a period and
+lose beats (real RR variability breaks it). Today's detector has a quirk worth knowing: a crossing
+inside the refractory is not a beat but restarts the interval, so the next RR is measured from it.
+
 ---
 
 ## 6. Sample-rate dependency audit (2026-09-04)

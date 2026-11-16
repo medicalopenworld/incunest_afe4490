@@ -126,8 +126,14 @@ void test_rate_change_tears_down_old_state() {
     }
     TEST_ASSERT_TRUE_MESSAGE(afe.test_hr2_buf_count() > 0, "HR2 buffer should have filled");
     TEST_ASSERT_TRUE_MESSAGE(afe.test_hr3_buf_count() > 0, "HR3 buffer should have filled");
+    // HR1's chain (v0.122): leave its decimation phase mid-cycle (6002 samples, factor 5 → 2).
+    for (int i = 0; i < 6002; i++)
+        afe.test_feed_hr1(1.4e-5f + 7.0e-6f * sinf(2.0f * (float)M_PI * 1.0f * i / 500.0f),
+                          ProbeState::PROBE_APPLIED);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2, afe.test_hr1_decim_phase(), "HR1 phase should be mid-cycle");
 
     afe.setSampleRate(AFE4490SampleRate::HZ_1000);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, afe.test_hr1_decim_phase(), "HR1 decimation phase must restart");
 
     // Buffers emptied: an 8 s window must not mix samples decimated at two different rates.
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, afe.test_hr2_buf_count(),
@@ -162,22 +168,23 @@ void test_same_rate_is_a_no_op() {
                                      "a no-change call must not arm settling");
 }
 
-// HR1's moving average must actually cut where it is configured to, at EVERY catalogue rate.
-// Until v0.86b hr1_ma_max_len was 64, so 800-1600 Hz ran clamped with an effective cutoff of
-// 6.2-12.5 Hz instead of 5 Hz — silently. A too-wide filter lets the dicrotic notch reach the
-// threshold detector, which double-counts and reports a doubled HR; the 0.185 s refractory
-// mitigates that unevenly, and least of all in bradycardia, where the notch falls outside it.
-void test_hr1_ma_not_clamped_across_catalogue() {
+// HR1's chain (v0.122) holds its 100 Hz target with the factor derived from the AFE rate: exact
+// at 500, 800, 1000 and 1600 Hz; at 1250 Hz lroundf(12.5) = 13 gives 96.15 Hz. Every HR1 time is
+// converted at the rate really achieved, so what must hold is the rate within a few percent and
+// the factor being the rounded ratio. (Replaces test_hr1_ma_not_clamped_across_catalogue: the
+// moving average it guarded is gone.)
+void test_hr1_chain_rate_across_catalogue() {
     INCUNEST_AFE4490 afe;
     for (uint8_t i = 0; i < INCUNEST_AFE4490::sampleRateCount(); i++) {
         const uint16_t hz = kAFE_SAMPLE_RATE_HZ[i];
         afe.setSampleRate((AFE4490SampleRate)i);
-        const uint32_t want = (uint32_t)((hz / (2.0f * 5.0f)) + 0.5f);   // default 5 Hz cutoff
-        char msg[112];
-        snprintf(msg, sizeof(msg),
-                 "%u Hz: HR1 MA clamped -> effective cutoff %.1f Hz instead of 5 Hz",
-                 hz, hz / (2.0f * (float)afe.test_hr1_ma_len()));
-        TEST_ASSERT_EQUAL_UINT32_MESSAGE(want, afe.test_hr1_ma_len(), msg);
+        char msg[96];
+        const uint16_t want = (uint16_t)lroundf((float)hz / 100.0f);
+        snprintf(msg, sizeof(msg), "%u Hz: HR1 decimation factor", hz);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(want, afe.test_hr1_decim_factor(), msg);
+        snprintf(msg, sizeof(msg), "%u Hz: HR1 chain rate %.2f Hz", hz, afe.test_hr1_decim_rate_hz());
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(4.0f, 100.0f, afe.test_hr1_decim_rate_hz(), msg);
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(1e-3f, (float)hz / (float)want, afe.test_hr1_decim_rate_hz(), msg);
     }
 }
 
@@ -223,17 +230,14 @@ void test_time_parameters_hold_across_catalogue() {
             (float)afe.test_spo2_buf_n() / afe.test_spo2_block_rate_hz(), msg);
         afe.setSpO2WindowS(6.0f);
 
+        // HR1's refractory lives in HR1's DECIMATED samples since v0.122 (float, not truncated).
         snprintf(msg, sizeof(msg), "%u Hz: HR1 refractory drifted from 0.185 s", hz);
-        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.005f, 0.185f,
-            (float)afe.test_hr1_refractory_samples() / fs, msg);
+        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.001f, 0.185f,
+            afe.test_hr1_refractory_samples() / afe.test_hr1_decim_rate_hz(), msg);
 
         snprintf(msg, sizeof(msg), "%u Hz: RSQM probe debounce drifted", hz);
         TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.02f, 0.2f,
             (float)afe.test_rsqm_probe_min_samples() / fs, msg);
-
-        snprintf(msg, sizeof(msg), "%u Hz: HR1 DC tau drifted from 1.6 s", hz);
-        TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.05f, 1.6f,
-            -1.0f / (logf(afe.test_hr1_dc_alpha()) * fs), msg);
 
         // --- Recompute periods: exercised with 1.0 s, NOT the 0.5 s default, so a constant equal
         // to the default cannot pass. They live in decimated samples, hence the chain rate.
@@ -271,18 +275,27 @@ void test_hr1_running_max_decay_is_time_based() {
         afe.setSampleRate((AFE4490SampleRate)i);
         afe.setHR1MaxDecayTauS(TAU_S);
 
-        // _hr1_update() removes DC and NEGATES (peaks up for conventional PPG polarity), so the
-        // input has to go BELOW the DC estimate to produce a positive peak. And the moving average
-        // must fill before the peak reaches full amplitude, hence 2x its length.
-        const uint32_t charge = 2u * afe.test_hr1_ma_len();
-        for (uint32_t k = 0; k < charge; k++)
-            afe.test_feed_hr1(-1.0e-4f, ProbeState::PROBE_APPLIED);
-        const float peak = afe.test_hr1_running_max();
+        // _hr1_update() high-passes and NEGATES (peaks up for conventional PPG polarity), so a
+        // constant gives nothing: the charge is a short dip of the input (50 ms), which the front
+        // end turns into a positive pulse. The peak of the running max is taken once the pulse is
+        // over (the running max stops growing), and the decay is timed from there.
+        for (uint32_t k = 0; k < (uint32_t)(0.5f * hz); k++)          // 0.5 s of baseline
+            afe.test_feed_hr1(1.0e-5f, ProbeState::PROBE_APPLIED);
+        for (uint32_t k = 0; k < (uint32_t)(0.05f * hz); k++)         // 50 ms dip
+            afe.test_feed_hr1(0.0f, ProbeState::PROBE_APPLIED);
+        float peak = afe.test_hr1_running_max();
+        for (;;) {                                                     // until the running max decays
+            afe.test_feed_hr1(1.0e-5f, ProbeState::PROBE_APPLIED);
+            const float m = afe.test_hr1_running_max();
+            if (m < peak) break;
+            peak = m;
+        }
         TEST_ASSERT_TRUE_MESSAGE(peak > 0.0f, "running max did not charge");
 
-        const uint32_t n = (uint32_t)(T_S * (float)hz);
+        // The first decayed decimated sample is already in; T seconds from the peak.
+        const uint32_t n = (uint32_t)(T_S * (float)hz) - (uint32_t)afe.test_hr1_decim_factor();
         for (uint32_t k = 0; k < n; k++)
-            afe.test_feed_hr1(0.0f, ProbeState::PROBE_APPLIED);
+            afe.test_feed_hr1(1.0e-5f, ProbeState::PROBE_APPLIED);
 
         const float frac = afe.test_hr1_running_max() / peak;
         char msg[136];
@@ -311,7 +324,7 @@ int main() {
     RUN_TEST(test_chains_hold_50hz_across_catalogue);
     RUN_TEST(test_rate_change_tears_down_old_state);
     RUN_TEST(test_same_rate_is_a_no_op);
-    RUN_TEST(test_hr1_ma_not_clamped_across_catalogue);
+    RUN_TEST(test_hr1_chain_rate_across_catalogue);
     RUN_TEST(test_time_parameters_hold_across_catalogue);
     RUN_TEST(test_hr1_running_max_decay_is_time_based);
     RUN_TEST(test_hr1_max_decay_default_is_the_measured_value);

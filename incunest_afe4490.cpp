@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.121 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.122 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -154,8 +154,13 @@ namespace {
     constexpr float    ppgdisp_norm_pi_max   = 20.0f;   // % — setter bound: top of the displayed PI range (spo2_pi_max)
 
     // ── HR1 ───────────────────────────────────────────────────────────────────
-    constexpr float    hr1_dc_tau_s        = 1.6f;     // s  — DC removal IIR time constant
-    constexpr float    hr1_lp_cutoff_hz    = 5.0f;     // Hz — low-pass cutoff before peak detection
+    // The common front end of the HR1 methods (v0.122, spec §5.2, rationale §5.5): HR3's 15 Hz
+    // corner keeps the 2nd and 3rd harmonics up to 260 bpm and is the anti-alias filter for 100 Hz;
+    // HR2's 0.5 Hz corner removes the baseline (0.35 Hz was rejected for HR2 for drift, rationale
+    // §8). Measured against the board's v0.121 chain on three ECG neonates (PulseNest
+    // docs/hr1_methods_20261116.md): published 47 → 66 %, same honesty, start-up 12 → 2.5 s.
+    constexpr float    hr1_f_low_hz        = 0.5f;     // Hz — high-pass corner (100 Hz chain)
+    constexpr float    hr1_f_high_hz       = 15.0f;    // Hz — low-pass corner (AFE rate, 4th order)
     // s — running-max decay: how long an old peak keeps holding the detection threshold up.
     // MEASURED (v0.93). The former 20 s was not a choice: it is the historical 0.9999
     // per-sample factor expressed in seconds at 500 Hz (exp(-1/(20*500)) = 0.9999). At 20 s the
@@ -438,9 +443,8 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _ppgdisp_bpf(), _ppgdisp_lpf(),
       _ppgdisp_mode(AFE4490PPGDispMode::NO_NORM), _ppgdisp_tracker(), _ppgdisp_pi_last(NAN), _ppgdisp_amp(ppgdisp_norm_pi_floor),
       _ppgdisp_norm_pi_lo(ppgdisp_norm_pi_lo), _ppgdisp_norm_pi_hi(ppgdisp_norm_pi_hi),
-      _hr1_ma_len(0), _hr1_ma_idx(0), _hr1_ma_sum(0.0f),
-      _hr1_refractory_samples(0),
-      _hr1_dc_alpha(0.0f),
+      _hr1_lp(), _hr1_hp(),
+      _hr1_refractory_samples(0.0f),
       _spo2_ch_ir_ema{},
       _spo2_ch_red_ema{},
       _spo2_bp_ir(), _spo2_bp_red(),
@@ -455,9 +459,10 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _pi_bpf(), _pi_block_clock(),
       _pi_ac_sum(0.0f), _pi_dc_sum(0.0f), _pi_ac_block_sum(0.0f), _pi_dc_block_sum(0.0f),
       _pi_buf_n(1), _pi_buf_idx(0), _pi_buf_count(0), _pi_box(NAN),
-      _hr1_dc(0.0f),
       _hr1_running_max(0.0f), _hr1_ppg_above_thresh(false),
-      _hr1_last_peak_idx(0), _hr1_sample_idx(0),
+      _hr1_prev(0.0f), _hr1_has_prev(false),
+      _hr1_cross_idx(0), _hr1_cross_frac(0.0f), _hr1_has_cross(false),
+      _hr1_sample_idx(0),
       _hr1_interval_count(0),
       _hr2_bpf(),
       _hr2_buf_idx(0), _hr2_buf_count(0), _hr2_update_counter(0),
@@ -474,8 +479,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
       _spo2_r_method(spo2_r_method_default),
       _spo2_r_method2_reg_corr_min(spo2_r_method2_reg_corr_min),
       _spo2_pulse_gate_enable(spo2_pulse_gate_enable),
-      _hr1_dc_tau_s(hr1_dc_tau_s),
-      _hr1_lp_cutoff_hz(hr1_lp_cutoff_hz), _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
+      _hr1_max_decay_tau_s(hr1_max_decay_tau_s),
       _hr1_threshold_fraction(hr1_threshold_fraction),
       _hr1_max_decay_alpha(0.0f),
       _hr1_sqi_cv_max(hr1_sqi_cv_max),
@@ -492,9 +496,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     // Quantize initial LED currents to the DAC grid (range already set in init list)
     _afe_led1_current_mA = _quantize_led_mA(_afe_led1_current_mA);
     _afe_led2_current_mA = _quantize_led_mA(_afe_led2_current_mA);
-    memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
-    _hr1_ma_idx = 0; _hr1_ma_sum = 0.0f;
-    memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
+    memset(_hr1_rr_s, 0, sizeof(_hr1_rr_s));
     memset(_hr2_buf, 0, sizeof(_hr2_buf));
     memset(_hr3_buf, 0, sizeof(_hr3_buf));
     memset(_pi_ac_buf, 0, sizeof(_pi_ac_buf));
@@ -506,6 +508,7 @@ INCUNEST_AFE4490::INCUNEST_AFE4490()
     _hr2_bpf.f_low     = 0.5f;  _hr2_bpf.f_high     =  5.0f;
     _pi_bpf.f_low      = pi_bp_f_low_hz;  _pi_bpf.f_high = pi_bp_f_high_hz;
     _hr3_lp.f_high     = 15.0f;   // low-pass only (v0.83); 4th order since v0.97
+    _hr1_lp.f_high     = hr1_f_high_hz;  _hr1_hp.f_low = hr1_f_low_hz;   // v0.122 front end
     _copy_spo2_r_id(_spo2_r_curve_id, spo2_r_curve_id_default);
     _copy_spo2_r_id(_spo2_r_curve_r_method_id, spo2_r_curve_r_method_id_default);
     _recalc_rate_params();
@@ -1086,17 +1089,21 @@ void INCUNEST_AFE4490::setSpO2SqiPiThresholds(float lo_pct, float hi_pct, float 
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
-void INCUNEST_AFE4490::setHR1DcTauS(float tau_s) {
+// HR1's band (v0.122). The low-pass runs at the AFE rate and the high-pass at HR1's decimated rate,
+// so the upper corner must stay well under that rate's Nyquist (0.45 × rate: the low-pass is the
+// anti-alias filter of the decimation). Both filters are reset: a corner change mid-signal would
+// otherwise ring through the detector.
+void INCUNEST_AFE4490::setHR1Filter(float f_low_hz, float f_high_hz) {
+    if (!(f_low_hz > 0.0f) || !(f_high_hz > f_low_hz) || !(f_high_hz < 0.45f * _hr1_decim.rate_hz)) {
+        ESP_LOGE(TAG, "setHR1Filter: %.3f-%.3f Hz invalid (0 < low < high < %.1f Hz) — ignored",
+                 f_low_hz, f_high_hz, 0.45f * _hr1_decim.rate_hz);
+        return;
+    }
     if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr1_dc_tau_s = tau_s;
-    _recalc_rate_params();
-    if (_initialized) xSemaphoreGive(_state_mutex);
-}
-
-void INCUNEST_AFE4490::setHR1LpCutoffHz(float hz) {
-    if (_initialized) xSemaphoreTake(_state_mutex, portMAX_DELAY);
-    _hr1_lp_cutoff_hz = hz;
-    _recalc_rate_params();
+    _hr1_lp.init(f_high_hz, (float)_afe_sample_rate_hz);
+    _hr1_hp.init_hp(f_low_hz, _hr1_decim.rate_hz);
+    _hr1_lp.reset();
+    _hr1_hp.reset();
     if (_initialized) xSemaphoreGive(_state_mutex);
 }
 
@@ -1293,8 +1300,8 @@ AFE4490Config INCUNEST_AFE4490::getConfig() {
     _copy_spo2_r_id(cfg.pi_method_id, PI_METHOD_ID);
     cfg.pi_bp_f_low_hz        = _pi_bpf.f_low;
     cfg.pi_bp_f_high_hz       = _pi_bpf.f_high;
-    cfg.hr1_dc_tau_s          = _hr1_dc_tau_s;
-    cfg.hr1_lp_cutoff_hz      = _hr1_lp_cutoff_hz;
+    cfg.hr1_f_low_hz          = _hr1_hp.f_low;
+    cfg.hr1_f_high_hz         = _hr1_lp.f_high;
     cfg.hr1_max_decay_tau_s   = _hr1_max_decay_tau_s;
     cfg.hr1_threshold_fraction = _hr1_threshold_fraction;
     cfg.hr1_sqi_cv_max        = _hr1_sqi_cv_max;
@@ -1424,13 +1431,7 @@ void INCUNEST_AFE4490::_diag_task_trampoline(void* pv) {
 // ── _reset_algorithms() ───────────────────────────────────────────────────────
 void INCUNEST_AFE4490::_reset_algorithms() {
     _spo2_reset_state();
-    _hr1_dc                    = 0.0f;
-    _hr1_running_max           = 0.0f;
-    _hr1_ppg_above_thresh   = false;
-    _hr1_last_peak_idx  = 0;
-    _hr1_sample_idx     = 0;
-    _hr1_interval_count = 0;
-    memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
+    _hr1_reset_state();
     _ppgdisp_bpf.reset(); _ppgdisp_lpf.reset();
     _ppgdisp_tracker.reset(); _ppgdisp_pi_last = NAN;
     _hr2_bpf.reset();
@@ -2011,7 +2012,9 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     // achieved — never the nominal target.
     _hr2_decim.configure(sample_rate_hz, hr2_decim_target_rate_hz);
     _hr3_decim.configure(sample_rate_hz, hr3_decim_target_rate_hz);
-    _hr1_refractory_samples      = (uint32_t)(hr1_refractory_s       * sample_rate_hz);
+    _hr1_decim.configure(sample_rate_hz, hr1_decim_target_rate_hz);
+    // HR1's detector runs on its 100 Hz chain (v0.122): its times convert at THAT rate.
+    _hr1_refractory_samples      = hr1_refractory_s * _hr1_decim.rate_hz;
     _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * sample_rate_hz);
     if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
     // SpO2 EMAs: only the mean (DC) is read since v0.102, so var_tau = mean_tau (as HGAC's).
@@ -2038,8 +2041,7 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _hgac_ema_slow_led2.init(hgac_ema_slow_tau_s, hgac_ema_slow_tau_s, sample_rate_hz, 3.0f * hgac_ema_slow_tau_s);
     _hgac_ema_ambient_led1.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, sample_rate_hz, 3.0f * hgac_ema_ambient_tau_s);
     _hgac_ema_ambient_led2.init(hgac_ema_ambient_tau_s, hgac_ema_ambient_tau_s, sample_rate_hz, 3.0f * hgac_ema_ambient_tau_s);
-    _hr1_dc_alpha           = expf(-1.0f / (_hr1_dc_tau_s * sample_rate_hz));
-    _hr1_max_decay_alpha    = expf(-1.0f / (_hr1_max_decay_tau_s * sample_rate_hz));
+    _hr1_max_decay_alpha    = expf(-1.0f / (_hr1_max_decay_tau_s * _hr1_decim.rate_hz));
     // Recompute periods: configured in seconds, applied in DECIMATED samples, so each uses its
     // own chain's achieved rate (§5.3.1) rather than the AFE rate.
     _hr2_update_interval = (uint32_t)roundf(_hr2_update_interval_s * _hr2_decim.rate_hz);
@@ -2050,19 +2052,8 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _ts_emit_interval = (uint32_t)roundf(ts_emit_period_s * sample_rate_hz);
     if (_ts_emit_interval < 1u) _ts_emit_interval = 1u;
 #endif
-    _hr1_ma_len             = (uint32_t)roundf(sample_rate_hz / (2.0f * _hr1_lp_cutoff_hz));
-    if (_hr1_ma_len < 1) _hr1_ma_len = 1;
-    if (_hr1_ma_len > (uint32_t)hr1_ma_max_len) {
-        // Clamped: the filter no longer cuts where it was configured to, which lets the dicrotic
-        // notch through to HR1's threshold detector and risks double-counting (a doubled HR).
-        // Never silent — before v0.86b this clamp was mute and hit four of the five catalogue
-        // rates. See hr1_ma_max_len for why no fixed capacity can cover every cutoff.
-        ESP_LOGE(TAG, "HR1 moving average clamped: %u samples needed at %.0f Hz / %.1f Hz cutoff, "
-                      "%d available -> effective cutoff %.1f Hz",
-                 (unsigned)_hr1_ma_len, sample_rate_hz, _hr1_lp_cutoff_hz,
-                 hr1_ma_max_len, sample_rate_hz / (2.0f * (float)hr1_ma_max_len));
-        _hr1_ma_len = (uint32_t)hr1_ma_max_len;
-    }
+    _hr1_lp.init(_hr1_lp.f_high, sample_rate_hz);
+    _hr1_hp.init_hp(_hr1_hp.f_low, _hr1_decim.rate_hz);
     _ppgdisp_bpf.init_bp(_ppgdisp_bpf.f_low, _ppgdisp_bpf.f_high, sample_rate_hz);
     _ppgdisp_lpf.init_butter5_pairs(_ppgdisp_lpf.f_high, sample_rate_hz);
     _ppgdisp_tracker.configure(sample_rate_hz);
@@ -2181,6 +2172,23 @@ void INCUNEST_AFE4490::BiquadFilter::init_bp(float f_low_hz, float f_high_hz, fl
     _b2 = -bw * k / d;
     _a1 =  2.0f * (o0sq - k*k) / d;
     _a2 =  (k*k - bw*k + o0sq) / d;
+}
+
+void INCUNEST_AFE4490::BiquadFilter::init_hp(float f_low_hz, float sample_rate_hz, float q) {
+    // 2nd-order high-pass via bilinear transform, prewarped at f_low_hz (v0.122, HR1's chain).
+    // Analog prototype: H(s) = s² / (s² + (Ω/q)·s + Ω²); q = 1/√2 is Butterworth (-3 dB at
+    // f_low_hz). b0 + b1 + b2 = 0, so the precharge of process() gives 0 for a constant input.
+    // State unchanged — call reset() if needed.
+    f_low = f_low_hz;
+    float Ohm  = tanf(3.14159265358979f * f_low_hz / sample_rate_hz);
+    float Ohm2 = Ohm * Ohm;
+    float inv_q = 1.0f / q;
+    float d    = 1.0f + inv_q * Ohm + Ohm2;
+    _b0 =  1.0f / d;
+    _b1 = -2.0f / d;
+    _b2 =  _b0;
+    _a1 =  2.0f * (Ohm2 - 1.0f) / d;
+    _a2 = (1.0f - inv_q * Ohm + Ohm2) / d;
 }
 
 void INCUNEST_AFE4490::BiquadFilter::init_lp(float f_high_hz, float sample_rate_hz, float q) {
@@ -2972,64 +2980,83 @@ void INCUNEST_AFE4490::_pi_update_sample(float ot_ir, ProbeState probe_state) {
 }
 
 // ── HR algorithm ──────────────────────────────────────────────────────────────
-// Adaptive-threshold peak detection on filtered PPG.
-// Threshold = 0.6 × running_max; refractory = _hr1_refractory_samples.
-// HR reported from average of 5 consecutive RR intervals.
+// HR1 (spec §5.2, v0.122): the common front end of the HR1 methods, then today's detector.
+//   front end  OT → LowPass4 (hr1 f_high, 15 Hz, AFE rate) → negate (peaks up) → _hr1_decim
+//              (100 Hz) → 2nd-order high-pass (hr1 f_low, 0.5 Hz); both filters precharge on their
+//              first sample after a reset, so there is no start-up transient (v0.121's DC IIR
+//              started from zero and held OT − DC far below the threshold for ~7 s).
+//   detector   rising crossing of hr1_threshold_fraction × a running max decaying with
+//              hr1_max_decay_tau_s; the crossing instant interpolated linearly between the two
+//              decimated samples around it; refractory hr1_refractory_s. A crossing inside the
+//              refractory is not a beat but restarts the interval (kept from v0.121: the next RR
+//              is measured from it).
+//   rule       mean of the last 5 RR; hr1_sqi = clamp(1 − CV / hr1_sqi_cv_max, 0, 1).
+// Mirrors PulseNest pulsenest/hr1_bench.py: FrontEnd + ThrDetector(interpolate) + RuleR0.
 // probe_state: RSQM's classification, consumed only (mirrors SpO2 v0.41 — see spec §5.1/§5.2).
+void INCUNEST_AFE4490::_hr1_reset_state() {
+    _hr1_lp.reset();
+    _hr1_hp.reset();
+    _hr1_decim.reset();
+    _hr1_running_max      = 0.0f;
+    _hr1_ppg_above_thresh = false;
+    _hr1_prev             = 0.0f;
+    _hr1_has_prev         = false;
+    _hr1_cross_idx        = 0;
+    _hr1_cross_frac       = 0.0f;
+    _hr1_has_cross        = false;
+    _hr1_sample_idx       = 0;
+    _hr1_interval_count   = 0;
+    memset(_hr1_rr_s, 0, sizeof(_hr1_rr_s));
+}
+
 void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
     if (probe_state != ProbeState::PROBE_APPLIED) {
-        // Reset every sample while not applied (idempotent — no stored "previous state"
-        // needed, fully self-contained). Also resets the MA buffer, which the original
-        // _reset_algorithms() omitted — a stale MA buffer would otherwise briefly bias the
-        // peak-detection filter right after re-application.
-        _hr1_dc                = 0.0f;
-        _hr1_running_max       = 0.0f;
-        _hr1_ppg_above_thresh  = false;
-        _hr1_last_peak_idx     = 0;
-        _hr1_sample_idx        = 0;
-        _hr1_interval_count    = 0;
-        memset(_hr1_intervals, 0, sizeof(_hr1_intervals));
-        memset(_hr1_ma_buf, 0, sizeof(_hr1_ma_buf));
-        _hr1_ma_sum = 0.0f;
-        _hr1_ma_idx = 0;
+        // Reset every sample while not applied (idempotent — no stored "previous state" needed).
+        _hr1_reset_state();
         _current_data.hr1     = NAN;
         _current_data.hr1_sqi = 0.0f;
         return;
     }
 
-    _hr1_sample_idx++;
+    // Front end: low-pass at the AFE rate (the anti-alias filter of the decimation), then one
+    // sample in factor kept; the detector and everything after it run at HR1's decimated rate.
+    const float lp = _hr1_lp.process(ir);
+    if (!_hr1_decim.step()) return;
+    const float v = _hr1_hp.process(-lp);
+    const uint32_t n = _hr1_sample_idx++;
 
-    // DC removal: IIR estimator (tau = hr1_dc_tau_s), then negate for conventional PPG polarity (peaks up)
-    _hr1_dc = _hr1_dc_alpha * _hr1_dc + (1.0f - _hr1_dc_alpha) * ir;
-    // Apply dedicated MA low-pass filter (5 Hz cutoff, independent of PPG display filter)
-    float raw = -(ir - _hr1_dc);
-    _hr1_ma_sum -= _hr1_ma_buf[_hr1_ma_idx];
-    _hr1_ma_buf[_hr1_ma_idx] = raw;
-    _hr1_ma_sum += raw;
-    _hr1_ma_idx = (_hr1_ma_idx + 1) % (int)_hr1_ma_len;
-    float ppg_filtered = _hr1_ma_sum / (float)_hr1_ma_len;
-
-    // Running max: slow exponential decay keeps it tracking signal amplitude
-    _hr1_running_max = fmaxf(_hr1_running_max * _hr1_max_decay_alpha, ppg_filtered);
-
-    float threshold = _hr1_threshold_fraction * _hr1_running_max;
+    // Running max: exponential decay per decimated sample (time constant in seconds)
+    _hr1_running_max = fmaxf(_hr1_running_max * _hr1_max_decay_alpha, v);
+    const float threshold = _hr1_threshold_fraction * _hr1_running_max;
 
     // Threshold crossing (rising edge only)
-    if (ppg_filtered > threshold && !_hr1_ppg_above_thresh) {
+    if (v > threshold && !_hr1_ppg_above_thresh) {
         _hr1_ppg_above_thresh = true;
-
-        uint32_t elapsed = _hr1_sample_idx - _hr1_last_peak_idx;
-        if (_hr1_last_peak_idx > 0 && elapsed > _hr1_refractory_samples) {
-            // Shift interval buffer and store new interval
-            for (int i = 4; i > 0; i--) _hr1_intervals[i] = _hr1_intervals[i - 1];
-            _hr1_intervals[0] = (int32_t)elapsed;
-            if (_hr1_interval_count < 5) _hr1_interval_count++;
+        // Crossing instant: linear interpolation between the previous sample and this one,
+        // n - 1 + (threshold - prev) / (v - prev). The fraction can fall below 0 when the threshold
+        // has decayed under the previous sample; kept as computed (the bench does the same).
+        uint32_t idx  = n;
+        float    frac = 0.0f;
+        if (_hr1_has_prev && v != _hr1_prev && n > 0) {
+            idx  = n - 1;
+            frac = (threshold - _hr1_prev) / (v - _hr1_prev);
         }
-        _hr1_last_peak_idx = _hr1_sample_idx;
-
-    } else if (ppg_filtered <= threshold) {
+        if (_hr1_has_cross) {
+            const float elapsed = (float)(idx - _hr1_cross_idx) + (frac - _hr1_cross_frac);  // decimated samples
+            if (elapsed > _hr1_refractory_samples) {
+                for (int i = 4; i > 0; i--) _hr1_rr_s[i] = _hr1_rr_s[i - 1];
+                _hr1_rr_s[0] = elapsed / _hr1_decim.rate_hz;
+                if (_hr1_interval_count < 5) _hr1_interval_count++;
+            }
+        }
+        _hr1_cross_idx  = idx;
+        _hr1_cross_frac = frac;
+        _hr1_has_cross  = true;
+    } else if (v <= threshold) {
         _hr1_ppg_above_thresh = false;
     }
+    _hr1_prev     = v;
+    _hr1_has_prev = true;
 
     // Need 5 intervals for a stable estimate
     if (_hr1_interval_count < 5) {
@@ -3039,10 +3066,9 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
     }
 
     float sum = 0.0f;
-    for (int i = 0; i < 5; i++) sum += (float)_hr1_intervals[i];
-    float avg_interval = sum / 5.0f;
-
-    float hr1 = ((float)_afe_sample_rate_hz * 60.0f) / avg_interval;
+    for (int i = 0; i < 5; i++) sum += _hr1_rr_s[i];
+    const float avg_rr_s = sum / 5.0f;
+    const float hr1 = 60.0f / avg_rr_s;
 
     if (hr1 >= _hr_min_bpm && hr1 <= _hr_max_bpm) {
         _current_data.hr1 = hr1;
@@ -3051,11 +3077,11 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
         // CV ≥ hr1_sqi_cv_max (15%) → SQI = 0 (arrhythmia or motion artefact).
         float var = 0.0f;
         for (int i = 0; i < 5; i++) {
-            float diff = (float)_hr1_intervals[i] - avg_interval;
+            const float diff = _hr1_rr_s[i] - avg_rr_s;
             var += diff * diff;
         }
-        float cv  = (avg_interval > 0.0f) ? sqrtf(var / 5.0f) / avg_interval : 1.0f;
-        float sqi = 1.0f - cv / _hr1_sqi_cv_max;
+        const float cv  = (avg_rr_s > 0.0f) ? sqrtf(var / 5.0f) / avg_rr_s : 1.0f;
+        const float sqi = 1.0f - cv / _hr1_sqi_cv_max;
         _current_data.hr1_sqi = fmaxf(0.0f, fminf(1.0f, sqi));
     } else {
         _current_data.hr1     = NAN;
