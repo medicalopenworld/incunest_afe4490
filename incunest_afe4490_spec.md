@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.123
+# incunest_afe4490 — Specification v0.124
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -192,6 +192,13 @@ struct AFE4490Data {
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
     uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SWITCHED_RC_SETTLING | ...
     ProbeState probe_state;  // enum ProbeState (0-4); isProbeAbsent() answers "no patient"
+    // Display quantities (v0.124, §2.1.2, §5.10): what a monitor shows. NaN = show dashes.
+    float            spo2_disp;        // SpO2 to show [%]: spo2 as it is (v0.124)
+    float            hr_disp;          // pulse rate to show [bpm]: HR2 and HR3 in agreement
+    float            pi_disp;          // PI to show [%]: pi as it is (v0.124)
+    AFE4490DispState spo2_disp_state;  // why each one is what it is: DISP_NO_PROBE,
+    AFE4490DispState hr_disp_state;    // DISP_ACQUIRING, DISP_CURRENT, DISP_HELD (reserved),
+    AFE4490DispState pi_disp_state;    // DISP_INADEQUATE
 };
 ```
 
@@ -243,6 +250,33 @@ PRP, always a number; during the switched-RC settling the last valid set is repe
 
 Why a value is missing is reported for `spo2` only (`spo2_hold_reason`), as a diagnostic. Holding a
 number on a screen, and what to show while there is none, is outside this contract.
+
+#### 2.1.2 Data contract of the display quantities (v0.124)
+
+`spo2_disp`, `hr_disp` and `pi_disp` are what a monitor shows. The clinical output quantities of
+§2.1.1 stay for tests, validation, calibration and telemetry; a display no longer reads them. Four
+rules, the same for the three (rationale §26; how each is computed: §5.10).
+
+1. **A display quantity is either a finite number or NaN.** Finite: show it. NaN: show dashes.
+   Nothing else needs checking to decide what to show.
+2. **A finite display quantity is always inside its declared range**, the ranges of §2.1.1.
+3. **Each one comes with a state** (`AFE4490DispState`), which never changes the number shown; it
+   says how to accompany it. No SQI.
+
+   | State | Quantity | What is happening | What a monitor would do |
+   |---|---|---|---|
+   | `DISP_NO_PROBE` | NaN | the probe is not applied | hide the panel |
+   | `DISP_ACQUIRING` | NaN | the probe was applied a moment ago and there is no value yet | dashes, "measuring" |
+   | `DISP_CURRENT` | finite | the value is of now | the number |
+   | `DISP_HELD` | finite | no new value; the last good one is shown | the number, marked |
+   | `DISP_INADEQUATE` | NaN | the probe is applied and there is no value | dashes, "check the probe" |
+
+4. **A held value expires**: it is never shown for longer than its limit, which is never more than
+   the 10 s of WHO/UNICEF 2019. **Nothing is held in v0.124**, which never produces `DISP_HELD`:
+   one bad second shows dashes. The hold is the next step, with its own measurements.
+
+The three are independent: there can be a pulse rate and dashes for the SpO2. The quantities are
+not rounded; turning them into the integers or decimals of a screen is the consumer's.
 
 ### 2.2 Initialization
 ```cpp
@@ -2418,6 +2452,58 @@ within 1 dB, 20 Hz is at −3 dB, 25 Hz is attenuated ≥ 10 dB and 50 Hz ≥ 40
 gave 4 and 9 dB at 25 and 50 Hz). The per-sample cost is two compares, two compare-and-moves and a division, plus the two
 biquads of the low-pass (v0.119); one `logf` per PI change.
 
+### 5.10 Display quantities — `spo2_disp`, `hr_disp`, `pi_disp` (v0.124)
+
+What a monitor shows, computed here instead of in each consumer (contract: §2.1.2; rationale §26).
+`_disp_update()` runs on every sample after the algorithms and reads only the clinical output
+quantities of the sample. v0.124 is step 1: the computation moves into the library **without
+changing what a display showed**.
+
+**`hr_disp`** is the rule IncuNest's display applied (motherBoard up to 18.58.0, `CommTask`),
+unchanged. HR2 and HR3 *agree* when both have a value, they are closer than `disp_hr_agree_bpm`
+(8 bpm), the better of their SQIs reaches `disp_hr_sqi_hi` (0.8) and the worse one `disp_hr_sqi_lo`
+(0.5). While they agree, and once the agreement has lasted longer than `disp_hr_on_s` (1 s):
+
+```
+hr_disp = (hr2 · hr2_sqi + hr3 · hr3_sqi) / (hr2_sqi + hr3_sqi)
+```
+
+Any sample without agreement is NaN. After a break longer than `disp_hr_off_s` (2 s) the agreement
+has to last longer than `disp_hr_on_s` again; after a shorter one it shows at once. HR1 takes no
+part. Why two resolvers and not one: HR3 publishes one third of the pulse rate in 4.5 to 19 % of
+its valid windows, depending on the subject (rationale §22.1), and asking HR2 to agree discards
+them.
+
+`CommTask` stated the two times as turns of its 1 s loop: 2 good turns in a row to show, 3 bad
+ones to ask for the 2 again. Two turns in a row see an agreement of more than 1 s, three a break
+of more than 2 s; hence "longer than", not "at least". A consumer that reads once a second gets
+`CommTask`'s result turn by turn when the resolvers change between its turns (`test_disp`, 600
+turns). On the 19 stored sessions (HR2 and HR3 replayed from `OT_LED1`, the rule evaluated at the
+20 phases a 1 s loop can have: 252 126 turns) the outcome is the same in 99.85 % of the turns; the
+library shows where `CommTask` would not in 0.04 % and the reverse in 0.12 %, and where both show
+the value is identical. The differences are agreements that begin or end between two turns, which
+a 1 s loop does not see. Both show a pulse rate in 55 % of the time with the probe applied.
+
+**`spo2_disp`** is `spo2` and **`pi_disp`** is `pi`, as they are.
+
+**States** (§2.1.2). With the probe not applied: `DISP_NO_PROBE`, and everything starts again.
+With a value: `DISP_CURRENT`. Without one: `DISP_ACQUIRING` while nothing has been shown since the
+probe was applied and no more than `disp_acquiring_s` (15 s) have passed since then;
+`DISP_INADEQUATE` otherwise. `DISP_HELD` is never produced.
+
+All the times count samples at the AFE rate and are derived from it, as every time of the library.
+
+**Key constants** (compile-time in v0.124; none was ever measured against a reference):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `disp_hr_agree_bpm` | 8 bpm | HR2 and HR3 agree when closer than this |
+| `disp_hr_sqi_hi` | 0.8 | the better of the two SQIs must reach this |
+| `disp_hr_sqi_lo` | 0.5 | and the worse one this |
+| `disp_hr_on_s` | 1 s | the agreement must last longer than this before `hr_disp` shows |
+| `disp_hr_off_s` | 2 s | a break longer than this asks for that wait again |
+| `disp_acquiring_s` | 15 s | after the probe is applied, how long "no value yet" is `DISP_ACQUIRING`. Provisional: above HR3's 10.24 s buffer plus the 1 s of agreement |
+
 ---
 
 ## 6. Hardware interface (SPI)
@@ -3458,6 +3544,20 @@ See §5.8 for algorithm description.
 | Ambient EMA τ | `setHgacEmaAmbientTauS()` | 2.0 s | 0.0–30.0 | ALED-phase estimator for the AMBIENT_HIGH alarm; sustained (avoids flicker); warmup = 3·τ |
 | Settling time (computed, not `$SET`-tunable) | `_compute_switched_rc_settling_samples()` (private) | ~16 ms @ 500 Hz (datasheet §7.7 t5: ≥3 ms/phase) | — | Arms `RSQM_DIAG_SWITCHED_RC_SETTLING` after an RF change; EMA warmup does not start until this elapses (sequential, §5.8.4) |
 
+### 10.10 Display quantity parameters (v0.124)
+
+See §5.10. Compile-time constants, no setter yet: they come from IncuNest's display rule and none
+has a measured provenance. Step 2 revisits them on the captures with a reference and gives the
+ones that need it a setter.
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `disp_hr_agree_bpm` | 8 bpm | larger: `hr_disp` shows more often, and lets through more of a resolver's wrong rates |
+| `disp_hr_sqi_hi` / `disp_hr_sqi_lo` | 0.8 / 0.5 | lower: `hr_disp` shows more often, on poorer signal |
+| `disp_hr_on_s` | 1 s | longer: `hr_disp` appears later and flickers less |
+| `disp_hr_off_s` | 2 s | longer: more breaks count as short, and `hr_disp` returns at once after them |
+| `disp_acquiring_s` | 15 s | when "no value yet" turns from acquiring into signal inadequate |
+
 ---
 
 ## 11. AFE4490 chip register configuration
@@ -3694,6 +3794,23 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.124  | 2026-11-17    | **Display quantities, step 1 (§2.1.2, §5.10; Alex 2026-11-17):** `spo2_disp`,  |
+|         |               | `hr_disp`, `pi_disp`, what a monitor shows, each with a state                |
+|         |               | (`AFE4490DispState`: no probe, acquiring, current, held, inadequate) and no |
+|         |               | SQI. A display quantity is finite (show it) or NaN (show dashes). Step 1   |
+|         |               | moves the computation into the library without changing what a display     |
+|         |               | showed: `hr_disp` is the fusion of HR2 and HR3 that lived in IncuNest's     |
+|         |               | `CommTask` (agreement within 8 bpm, SQI 0.8 / 0.5, SQI-weighted mean, shown |
+|         |               | once the agreement has lasted longer than 1 s), `spo2_disp` and `pi_disp`   |
+|         |               | are `spo2` and `pi`, and nothing is held (`DISP_HELD` reserved). On the 19  |
+|         |               | stored sessions, against `CommTask`'s rule at every phase of its 1 s loop  |
+|         |               | (252 126 turns): same outcome in 99.85 %, identical value wherever both    |
+|         |               | show. **Breaking (API):** nothing removed; `AFE4490Data` gains six fields  |
+|         |               | at its end. **Breaking (data contract):** nothing changes in the existing  |
+|         |               | fields. `examples/basic` rewritten on the display quantities (it had not   |
+|         |               | compiled since v0.90 and tested validity with the SQI). Tests: new suite   |
+|         |               | `test_disp` (11 cases, one an optional capture replay); 13 suites.         |
+|         |               | Rationale §26.                                                              |
 | v0.123  | 2026-11-17    | **The data contract of the clinical output quantities, written down (§2.1.1;   |
 |         |               | Alex 2026-11-17).** Four rules for `spo2`, `pi`, `hr1`, `hr2`, `hr3`: a     |
 |         |               | quantity is finite or NaN and NaN is the only "no value"; a published one  |

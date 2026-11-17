@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.123 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.124 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -25,8 +25,30 @@ namespace {
     inline AFE4490Data blank_data() {
         AFE4490Data d{};
         d.spo2 = NAN; d.pi = NAN; d.hr1 = NAN; d.hr2 = NAN; d.hr3 = NAN;
+        d.spo2_disp = NAN; d.hr_disp = NAN; d.pi_disp = NAN;   // states: DISP_NO_PROBE (0)
         return d;
     }
+
+    // ── Display quantities (v0.124, spec §5.10, rationale §26) ──
+    // hr_disp: the rule IncuNest's CommTask applied once a second, moved here unchanged and
+    // stated in time. None of the five numbers was ever measured against a reference (they are
+    // in the spec's list of parameters without provenance); step 2 revisits them on the ECG
+    // captures.
+    constexpr float    disp_hr_agree_bpm     = 8.0f;   // HR2 and HR3 agree when closer than this
+    constexpr float    disp_hr_sqi_hi        = 0.8f;   // the better of the two SQIs must reach this
+    constexpr float    disp_hr_sqi_lo        = 0.5f;   // and the worse one this
+    // CommTask asked for 2 good turns of its 1 s loop in a row before showing, and for 3 bad ones
+    // before asking for the 2 again. Two turns in a row see an agreement that has lasted MORE
+    // than 1 s, three see a break of MORE than 2 s: hr_disp shows once the agreement has lasted
+    // longer than disp_hr_on_s, and asks for that again after a break longer than disp_hr_off_s.
+    // Strictly longer: with "at least", one good second or two bad ones would count, and they
+    // did not in CommTask (test_disp, the turn-by-turn test).
+    constexpr float    disp_hr_on_s          = 1.0f;
+    constexpr float    disp_hr_off_s         = 2.0f;
+    // After the probe is applied, how long "no value yet" reads as acquiring rather than as an
+    // inadequate signal. Provisional: above HR3's 10.24 s buffer plus the 1 s of agreement, the
+    // slowest start among the three. To be measured on the captures (step 2).
+    constexpr float    disp_acquiring_s      = 15.0f;
 
     // ── SpO2 ──────────────────────────────────────────────────────────────────
     // EMA mean τ (DC baseline): 2.0 s, f_c ≈ 0.08 Hz.
@@ -2027,6 +2049,13 @@ void INCUNEST_AFE4490::_recalc_rate_params() {
     _hr1_refractory_samples      = hr1_refractory_s * _hr1_decim.rate_hz;
     _rsqm_probe_state_min_samples = (uint32_t)roundf(rsqm_probe_state_min_s * sample_rate_hz);
     if (_rsqm_probe_state_min_samples < 1) _rsqm_probe_state_min_samples = 1;
+    // Display quantities (v0.124): their times count samples at the AFE rate.
+    _disp_hr_on_samples     = (uint32_t)roundf(disp_hr_on_s * sample_rate_hz);
+    _disp_hr_off_samples    = (uint32_t)roundf(disp_hr_off_s * sample_rate_hz);
+    _disp_acquiring_samples = (uint32_t)roundf(disp_acquiring_s * sample_rate_hz);
+    if (_disp_hr_on_samples < 1)     _disp_hr_on_samples = 1;
+    if (_disp_hr_off_samples < 1)    _disp_hr_off_samples = 1;
+    if (_disp_acquiring_samples < 1) _disp_acquiring_samples = 1;
     // SpO2 EMAs: only the mean (DC) is read since v0.102, so var_tau = mean_tau (as HGAC's).
     _spo2_ch_ir_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_mean_tau_s, sample_rate_hz);
     _spo2_ch_red_ema.init(_spo2_ema_mean_tau_s, _spo2_ema_mean_tau_s, sample_rate_hz);
@@ -2412,6 +2441,10 @@ void INCUNEST_AFE4490::_process_sample(int32_t led1, int32_t led2, int32_t aled1
 #if INCUNEST_TIMING_STATS
     _ts_hr3.update(esp_timer_get_time() - _t_hr3);
 #endif
+
+    // Display quantities (v0.124): last, from what the algorithms above (and Task B/C, under the
+    // same mutex) have left in _current_data.
+    _disp_update(_rsqm_probe_state);
 
     // Update debug snapshot — always called under _state_mutex (held by _task_body() caller).
     _debug_data.analog                = as;
@@ -3115,6 +3148,66 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
         _current_data.hr1     = NAN;
         _current_data.hr1_sqi = 0.0f;
     }
+}
+
+// ── Display quantities (v0.124, spec §5.10, rationale §26) ────────────────────
+// What a monitor shows: spo2_disp, hr_disp, pi_disp, each with the state that says why. Step 1
+// moves the computation here without changing what a display showed: hr_disp is the fusion of
+// HR2 and HR3 that lived in IncuNest's CommTask, spo2_disp and pi_disp are spo2 and pi as they
+// are, and nothing is held (one bad second shows dashes, as before; DISP_HELD is reserved).
+
+// One display quantity from its source: the value and CURRENT when the source is finite; NaN
+// otherwise, as ACQUIRING while nothing has been shown since the probe was applied and the
+// acquiring time has not run out, as INADEQUATE after that.
+void INCUNEST_AFE4490::_disp_publish(float value, float& out, AFE4490DispState& state,
+                                     bool& had_value) const {
+    if (isfinite(value)) {
+        out       = value;
+        state     = AFE4490DispState::DISP_CURRENT;
+        had_value = true;
+        return;
+    }
+    out   = NAN;
+    state = (!had_value && _disp.applied_samples <= _disp_acquiring_samples)
+                ? AFE4490DispState::DISP_ACQUIRING
+                : AFE4490DispState::DISP_INADEQUATE;
+}
+
+void INCUNEST_AFE4490::_disp_update(ProbeState probe_state) {
+    AFE4490Data& d = _current_data;
+    if (probe_state != ProbeState::PROBE_APPLIED) {
+        // Reset every sample while not applied (idempotent), as the algorithms do.
+        _disp = DispRun();
+        d.spo2_disp = NAN; d.hr_disp = NAN; d.pi_disp = NAN;
+        d.spo2_disp_state = AFE4490DispState::DISP_NO_PROBE;
+        d.hr_disp_state   = AFE4490DispState::DISP_NO_PROBE;
+        d.pi_disp_state   = AFE4490DispState::DISP_NO_PROBE;
+        return;
+    }
+    if (_disp.applied_samples < UINT32_MAX) _disp.applied_samples++;
+
+    // hr_disp: HR2 and HR3 in agreement. The comparisons are written so that NaN fails them
+    // (hrN is NaN when its resolver has no value).
+    const float h2 = d.hr2, h3 = d.hr3, s2 = d.hr2_sqi, s3 = d.hr3_sqi;
+    const bool agree = (h2 > 0.0f) && (h3 > 0.0f) && (fabsf(h2 - h3) < disp_hr_agree_bpm)
+                    && (fmaxf(s2, s3) >= disp_hr_sqi_hi) && (fminf(s2, s3) >= disp_hr_sqi_lo);
+    if (agree) {
+        _disp.disagree_samples = 0;
+        if (_disp.agree_samples < UINT32_MAX) _disp.agree_samples++;
+        if (_disp.agree_samples > _disp_hr_on_samples) _disp.hr_showing = true;
+    } else {
+        _disp.agree_samples = 0;
+        if (_disp.disagree_samples < UINT32_MAX) _disp.disagree_samples++;
+        if (_disp.disagree_samples > _disp_hr_off_samples) _disp.hr_showing = false;
+    }
+    float hr = NAN;
+    if (_disp.hr_showing && agree) {
+        hr = (h2 * s2 + h3 * s3) / (s2 + s3);                       // between h2 and h3
+        if (!(hr >= _hr_min_bpm && hr <= _hr_max_bpm)) hr = NAN;    // rule 2, by construction
+    }
+    _disp_publish(hr,     d.hr_disp,   d.hr_disp_state,   _disp.had_hr);
+    _disp_publish(d.spo2, d.spo2_disp, d.spo2_disp_state, _disp.had_spo2);
+    _disp_publish(d.pi,   d.pi_disp,   d.pi_disp_state,   _disp.had_pi);
 }
 
 // ── HR2 algorithm — split into fast path + async computation ──────────────────

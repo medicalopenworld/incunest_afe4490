@@ -1,11 +1,11 @@
 // incunest_afe4490 — Basic Example
-// Library version: v0.123 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.124 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 //
 // Minimal example showing how to integrate incunest_afe4490 into an application.
-// Reads PPG, SpO2 and heart rate from an AFE4490 chip and prints results
-// over Serial at 115200 baud.
+// Reads the PPG and the display quantities (SpO2, pulse rate, PI) from an AFE4490 chip and
+// prints them over Serial at 115200 baud.
 //
 // Hardware assumed:
 //   - ESP32-S3
@@ -41,6 +41,23 @@
 // ── Library instance ──────────────────────────────────────────────────────────
 INCUNEST_AFE4490 afe;
 
+// ── One display quantity ──────────────────────────────────────────────────────
+// A display quantity is a finite number or NaN: nothing else needs checking to decide what to
+// show. The state (no_probe, acquiring, current, held, inadequate) says how to accompany it.
+static void printDisp(const char* name, float value, int decimals, const char* unit,
+                      AFE4490DispState state) {
+    Serial.print(name);
+    if (isfinite(value)) {
+        Serial.print(value, decimals);
+        Serial.print(unit);
+    } else {
+        Serial.print("--");
+    }
+    Serial.print(" [");
+    Serial.print(afeDispStateToStr(state));
+    Serial.print("]");
+}
+
 // ── Reader task ───────────────────────────────────────────────────────────────
 // Polls the library queue and prints results over Serial.
 // The library runs its own internal task (ISR → SPI read → signal processing →
@@ -55,53 +72,19 @@ void ReaderTask(void *pvParameters) {
             Serial.print("PPG: ");
             Serial.print(data.ppg_disp, 6);
 
-            // SpO2 — valid flag indicates enough samples have been accumulated
-            Serial.print("  SpO2: ");
-            if (data.spo2_sqi > 0.0f) {
-                Serial.print(data.spo2, 1);
-                Serial.print(" %");
-            } else {
-                Serial.print("--");
-            }
-            Serial.print(" (SQI: "); Serial.print(data.spo2_sqi, 2); Serial.print(")");
+            // What a monitor shows: the display quantities (v0.124, spec §2.1.2). Each one is a
+            // finite number (show it) or NaN (show dashes); its state says why.
+            printDisp("  SpO2: ", data.spo2_disp, 1, " %",   data.spo2_disp_state);
+            printDisp("  HR: ",   data.hr_disp,   0, " bpm", data.hr_disp_state);
+            printDisp("  PI: ",   data.pi_disp,   2, " %",   data.pi_disp_state);
 
-            // HR via peak detection
-            Serial.print("  HR1: ");
-            if (data.hr1_sqi > 0.0f) {
-                Serial.print(data.hr1, 0);
-                Serial.print(" bpm");
-            } else {
-                Serial.print("--");
-            }
-            Serial.print(" (SQI: "); Serial.print(data.hr1_sqi, 2); Serial.print(")");
-
-            // HR via autocorrelation (more robust, higher latency)
-            Serial.print("  HR2: ");
-            if (data.hr2_sqi > 0.0f) {
-                Serial.print(data.hr2, 0);
-                Serial.print(" bpm");
-            } else {
-                Serial.print("--");
-            }
-            Serial.print(" (SQI: "); Serial.print(data.hr2_sqi, 2); Serial.print(")");
-
-            // HR via FFT + Harmonic Product Spectrum (most robust, highest latency)
-            Serial.print("  HR3: ");
-            if (data.hr3_sqi > 0.0f) {
-                Serial.print(data.hr3, 0);
-                Serial.print(" bpm");
-            } else {
-                Serial.print("--");
-            }
-            Serial.print(" (SQI: "); Serial.print(data.hr3_sqi, 2); Serial.print(")");
+            // The clinical output quantities behind them (spo2, pi, hr1, hr2, hr3; spec §2.1.1)
+            // are still in the sample, for tests, validation and telemetry. They are finite or
+            // NaN too: test them with isfinite(), never with their SQI.
 
             // Probe state and raw signal quality
             Serial.print("  Probe: ");
-            switch (data.probe_state) {
-                case ProbeState::PROBE_APPLIED:        Serial.print("APPLIED");       break;
-                case ProbeState::PROBE_NOT_APPLIED:    Serial.print("NOT_APPLIED");   break;
-                case ProbeState::PROBE_DISCONNECTED:   Serial.print("DISCONNECTED");  break;
-            }
+            Serial.print(data.probe_state == ProbeState::PROBE_APPLIED ? "APPLIED" : "NOT APPLIED");
             Serial.print("  RSQI: "); Serial.print(data.rsqi);
             if (data.diag_code)  { Serial.print("  DiagCode: 0x"); Serial.print(data.diag_code, HEX); }
 

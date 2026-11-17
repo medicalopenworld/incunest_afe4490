@@ -2948,6 +2948,93 @@ eight rules; the four that went were either duplicates or not the library's to p
   Nothing designed.
 - No pulse-beat output exists (a pulse tone needs one). Noted, nothing planned.
 
+## 26. Display quantities: what a monitor shows is computed here, in two steps (2026-11-17)
+
+**The question.** §25 left it open who holds a value on a screen and who fuses the pulse rates.
+IncuNest did both in its display task: it fused HR2 and HR3 and decided when to show dashes,
+with thresholds that depend on how HR2 and HR3 are computed and that nobody revisited when the
+library changed them (HR2 went from 8 to 6 s in v0.121). The rule had never been run against a
+capture, and what the nurse saw was recorded nowhere: the telemetry sent HR1, HR2 and HR3.
+
+**The decision (Alex, 2026-11-17).** The library publishes three display quantities,
+`spo2_disp`, `hr_disp` and `pi_disp`, after `ppg_disp`: what a monitor shows, with a contract of
+their own (spec §2.1.2). The clinical output quantities stay as they are, for tests, validation,
+calibration and telemetry. Reasons:
+
+- *Nothing the consumer knows and the library does not conditions the decision.* Alex looked for
+  a datum or parameter owned by IncuNest that would condition holding a value, and found none.
+  What conditions it is each algorithm's cadence and latency, the measurements against a
+  reference, and the external limits (below).
+- *It can be measured here.* The library validates each change on captures with a reference; a
+  rule in a consumer's display task never went through that.
+- *One rule for every consumer.* PulseNest had no fusion at all.
+
+**The contract, and what was left out.**
+
+- *Finite or NaN, as the clinical quantities:* finite is shown, NaN is dashes.
+- *A state per quantity instead of an SQI and a reason* (Alex: no SQI until a consumer needs
+  one). Five cases: no probe, acquiring, current, held, signal inadequate. A product needs no
+  more to decide how to accompany the number; the eight reasons of `spo2_hold_reason` stay a
+  diagnostic (§25). "No probe" repeats `probe_state` on purpose, so that the state alone
+  explains the dashes.
+- *A held value expires*, and never later than the 10 s of WHO/UNICEF 2019 (Alex).
+- *Not rounded.* Integers and decimals are the screen's.
+- *No new way of reading* (Alex). §25 proposed a state read (the latest sample, whole, with its
+  age). Not needed: a consumer reads `getData()` at 50 Hz, the queue then delivers one sample in
+  ten about 20 ms late, which does not matter for a number shown once a second.
+
+**Two steps.** Step 1 (v0.124) moves the computation without changing what a display showed, so
+that it can be checked against what was there; step 2 improves it, each change with its
+measurement. Mixing them would leave no way of telling a port error from an improvement.
+
+**Step 1 as built.** `hr_disp` is CommTask's rule, `spo2_disp` and `pi_disp` are `spo2` and
+`pi`, nothing is held (spec §5.10).
+
+- *The two times.* CommTask counted turns of a 1 s loop: 2 good ones in a row to show, 3 bad
+  ones to ask for the 2 again. In the library they are times, counted in samples: longer than
+  1 s and longer than 2 s. The first version used "at least" and failed the turn-by-turn test:
+  one good second, or two bad ones, counted, and in CommTask they did not.
+- *Measured* (`test_disp`'s optional replay on the 19 stored sessions: HR2 and HR3 from
+  `OT_LED1` by this version, CommTask's rule run on the same resolver outputs at the 20 phases
+  its loop can have against the samples; 252 126 turns): the same outcome in 99.845 % of the
+  turns; the library shows where CommTask would not in 0.036 % and the reverse in 0.119 %;
+  where both show (139 518 turns) the value is identical. The differences are agreements that
+  begin or end between two turns of a 1 s loop.
+- *Also measured there:* a pulse rate is shown in 55 % of the time with the probe applied,
+  by either rule, and in the moving subject (SUBJ10) in 0 to 11 % of each session. That is the
+  availability step 2 starts from. Not compared against the ECG in this step.
+- *The six constants have no provenance.* 8 bpm, 0.8, 0.5 and the two times come from
+  IncuNest's code, never measured; `disp_acquiring_s` (15 s) is provisional, set above HR3's
+  10.24 s buffer plus the wait. They are compile-time, with no setter, until step 2 measures them.
+
+**Prior art on a value that is held or not current** (search of 2026-11-17; the ISO from its
+PDF, the makers from PulseNest `docs/masimo_nellcor_spo2_prior_art.md` and
+`algorithm_prior_art_index.md`; *unconfirmed* = not checked in the maker's manual):
+
+- ISO 80601-2-61:2026, 201.12.4.101: an indication is required when SpO2 or pulse rate has not
+  been updated for more than 30 s; 201.12.4.102: a signal-inadequacy indicator, which not
+  posting the value satisfies. It does not prescribe the form of the mark.
+- WHO/UNICEF 2019, Table A1.11: valid-data update in 10 s or less.
+- Nellcor: holds the last value; pulse search at 20 s, a low-priority alert at 25 s, the value
+  removed at 40 s (SpO2) or 50 s (pulse rate). *Unconfirmed* whether the number changes look.
+- Masimo: keeps showing a low-confidence value, dimmed and with a message; blanks it in pulse
+  search. *Unconfirmed.*
+- Philips: does not hold; replaces the number with `-?-` and a message.
+- Nihon Kohden: holds 30 s, then dashes. GE: dashes.
+- A lesson already recorded in PulseNest: never hold a value without a time limit and a visible
+  mark; held values hid bradycardias in NICU studies.
+
+**Open (step 2).**
+
+- *The hold.* Not harmless: holding the last SpO2 for 5 or 10 s hurt in SUBJ10, because the
+  last value was already contaminated (§17). Which value is held (perhaps one from some seconds
+  before, not the last) and for how long is to be measured.
+- *`disp_acquiring_s`* from the captures: the time by which the first value normally comes.
+- *The rule of `hr_disp`* on the ECG captures: the thresholds, HR1's part, and what the pulse
+  gate of SpO2 reads once a combined rate exists (§22.1).
+- *`pi_disp` and `spo2_disp`* after a PI by spectral comb, if it is built (§25).
+- *Alarms:* on which quantities they act.
+
 ## Appendix — source rationale (to distill at consolidation)
 
 This preliminary doc is distilled from working notes (Claude local memory), primarily: the HGAC design

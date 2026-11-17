@@ -1,12 +1,12 @@
 #pragma once
 
 // incunest_afe4490 — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.123 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.124 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
 
-#define INCUNEST_AFE4490_VERSION "0.123"
+#define INCUNEST_AFE4490_VERSION "0.124"
 
 // Platform. Only <Arduino.h> and <SPI.h> ever differed between the two embedded targets, and they
 // are gone from this header: pins and bus go through incunest_afe4490_hal.h (one implementation
@@ -151,6 +151,28 @@ inline const char* afeSpO2HoldReasonToStr(SpO2HoldReason r) {
     return "?";
 }
 
+// ── Display quantities: why a monitor shows what it shows (v0.124, spec §2.1.2) ──────────
+// One state per display quantity (spo2_disp, hr_disp, pi_disp). The quantity is finite in
+// DISP_CURRENT and DISP_HELD and NaN in the other three; the state never changes which number
+// is shown, it says how to accompany it. Enumerators prefixed, as SpO2HoldReason's.
+enum class AFE4490DispState : uint8_t {
+    DISP_NO_PROBE   = 0,   // the probe is not applied: nothing to show
+    DISP_ACQUIRING  = 1,   // the probe was applied a moment ago and there is no value yet
+    DISP_CURRENT    = 2,   // the value is of now
+    DISP_HELD       = 3,   // no new value: the last good one is shown. Reserved: not produced yet
+    DISP_INADEQUATE = 4    // the probe is applied and there is no value: signal inadequate
+};
+inline const char* afeDispStateToStr(AFE4490DispState s) {
+    switch (s) {
+        case AFE4490DispState::DISP_NO_PROBE:   return "no_probe";
+        case AFE4490DispState::DISP_ACQUIRING:  return "acquiring";
+        case AFE4490DispState::DISP_CURRENT:    return "current";
+        case AFE4490DispState::DISP_HELD:       return "held";
+        case AFE4490DispState::DISP_INADEQUATE: return "inadequate";
+    }
+    return "?";
+}
+
 // ── SpO2: R method and R curve identifiers (v0.98) ──────────────────────────
 // An R method id names HOW this library computes R from the signals. It changes if and only if,
 // for the same input, R comes out as a different number (method, τ of DC or AC, DC split, input
@@ -232,6 +254,17 @@ constexpr uint32_t RSQM_DIAG_SWITCHED_RC_SETTLING  = 0x00008000UL;  // bit 15 �
 //    samples carry the latest result.
 //    hr1, the mean of the last 5 beat-to-beat intervals, expires: it is NaN once the interval
 //    in progress is longer than the longest one of the range, 60 / hr_min_bpm (v0.123).
+//
+// Data contract of the display quantities: spo2_disp, hr_disp, pi_disp (v0.124, spec §2.1.2,
+// rationale §26). They are what a monitor shows; the clinical output quantities above stay
+// for tests, validation, calibration and telemetry.
+// 1. A display quantity is either a finite number or NaN. Finite: show it. NaN: show dashes.
+//    Nothing else needs checking to decide what to show.
+// 2. A finite display quantity is always inside its declared range (the same ranges).
+// 3. Each one comes with a state (AFE4490DispState) that says why: no probe, acquiring,
+//    current, held, signal inadequate. No SQI.
+// 4. A held value expires: never shown for longer than its limit. (Nothing is held yet: the
+//    hold is the next step, and v0.124 never produces DISP_HELD.)
 struct AFE4490Data {
     // Field order mirrors the $M1/$P1 serial frame: raw signals first, then processed outputs
     // Raw ADC outputs (6 signals from AFE4490)
@@ -275,6 +308,14 @@ struct AFE4490Data {
     uint8_t    rsqi;         // Raw Signal Quality Index: 0=invalid, 1=valid
     uint32_t   diag_code;    // DiagCode bitmask: RSQM_DIAG_AMB_SAT | RSQM_DIAG_SWITCHED_RC_SETTLING | ...
     ProbeState probe_state;  // enum ProbeState (0-4); isProbeAbsent() answers "no patient"
+    // Display quantities (v0.124, spec §5.10): what a monitor shows. NaN = show dashes.
+    float            spo2_disp;        // SpO2 to show [%]: spo2 as it is (v0.124)
+    float            hr_disp;          // pulse rate to show [bpm]: HR2 and HR3 in agreement,
+                                       // their SQI-weighted mean (the rule IncuNest's display used)
+    float            pi_disp;          // PI to show [%]: pi as it is (v0.124)
+    AFE4490DispState spo2_disp_state;  // why spo2_disp is what it is
+    AFE4490DispState hr_disp_state;    // why hr_disp is what it is
+    AFE4490DispState pi_disp_state;    // why pi_disp is what it is
 };
 
 // ── Enumerations ──────────────────────────────────────────────────────────────
@@ -1482,6 +1523,10 @@ private:
     // mirrored here from SpO2 v0.41): while != PROBE_APPLIED, internal state resets every
     // sample (idempotent, no stored "previous state") and hr/hr_sqi become NaN/0.
     void _hr1_update(float ir, ProbeState probe_state);
+    // Display quantities (v0.124, spec §5.10): reads the clinical output quantities of
+    // _current_data and writes its *_disp fields. Runs every sample, after the algorithms.
+    void _disp_update(ProbeState probe_state);
+    void _disp_publish(float value, float& out, AFE4490DispState& state, bool& had_value) const;
     void _hr1_reset_state();          // filters, decimation phase, detector and RR buffer (v0.122)
     // HR2/HR3 synchronous entry points (unit-test only; production uses split paths below)
     void _hr2_update_for_test(float ir, ProbeState probe_state);
@@ -1653,6 +1698,22 @@ private:
     // Derived from hr1_refractory_s — see there for why 0.185 s and why a FIXED value cannot
     // protect bradycardia.
     float             _hr1_refractory_samples;
+
+    // ── Display quantities state (v0.124, spec §5.10) ──
+    // Everything is counted in samples at the AFE rate and reset while the probe is not applied.
+    struct DispRun {
+        uint32_t applied_samples  = 0;      // since the probe was applied (saturates)
+        uint32_t agree_samples    = 0;      // HR2 and HR3 in agreement, without a break
+        uint32_t disagree_samples = 0;      // HR2 and HR3 not in agreement, without a break
+        bool     hr_showing       = false;  // the agreement has lasted long enough to show hr_disp
+        bool     had_spo2         = false;  // a value has been shown since the probe was applied
+        bool     had_hr           = false;
+        bool     had_pi           = false;
+    };
+    DispRun           _disp;
+    uint32_t          _disp_hr_on_samples    = 1;   // derived from disp_hr_on_s
+    uint32_t          _disp_hr_off_samples   = 1;   // derived from disp_hr_off_s
+    uint32_t          _disp_acquiring_samples = 1;  // derived from disp_acquiring_s
 
     // ── SpO2 state ──
     // DC and AC² power for IR and RED channels, tracked via EmaChannel. EXPERIMENT (OT-domain
@@ -2021,6 +2082,22 @@ public:
     void  test_set_hr3(float hr_bpm, float sqi) {
         _current_data.hr3 = (sqi > 0.0f) ? hr_bpm : NAN; _current_data.hr3_sqi = sqi;
     }
+    // Display quantities (v0.124): the inputs _disp_update() reads, set as the algorithms would
+    // have left them, and the update itself, one call per sample.
+    void  test_set_hr2(float hr_bpm, float sqi) {
+        _current_data.hr2 = (sqi > 0.0f) ? hr_bpm : NAN; _current_data.hr2_sqi = sqi;
+    }
+    void  test_set_spo2(float spo2)          { _current_data.spo2 = spo2; }
+    void  test_feed_disp(ProbeState probe_state) { _disp_update(probe_state); }
+    float test_spo2_disp() const             { return _current_data.spo2_disp; }
+    float test_hr_disp()   const             { return _current_data.hr_disp; }
+    float test_pi_disp()   const             { return _current_data.pi_disp; }
+    AFE4490DispState test_spo2_disp_state() const { return _current_data.spo2_disp_state; }
+    AFE4490DispState test_hr_disp_state()   const { return _current_data.hr_disp_state; }
+    AFE4490DispState test_pi_disp_state()   const { return _current_data.pi_disp_state; }
+    uint32_t test_disp_hr_on_samples()     const  { return _disp_hr_on_samples; }
+    uint32_t test_disp_hr_off_samples()    const  { return _disp_hr_off_samples; }
+    uint32_t test_disp_acquiring_samples() const  { return _disp_acquiring_samples; }
     float test_spo2_ir_ema_mean()  const { return _spo2_ch_ir_ema.mean; }
     float test_spo2_ir_ema_var()   const { return _spo2_ch_ir_ema.var; }
     float test_spo2_red_ema_mean() const { return _spo2_ch_red_ema.mean; }
