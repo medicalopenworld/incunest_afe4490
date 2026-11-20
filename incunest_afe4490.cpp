@@ -1,5 +1,5 @@
 // incunest_afe4490.cpp — Medical Open World AFE4490 driver + PPG algorithms (HR, SpO2, PI)
-// Library version: v0.124 — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
+// Library version: v0.124b — ESP32-S3, Arduino-ESP32 or ESP-IDF, FreeRTOS
 // Spec: incunest_afe4490_spec.md
 // Chip datasheet: https://www.ti.com/lit/ds/symlink/afe4490.pdf
 // Author: Medical Open World — http://medicalopenworld.org — <contact@medicalopenworld.org>
@@ -2730,16 +2730,16 @@ void INCUNEST_AFE4490::_spo2_update(float ot_ir, float ot_red, ProbeState probe_
     // the median is built to ignore (measured: sustained events read Q = box/median of only
     // 1.1–1.35, rationale §23). The SQI ramp below keeps reading the published PI. Both are NaN
     // together while the window fills.
-    const bool pi_ok = !isnan(_pi_box) && _pi_box <= _spo2_pi_max;
+    const bool pi_ok = !std::isnan(_pi_box) && _pi_box <= _spo2_pi_max;
     const bool range_ok = spo2 >= _spo2_min && spo2 <= _spo2_max + spo2_clamp_margin;
     // Pulse gate (v0.110): HR3's harmonic test is the artefact criterion the red-IR correlation
     // lacks (SUBJ10: r 0.96 with −16 points). _current_data.hr3 is NaN while HR3 has no valid
     // result — committed by Task C under _state_mutex, which Task A holds here. The window above
     // keeps running meanwhile, so when HR3 returns SpO2 is published in that same block: HR3
     // valid means 10.24 s of pulse, which covers this 6 s window.
-    // Validity is hr3_sqi > 0 (Task C writes hr3 = sqi > 0 ? result : NAN), not !isnan(hr3): before
+    // Validity is hr3_sqi > 0 (Task C writes hr3 = sqi > 0 ? result : NAN), not !std::isnan(hr3): before
     // Task C's first commit after boot _current_data.hr3 is 0.0, which would open the gate.
-    const bool pulse_ok = !_spo2_pulse_gate_enable || (_current_data.hr3_sqi > 0.0f && !isnan(_current_data.hr3));
+    const bool pulse_ok = !_spo2_pulse_gate_enable || (_current_data.hr3_sqi > 0.0f && !std::isnan(_current_data.hr3));
     _current_data.spo2_hold_reason =
         !reg_corr_ok ? SpO2HoldReason::HOLD_REG_CORR :
         !pi_ok       ? SpO2HoldReason::HOLD_PI :
@@ -2812,7 +2812,7 @@ void INCUNEST_AFE4490::_ppgdisp_update(float x, ProbeState probe_state) {
     float u = (x - centre) / semi;
     if (_ppgdisp_mode == AFE4490PPGDispMode::NORM_PI) {
         const float pi = _current_data.pi;
-        const bool same = (pi == _ppgdisp_pi_last) || (isnan(pi) && isnan(_ppgdisp_pi_last));
+        const bool same = (pi == _ppgdisp_pi_last) || (std::isnan(pi) && std::isnan(_ppgdisp_pi_last));
         if (!same) { _ppgdisp_amp = _ppgdisp_amp_of_pi(pi); _ppgdisp_pi_last = pi; }
         u *= _ppgdisp_amp;
     }
@@ -2824,7 +2824,7 @@ void INCUNEST_AFE4490::_ppgdisp_update(float x, ProbeState probe_state) {
 // parameters since v0.117, no longer the SQI ramp's (two questions, rationale §21.4). NaN (window
 // filling) → the floor: unknown perfusion is shown at the minimum, not hidden.
 float INCUNEST_AFE4490::_ppgdisp_amp_of_pi(float pi) const {
-    if (isnan(pi) || pi <= 0.0f || _ppgdisp_norm_pi_hi <= _ppgdisp_norm_pi_lo) return ppgdisp_norm_pi_floor;
+    if (std::isnan(pi) || pi <= 0.0f || _ppgdisp_norm_pi_hi <= _ppgdisp_norm_pi_lo) return ppgdisp_norm_pi_floor;
     const float a = ppgdisp_norm_pi_floor
                   + (1.0f - ppgdisp_norm_pi_floor) * logf(pi / _ppgdisp_norm_pi_lo) / logf(_ppgdisp_norm_pi_hi / _ppgdisp_norm_pi_lo);
     return clampf(a, ppgdisp_norm_pi_floor, 1.0f);
@@ -3161,7 +3161,7 @@ void INCUNEST_AFE4490::_hr1_update(float ir, ProbeState probe_state) {
 // acquiring time has not run out, as INADEQUATE after that.
 void INCUNEST_AFE4490::_disp_publish(float value, float& out, AFE4490DispState& state,
                                      bool& had_value) const {
-    if (isfinite(value)) {
+    if (std::isfinite(value)) {  // std::, not the C macro: <cmath> under gnu++26 (ESP-IDF v6) has no global isfinite
         out       = value;
         state     = AFE4490DispState::DISP_CURRENT;
         had_value = true;

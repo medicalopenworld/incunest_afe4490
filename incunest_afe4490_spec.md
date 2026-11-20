@@ -1,4 +1,4 @@
-# incunest_afe4490 — Specification v0.124
+# incunest_afe4490 — Specification v0.124b
 
 Medical Open World open-source (MIT) library for the AFE4490 chip (PPG/SpO2/PI pulse oximeter front
 end). ESP32-S3 with FreeRTOS; the same sources build on Arduino-ESP32, on ESP-IDF (CMake component)
@@ -3794,6 +3794,12 @@ specification; `scripts/check_version.py` requires it.
 
 | Version | Date          | Description                                                                 |
 |---------|---------------|-----------------------------------------------------------------------------|
+| v0.124b | 2026-11-20    | **Build fix, no change in behaviour or API.** v0.124 did not compile under  |
+|         |               | ESP-IDF v6 (gnu++26): `_disp_publish()` called `isfinite` unqualified, and  |
+|         |               | with `<cmath>` there is no global one (Arduino-ESP32 compiled it through    |
+|         |               | `math.h`). Now `std::isfinite`, and the five unqualified `isnan` calls,     |
+|         |               | which compiled by the same accident, are `std::isnan`. Found building       |
+|         |               | PulseNest for the IncuNest V19 board.                                       |
 | v0.124  | 2026-11-17    | **Display quantities, step 1 (§2.1.2, §5.10; Alex 2026-11-17):** `spo2_disp`,  |
 |         |               | `hr_disp`, `pi_disp`, what a monitor shows, each with a state                |
 |         |               | (`AFE4490DispState`: no probe, acquiring, current, held, inadequate) and no |
